@@ -57,6 +57,33 @@ target_compile_features(vfs_packages_test PRIVATE cxx_std_20)
 
 add_test(NAME vfs_packages_test COMMAND vfs_packages_test)
 
+# M6: executable loader suite.
+add_executable(loader_test loader_test.cpp)
+target_link_libraries(loader_test PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(loader_test PRIVATE cxx_std_20)
+
+add_test(NAME loader_test COMMAND loader_test)
+
+# M6: deterministic loader fuzz harnesses (seeded mutation).
+add_executable(loader_fuzz_test loader_fuzz.cpp)
+target_link_libraries(loader_fuzz_test PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(loader_fuzz_test PRIVATE cxx_std_20)
+
+add_test(NAME loader_fuzz_test COMMAND loader_fuzz_test)
+
+# M6: loader phase benchmarks (not a ctest; run manually).
+add_executable(loader_bench loader_bench.cpp)
+target_link_libraries(loader_bench PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder)
+target_compile_features(loader_bench PRIVATE cxx_std_20)
+
 # M5: deterministic fuzz harnesses (no libFuzzer; seeded mutation fuzz).
 add_executable(vfs_fuzz_test vfs_fuzz.cpp)
 target_link_libraries(vfs_fuzz_test PRIVATE
