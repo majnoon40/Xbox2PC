@@ -21,8 +21,11 @@
 // claim of Xbox kernel equivalence is made (the Xbox OS's own primitives
 // are undocumented — see docs for confirmed-vs-inferred framing).
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "xbox2pc/handle_manager.hpp"
 #include "xbox2pc/platform.hpp"
@@ -130,6 +133,110 @@ private:
 
     RtMutex& partner_;
     std::unique_ptr<pal::PalCondvar> pal_;
+};
+
+// ── M4: cancellation-aware waiting + waiter tracking ──────────────────────
+
+// IWaker: the interface a thread registers so request_stop() can break its
+// current wait. Implemented by RtCancellableWait below.
+class IWaker {
+public:
+    virtual ~IWaker() = default;
+    virtual void wake_from_cancel() = 0;
+};
+
+// A cancellation-aware timed wait helper. The CALLING thread parks itself
+// on a private event; the wait ends when (whichever comes first):
+//   - the deadline passes           -> Timeout
+//   - the condition functor sets    -> Ok (the functor polls a shared
+//                                       predicate state each tick)
+//   - request_stop() wakes it       -> ThreadTerminated (cancellation)
+// Design: poll-based (tick granularity 2 ms) instead of hooked into every
+// primitive — a deliberate simplicity/robustness trade documented in
+// docs/thread-execution.md; no lost-wakeup class exists because the
+// predicate is re-checked after every wake.
+class RtCancellableWait : public IWaker {
+public:
+    RtCancellableWait() = default;
+    ~RtCancellableWait() override = default;
+
+    // Waits until `predicate()` returns true, the deadline, or
+    // cancellation. Returns Ok / Timeout / ThreadTerminated.
+    template <typename Pred>
+    Result<void> wait_until(Pred predicate, pal::MonotonicNs timeout_ns) {
+        if (predicate()) return Result<void>::ok_result();
+        const pal::MonotonicNs deadline =
+            timeout_ns < 0 ? INT64_MAX : pal::now_ns() + timeout_ns;
+        for (;;) {
+            if (predicate()) return Result<void>::ok_result();
+            if (cancelled_.load(std::memory_order_acquire)) {
+                return Result<void>(RuntimeErrc::ThreadTerminated,
+                                     "wait cancelled by request_stop");
+            }
+            if (pal::now_ns() >= deadline) {
+                return Result<void>(RuntimeErrc::Timeout, "wait deadline");
+            }
+            // Park with small ticks: 2 ms bounds both latency and CPU.
+            (void)wake_ev_->wait_ns(2'000'000);
+        }
+    }
+
+    void wake_from_cancel() override {
+        cancelled_.store(true, std::memory_order_release);
+        wake_ev_->set();
+    }
+
+private:
+    std::unique_ptr<pal::PalEvent> wake_ev_{pal::make_event(false, /*auto_reset=*/true)};
+    std::atomic<bool> cancelled_{false};
+};
+
+// ── M4: waiter tracking + wait-any / wait-all ─────────────────────────────
+//
+// WaitSet composes existing primitives WITHOUT changing their semantics:
+//   wait_any : first successful primitive wait wins (index returned);
+//              all are non-blocking candidates (poll + timed re-poll), so
+//              no deadlock ordering issues can arise.
+//   wait_all : every primitive must become ready within the deadline
+//              (progressive acquisition with back-off; the set is NOT a
+//              transaction — later candidates may release earlier ones'
+//              effects only through their own semantics).
+// Implemented over the primitives' OWN try/timed interfaces so the
+// M3-tested semantics stay authoritative (documented deviation: polling
+// granularity 2 ms).
+class WaitSet {
+public:
+    // A candidate: what to wait on. Exactly one wait method is non-null.
+    struct Candidate {
+        RtEvent* event = nullptr;          // waits is_set
+        RtSemaphore* semaphore = nullptr;  // waits acquire
+        RtMutex* mutex = nullptr;          // waits lock
+    };
+
+    WaitSet() = default;
+
+    void add_event(RtEvent& e) { candidates_.push_back(Candidate{&e, nullptr, nullptr}); }
+    void add_semaphore(RtSemaphore& s) { candidates_.push_back(Candidate{nullptr, &s, nullptr}); }
+    void add_mutex(RtMutex& m) { candidates_.push_back(Candidate{nullptr, nullptr, &m}); }
+    std::size_t size() const { return candidates_.size(); }
+
+    // Wait-any: returns the index of the FIRST candidate that becomes
+    // ready within the deadline. Timeout when none.
+    Result<std::size_t> wait_any(pal::MonotonicNs timeout_ns);
+    // Wait-all: every candidate ready within the deadline (order: the
+    // registration order). Acquired mutexes stay LOCKED on success (the
+    // caller owns unlocking); on failure/timeout everything is released.
+    Result<void> wait_all(pal::MonotonicNs timeout_ns);
+
+private:
+    // Probe ONE candidate without blocking. Returns Ok when it is (or
+    // became) ready — side effects applied (semaphore acquired, mutex
+    // locked, event consumed for auto-reset).
+    Result<void> probe_ready(const Candidate& c);
+    // Undo a probe (rollback on wait_all failure).
+    void undo_probe(const Candidate& c);
+
+    std::vector<Candidate> candidates_;
 };
 
 }  // namespace xbox2pc::rt

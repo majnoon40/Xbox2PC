@@ -2,6 +2,8 @@
 
 #include "xbox2pc/sync_objects.hpp"
 
+#include <chrono>
+#include <thread>
 #include <utility>
 
 namespace xbox2pc::rt {
@@ -121,6 +123,100 @@ void RtCondvar::on_destroy() {
     // Broadcast so every waiter wakes, rechecks (object destroying) and
     // returns instead of blocking on a torn-down condvar.
     pal_->notify_all();
+}
+
+}  // namespace xbox2pc::rt
+
+// ── M4: wake_waker (thread_model.cpp extern) ─────────────────────────────
+
+namespace xbox2pc::rt {
+void wake_waker(void* waker);
+}  // namespace xbox2pc::rt
+
+namespace xbox2pc::rt {
+
+void wake_waker(void* waker) {
+    if (auto* w = static_cast<IWaker*>(waker)) {
+        w->wake_from_cancel();
+    }
+}
+
+// ── M4: WaitSet ──────────────────────────────────────────────────────────
+
+Result<void> WaitSet::probe_ready(const Candidate& c) {
+    if (c.event != nullptr) {
+        // Non-blocking readiness probe: a set event waits successfully
+        // with timeout 0 (auto-reset events consume here — the caller got
+        // the signal).
+        return c.event->wait_ns(0);
+    }
+    if (c.semaphore != nullptr) {
+        return c.semaphore->try_acquire();
+    }
+    if (c.mutex != nullptr) {
+        return c.mutex->try_lock();
+    }
+    return Result<void>(RuntimeErrc::InvalidArgument, "empty candidate");
+}
+
+void WaitSet::undo_probe(const Candidate& c) {
+    if (c.mutex != nullptr) {
+        (void)c.mutex->unlock();
+    } else if (c.semaphore != nullptr) {
+        (void)c.semaphore->release();
+    }
+    // Events: an auto-reset consume cannot be "un-signaled"; wait_all
+    // failure after an event consume is documented (the signal was
+    // delivered; the overall wait failed). Rare and non-destructive.
+}
+
+Result<std::size_t> WaitSet::wait_any(pal::MonotonicNs timeout_ns) {
+    if (candidates_.empty()) {
+        return Result<std::size_t>(RuntimeErrc::InvalidArgument, "empty set");
+    }
+    const pal::MonotonicNs deadline =
+        timeout_ns < 0 ? INT64_MAX : pal::now_ns() + timeout_ns;
+    for (;;) {
+        for (std::size_t i = 0; i < candidates_.size(); ++i) {
+            if (probe_ready(candidates_[i]).ok()) {
+                return Result<std::size_t>(i);
+            }
+        }
+        if (pal::now_ns() >= deadline) {
+            return Result<std::size_t>(RuntimeErrc::Timeout, "no candidate ready");
+        }
+        // 2 ms poll tick (documented granularity).
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+Result<void> WaitSet::wait_all(pal::MonotonicNs timeout_ns) {
+    if (candidates_.empty()) {
+        return Result<void>(RuntimeErrc::InvalidArgument, "empty set");
+    }
+    const pal::MonotonicNs deadline =
+        timeout_ns < 0 ? INT64_MAX : pal::now_ns() + timeout_ns;
+    std::vector<bool> acquired(candidates_.size(), false);
+    std::size_t acquired_count = 0;
+    for (;;) {
+        for (std::size_t i = 0; i < candidates_.size(); ++i) {
+            if (!acquired[i] && probe_ready(candidates_[i]).ok()) {
+                acquired[i] = true;
+                ++acquired_count;
+            }
+        }
+        if (acquired_count == candidates_.size()) {
+            return Result<void>::ok_result();  // caller owns the effects
+        }
+        if (pal::now_ns() >= deadline) {
+            // Roll back everything acquired so far.
+            for (std::size_t i = 0; i < candidates_.size(); ++i) {
+                if (acquired[i]) undo_probe(candidates_[i]);
+            }
+            return Result<void>(RuntimeErrc::Timeout, "wait_all deadline");
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
 }
 
 }  // namespace xbox2pc::rt

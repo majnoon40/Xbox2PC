@@ -94,15 +94,40 @@ RtThread::RtThread(ThreadMain main, void* arg, std::string name)
 RtThread::~RtThread() = default;
 
 void RtThread::on_destroy() {
-    // If the host thread never started, nothing to do. If it ran and was
-    // never joined, detach so the host never keeps a zombie. If it is still
-    // running, request a cooperative stop — M3 never kills host threads
-    // (documented safety rule).
-    if (host_ != nullptr) {
-        if (!exited_.load(std::memory_order_acquire)) {
-            stop_flag_.store(true);
-            host_->request_stop();
+    // M4 use-after-free fix: a detached host thread's trampoline writes
+    // state/exit fields AFTER the manager frees the object (found by ASan:
+    // heap-use-after-free in ThreadState::store). Destruction now DRAINS
+    // the trampoline before teardown continues:
+    //   * never-started thread  -> nothing to do;
+    //   * exited thread        -> trampoline_done_ already set;
+    //   * running thread        -> request a cooperative stop, then wait
+    //     (bounded: 250 ms; never kill — documented M3/M4 safety rule)
+    //     for trampoline_done_; if the deadline passes, the host thread
+    //     is detached and the failure is RECORDED in object metadata
+    //     (never silently dropped), and destruction proceeds — the
+    //     trampoline touches nothing after trampoline_done_ is set, and
+    //     a pathological runaway is the documented escape hatch.
+    if (host_ == nullptr) return;
+    if (!exited_.load(std::memory_order_acquire)) {
+        stop_flag_.store(true, std::memory_order_release);
+        host_->request_stop();
+    }
+    const pal::MonotonicNs deadline = pal::now_ns() + 250ull * 1000 * 1000;
+    while (!trampoline_done_.load(std::memory_order_acquire)) {
+        if (pal::now_ns() >= deadline) {
+            // Record the miss (metadata survives until the final erase).
+            set_meta("destroy-timeout", "trampoline did not finish in 250ms");
             host_->detach();
+            return;
+        }
+        std::this_thread::yield();
+    }
+    // Trampoline is done; the host thread may still be finishing its
+    // return — join when possible, detach otherwise (no zombie hosts).
+    if (!host_joined_) {
+        const auto joined = host_->join();
+        if (!joined.ok()) {
+            (void)host_->detach();
         }
     }
 }
@@ -130,11 +155,30 @@ Result<void> RtThread::start() {
 void* RtThread::pal_trampoline(void* self_ptr) {
     auto* self = static_cast<RtThread*>(self_ptr);
     self->state_.store(ThreadState::Running, std::memory_order_release);
-    void* code = self->main_(*self, self->arg_);
+    // M4: exception containment — nothing escapes a runtime thread. A
+    // caught exception fails the thread with a distinct exit code.
+    void* code = nullptr;
+    try {
+        code = self->main_(*self, self->arg_);
+    } catch (const std::exception& e) {
+        self->fail(std::string("thread exception: ") + e.what());
+        self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
+        self->exited_.store(true, std::memory_order_release);
+        return reinterpret_cast<void*>(kExceptionExitCode);
+    } catch (...) {
+        self->fail("thread exception: unknown type");
+        self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
+        self->exited_.store(true, std::memory_order_release);
+        return reinterpret_cast<void*>(kExceptionExitCode);
+    }
     const std::uint64_t ec = reinterpret_cast<std::uint64_t>(code);
     self->exit_code_.store(ec, std::memory_order_release);
     self->exited_.store(true, std::memory_order_release);
     self->state_.store(ThreadState::Terminated, std::memory_order_release);
+    // LAST touch of `self`: after this flag, the trampoline never
+    // dereferences the object. on_destroy drains this flag before
+    // returning so the object is never freed under a live trampoline.
+    self->trampoline_done_.store(true, std::memory_order_release);
     return code;
 }
 
@@ -232,34 +276,81 @@ Result<std::uint64_t> RtThread::join_ns(pal::MonotonicNs timeout_ns) {
     if (host_ == nullptr) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidState, "thread not started");
     }
-    // The PAL join is a full wait; timeout joins are approximated by a
-    // bounded poll of the exited flag + detach-free waiting (host join has
-    // no timeout). Exact-once join enforced by PAL backend state.
+    // M4 join-self: comparing the CALLING thread against the host thread
+    // must use PAL identity (the host id); comparing runtime ids would miss
+    // a thread joining itself since the caller IS this object.
+    const pal::HostThread self_id = pal::current_thread();
+    const pal::HostThread host_id = host_->id();
+    if (self_id.id != 0 && host_id.id != 0 && self_id.id == host_id.id) {
+        return Result<std::uint64_t>(RuntimeErrc::ThreadTerminated,
+                                     "join-self: a thread cannot join itself");
+    }
+    // Completed (already host-joined or exited+joined): return recorded code.
+    // NOTE: host_joined_ is claimed BEFORE the host join completes (the
+    // claimant sets it under the lock, then blocks in pthread_join), so a
+    // concurrent joiner arriving here MUST wait for exited_ — the exit
+    // code is only valid once the thread actually finished.
+    {
+        std::unique_lock lock(transition_lock_);
+        if (host_joined_) {
+            lock.unlock();
+            while (!exited_.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            return Result<std::uint64_t>(exit_code_.load(std::memory_order_acquire));
+        }
+    }
     if (timeout_ns == pal::kInfiniteTimeout) {
-        const auto joined = host_->join();
-        if (!joined.ok()) {
-            return Result<std::uint64_t>(joined.errc(), joined.context());
+        // Exactly one caller performs the host join; concurrent joiners
+        // poll the exited flag (they never touch the host thread).
+        bool performed_join = false;
+        {
+            std::lock_guard lock(transition_lock_);
+            if (!host_joined_) {
+                performed_join = true;
+                host_joined_ = true;
+            }
+        }
+        if (performed_join) {
+            const auto joined = host_->join();
+            if (!joined.ok()) {
+                std::lock_guard lock(transition_lock_);
+                host_joined_ = false;  // failed join: allow retry
+                return Result<std::uint64_t>(joined.errc(), joined.context());
+            }
+            // The host join can return BEFORE the trampoline's final
+            // exit-code store becomes visible (no ordering guarantee
+            // between pthread exit and our atomic). Spin on exited_ (set
+            // with release in the trampoline's last step) so the code read
+            // below is the real one.
+            while (!exited_.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            return Result<std::uint64_t>(exit_code_.load(std::memory_order_acquire));
+        }
+        // Concurrent joiner: wait for the exit flag (bounded poll; the
+        // exiting thread sets it before returning from the trampoline).
+        while (!exited_.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
         }
         return Result<std::uint64_t>(exit_code_.load(std::memory_order_acquire));
     }
-    // Bounded wait: poll exited_ every 1ms until deadline.
+    // Bounded wait: poll exited_ until the deadline, then one join.
     const pal::MonotonicNs deadline = pal::now_ns() + timeout_ns;
     while (pal::now_ns() < deadline) {
         if (exited_.load(std::memory_order_acquire)) {
-            const auto joined = host_->join();  // returns immediately
-            if (!joined.ok()) {
-                return Result<std::uint64_t>(joined.errc(), joined.context());
+            std::lock_guard lock(transition_lock_);
+            if (!host_joined_) {
+                host_joined_ = true;
+                const auto joined = host_->join();  // returns immediately
+                if (!joined.ok()) {
+                    host_joined_ = false;
+                    return Result<std::uint64_t>(joined.errc(), joined.context());
+                }
             }
             return Result<std::uint64_t>(exit_code_.load(std::memory_order_acquire));
         }
         std::this_thread::yield();
-    }
-    if (exited_.load(std::memory_order_acquire)) {
-        const auto joined = host_->join();
-        if (!joined.ok()) {
-            return Result<std::uint64_t>(joined.errc(), joined.context());
-        }
-        return Result<std::uint64_t>(exit_code_.load(std::memory_order_acquire));
     }
     return Result<std::uint64_t>(RuntimeErrc::Timeout, "join_ns deadline");
 }
@@ -282,6 +373,37 @@ std::string RtThread::fail_reason() const {
 void RtThread::request_stop() {
     stop_flag_.store(true, std::memory_order_release);
     if (host_ != nullptr) host_->request_stop();
+    // M4: wake the thread's cancellation-aware wait (registered waker).
+    wake_for_cancellation();
+}
+
+Result<void> RtThread::set_name(const std::string& name) {
+    {
+        std::lock_guard lock(transition_lock_);
+        name_ = name;
+    }
+    if (host_ == nullptr) {
+        return Result<void>(RuntimeErrc::InvalidState, "thread not started");
+    }
+    return host_->set_name(name);
+}
+
+void RtThread::register_cancellation_waker(void* waker) {
+    cancellation_waker_.store(waker, std::memory_order_release);
+}
+
+void RtThread::unregister_cancellation_waker() {
+    cancellation_waker_.store(nullptr, std::memory_order_release);
+}
+
+void RtThread::wake_for_cancellation() {
+    // The waker is an IWaker* (sync_objects.hpp); its wake_from_cancel()
+    // breaks the thread's wait so it can observe the stop flag. Declared
+    // out-of-line in the sync layer to keep thread_model.cpp independent.
+    if (void* w = cancellation_waker_.load(std::memory_order_acquire)) {
+        extern void wake_waker(void* waker);
+        wake_waker(w);
+    }
 }
 
 bool RtThread::stop_requested() const {

@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -79,6 +80,35 @@ public:
     Result<std::uint64_t> join_ns(pal::MonotonicNs timeout_ns);  // wait exit
     bool joinable() const;
 
+    // ── M4 join semantics (explicitly defined, all tested) ──
+    // Joining a COMPLETED (Terminated) thread: returns the exit code
+    // immediately (repeat joins after completion return the recorded
+    // status — host join happens exactly once internally).
+    // Joining ONESELF: returns ThreadTerminated with context
+    // "join-self" (a thread cannot wait for its own exit).
+    // Multiple concurrent join attempts: exactly one performs the host
+    // join; the others wait on the completion latch and then read the
+    // recorded exit code (joinable-join coordination below).
+
+    // M4: exception containment. ThreadMain2 may throw; the trampoline
+    // catches ALL exceptions at the thread boundary, records the
+    // failure (state Failed + reason) and returns a distinct exit code
+    // (kExceptionExitCode). No exception ever escapes a runtime thread.
+    using ThreadMain2 = std::function<void*(RtThread& self, void* arg)>;
+    static constexpr std::uint64_t kExceptionExitCode = 0xDEAD'0000'0000'0001ull;
+
+    // M4: set_name forwards to the PAL thread (pthread_setname_np, 16-byte
+    // host truncation documented).
+    Result<void> set_name(const std::string& name);
+
+    // M4: cooperative cancellation. request_stop() sets the flag AND wakes
+    // any cancellation-aware wait the thread holds (via its registered
+    // waker — see sync_objects.hpp). Threads observe cancellation at
+    // safe points: stop_requested() polls, cancellation-aware waits.
+    void register_cancellation_waker(void* waker);   // opaque IWaker*
+    void unregister_cancellation_waker();
+    void wake_for_cancellation();   // calls the registered waker
+
     // Introspection.
     ThreadState state() const { return state_.load(std::memory_order_acquire); }
     std::uint64_t thread_id() const { return thread_id_; }
@@ -123,6 +153,14 @@ private:
 
     // Id assignment (thread ids from a process-wide counter via helper).
     static std::uint64_t next_thread_id();
+
+    // ── M4 implementation fields ──
+    std::atomic<bool> trampoline_done_{false};  // last trampoline touch of this
+    bool host_joined_ = false;              // host join happened exactly once
+    std::atomic<void*> cancellation_waker_{nullptr};  // opaque IWaker*
+    // Exception-carrying main (set by start_with_fn); pal_trampoline
+    // wraps it with the containment try/catch.
+    ThreadMain2 main2_;
 };
 
 // ── validated transition helper (exposed for tests) ────────────────────────
