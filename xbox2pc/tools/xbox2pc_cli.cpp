@@ -24,8 +24,11 @@
 #include "xbox2pc/diagnostics.hpp"
 #include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
+#include "xbox2pc/memory_management.hpp"
+#include "xbox2pc/process_management.hpp"
 #include "xbox2pc/runtime_core.hpp"
 #include "xbox2pc/service_registry.hpp"
+#include "xbox2pc/thread_model.hpp"
 
 using xbox2pc::compat::CompatibilityDb;
 using xbox2pc::deps::DependencyReport;
@@ -64,6 +67,12 @@ void usage() {
                  "       xbox2pc runtime-info [--json <out>]\n"
                  "       xbox2pc runtime-objects [--json <out>]\n"
                  "       xbox2pc runtime-services [--json <out>]\n"
+                 "       xbox2pc memory-info [--json <out>]\n"
+                 "       xbox2pc memory-regions [--json <out>]\n"
+                 "       xbox2pc process-info [--json <out>]\n"
+                 "       xbox2pc thread-info [--json <out>]\n"
+                 "       xbox2pc handle-info [--json <out>]\n"
+                 "       xbox2pc resource-info [--json <out>]\n"
                  "       xbox2pc --version\n");
 }
 
@@ -533,6 +542,325 @@ Json runtime_services_json(const xbox2pc::rt::RuntimeCore& core) {
     return arr;
 }
 
+
+// ── M4: management diagnostics commands ──────────────────────────────────
+//
+// Every command boots a REAL runtime, creates a small deterministic
+// scenario (one process with region + thread via the ProcessManager) and
+// reports ACTUAL state; nothing is fabricated. The scenario is labeled.
+
+namespace {
+
+// Builds the demo scenario used by the M4 commands: one process, one
+// committed region, one finished worker thread (joined, so listings show
+// a Terminated thread), plus resource accounting through the manager.
+struct DemoRuntime {
+    xbox2pc::rt::RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm;
+    xbox2pc::rt::Handle process;
+    std::uint64_t region_va = 0;
+
+    DemoRuntime() : pm(core.objects()) {
+        if (!core.initialize().ok()) return;
+        auto p = pm.create_process("demo-m4.exe");
+        if (!p.ok()) return;
+        process = p.value();
+        xbox2pc::rt::ModuleDescriptor mod;
+        mod.module_name = "demo-m4.exe";
+        mod.is_valid_pe = true;
+        (void)pm.initialize_process(process, mod, xbox2pc::rt::RuntimeConfig{});
+        (void)pm.start_process(process);
+        auto r = pm.reserve_region(process, 2 * 4096, "demo-region");
+        if (r.ok()) {
+            region_va = r.value();
+            (void)pm.commit_region(process, r.value());
+        }
+        auto th = pm.spawn_thread(
+            process,
+            [](xbox2pc::rt::RtThread&, void*) -> void* { return nullptr; },
+            nullptr, "demo-worker");
+        if (th.ok()) {
+            // Join so the thread list shows a completed thread.
+            auto g = core.objects().lookup_handle(th.value());
+            if (g.ok() && g.value().get() != nullptr) {
+                if (auto* t = g.value().get()->as<xbox2pc::rt::RtThread>()) {
+                    (void)t->join_ns(xbox2pc::pal::kInfiniteTimeout);
+                }
+            }
+        }
+    }
+};
+
+Json stats_json(const xbox2pc::rt::ResourceStats& s) {
+    Json j = Json::object();
+    j.set("reserved_bytes", static_cast<std::uint64_t>(s.reserved_bytes));
+    j.set("committed_bytes", static_cast<std::uint64_t>(s.committed_bytes));
+    j.set("region_count", static_cast<std::uint64_t>(s.region_count));
+    j.set("thread_count", static_cast<std::uint64_t>(s.thread_count));
+    j.set("handle_count", static_cast<std::uint64_t>(s.handle_count));
+    j.set("object_count", static_cast<std::uint64_t>(s.object_count));
+    j.set("module_count", static_cast<std::uint64_t>(s.module_count));
+    j.set("process_count", static_cast<std::uint64_t>(s.process_count));
+    j.set("address_space_count", static_cast<std::uint64_t>(s.address_space_count));
+    return j;
+}
+
+}  // namespace
+
+int cmd_memory_info(const std::optional<std::string>& json_out);
+int cmd_memory_regions(const std::optional<std::string>& json_out);
+int cmd_process_info(const std::optional<std::string>& json_out);
+int cmd_thread_info(const std::optional<std::string>& json_out);
+int cmd_handle_info(const std::optional<std::string>& json_out);
+int cmd_resource_info(const std::optional<std::string>& json_out);
+
+int cmd_memory_info(const std::optional<std::string>& json_out) {
+    DemoRuntime demo;
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("tool", "xbox2pc");
+        j.set("version", "0.4.0");
+        j.set("host_page_size", static_cast<std::uint64_t>(xbox2pc::pal::host_page_size()));
+        j.set("wx_allowed_by_default", false);
+        j.set("global", stats_json(demo.pm.global_stats()));
+        const std::string out = j.serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    const auto g = demo.pm.global_stats();
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc memory info (live runtime, demo scenario)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("host_page_size:     %llu\n",
+                static_cast<unsigned long long>(xbox2pc::pal::host_page_size()));
+    std::printf("wx_allowed_by_default: no (W^X discipline; opt-in per call)\n");
+    std::printf("reserved_bytes:    %llu\n", static_cast<unsigned long long>(g.reserved_bytes));
+    std::printf("committed_bytes:   %llu\n", static_cast<unsigned long long>(g.committed_bytes));
+    std::printf("region_count:      %u\n", g.region_count);
+    std::printf("process_count:     %u\n", g.process_count);
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_memory_regions(const std::optional<std::string>& json_out) {
+    DemoRuntime demo;
+    const auto regions = demo.pm.list_regions(demo.process);
+    if (json_out.has_value()) {
+        Json arr = Json::array();
+        for (const auto& r : regions) {
+            Json j = Json::object();
+            j.set("xbox_va", static_cast<std::uint64_t>(r.xbox_va));
+            j.set("size", static_cast<std::uint64_t>(r.size));
+            j.set("state", xbox2pc::rt::region_state_to_name(r.state));
+            j.set("protection", xbox2pc::rt::mem_protect_to_name(r.protection));
+            j.set("name", r.name);
+            arr.push_back(std::move(j));
+        }
+        const std::string out = arr.serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc memory regions (demo process, live)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("%zu region(s):\n", regions.size());
+    std::printf("  %-12s %-10s %-12s %-12s %s\n", "xbox_va", "size", "state",
+                "protection", "name");
+    for (const auto& r : regions) {
+        std::printf("  %-12llx %-10llu %-12s %-12s %s\n",
+                    static_cast<unsigned long long>(r.xbox_va),
+                    static_cast<unsigned long long>(r.size),
+                    xbox2pc::rt::region_state_to_name(r.state),
+                    xbox2pc::rt::mem_protect_to_name(r.protection),
+                    r.name.c_str());
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_process_info(const std::optional<std::string>& json_out) {
+    DemoRuntime demo;
+    const auto procs = demo.pm.list_processes();
+    if (json_out.has_value()) {
+        Json arr = Json::array();
+        for (const auto& p : procs) {
+            Json j = Json::object();
+            j.set("pid", static_cast<std::uint64_t>(p.pid));
+            j.set("image_name", p.image_name);
+            j.set("state", xbox2pc::rt::process_state_to_name(p.state));
+            j.set("exit_code", static_cast<std::uint64_t>(p.exit_code));
+            j.set("stats", stats_json(p.stats));
+            arr.push_back(std::move(j));
+        }
+        const std::string out = arr.serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc process info (live runtime, demo scenario)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("%zu process(es):\n", procs.size());
+    std::printf("  %-6s %-16s %-12s %-8s %-8s %s\n", "pid", "image", "state",
+                "threads", "regions", "committed");
+    for (const auto& p : procs) {
+        std::printf("  %-6llu %-16s %-12s %-8u %-8u %llu\n",
+                    static_cast<unsigned long long>(p.pid), p.image_name.c_str(),
+                    xbox2pc::rt::process_state_to_name(p.state),
+                    p.stats.thread_count, p.stats.region_count,
+                    static_cast<unsigned long long>(p.stats.committed_bytes));
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_thread_info(const std::optional<std::string>& json_out) {
+    DemoRuntime demo;
+    const auto objs = demo.core.objects().list_objects();
+    if (json_out.has_value()) {
+        Json arr = Json::array();
+        for (const auto& o : objs) {
+            if (o.type != xbox2pc::rt::TypeId::Thread) continue;
+            auto g = demo.core.objects().lookup_id(o.id);
+            if (!g.ok() || g.value().get() == nullptr) continue;
+            auto* t = g.value().get()->as<xbox2pc::rt::RtThread>();
+            if (t == nullptr) continue;
+            Json j = Json::object();
+            j.set("thread_id", static_cast<std::uint64_t>(t->thread_id()));
+            j.set("name", t->name());
+            j.set("state", xbox2pc::rt::thread_state_to_name(t->state()));
+            j.set("priority",
+                  xbox2pc::rt::thread_priority_to_name(t->priority()));
+            j.set("exit_code", static_cast<std::uint64_t>(t->exit_code()));
+            arr.push_back(std::move(j));
+        }
+        const std::string out = arr.serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc thread info (live runtime, demo scenario)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::size_t count = 0;
+    for (const auto& o : objs) {
+        if (o.type != xbox2pc::rt::TypeId::Thread) continue;
+        auto g = demo.core.objects().lookup_id(o.id);
+        if (!g.ok() || g.value().get() == nullptr) continue;
+        auto* t = g.value().get()->as<xbox2pc::rt::RtThread>();
+        if (t == nullptr) continue;
+        ++count;
+        std::printf("  thread %-6llu %-16s state=%-10s prio=%s exit=%llu\n",
+                    static_cast<unsigned long long>(t->thread_id()),
+                    t->name().c_str(),
+                    xbox2pc::rt::thread_state_to_name(t->state()),
+                    xbox2pc::rt::thread_priority_to_name(t->priority()),
+                    static_cast<unsigned long long>(t->exit_code()));
+    }
+    std::printf("%zu thread object(s)\n", count);
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_handle_info(const std::optional<std::string>& json_out) {
+    DemoRuntime demo;
+    const auto handles = demo.core.objects().table().list_handles();
+    if (json_out.has_value()) {
+        Json arr = Json::array();
+        for (const auto& h : handles) {
+            Json j = Json::object();
+            j.set("raw", [&] {
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "0x%llx",
+                              static_cast<unsigned long long>(h.handle.raw()));
+                return std::string(buf);
+            }());
+            j.set("table_id", static_cast<std::uint64_t>(h.handle.table_id()));
+            j.set("index", static_cast<std::uint64_t>(h.handle.index()));
+            j.set("object_id", static_cast<std::uint64_t>(h.object_id));
+            j.set("type", xbox2pc::rt::ObjectTypeRegistry::instance().name(
+                              static_cast<xbox2pc::rt::TypeId>(h.type)));
+            j.set("rights", xbox2pc::rt::access_rights_to_name(h.rights));
+            j.set("inheritable", h.inheritable);
+            arr.push_back(std::move(j));
+        }
+        const std::string out = arr.serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc handle info (runtime table, live)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("%zu live handle(s):\n", handles.size());
+    std::printf("  %-18s %-6s %-8s %-16s %-10s %s\n", "raw", "table", "obj-id",
+                "type", "rights", "inheritable");
+    for (const auto& h : handles) {
+        std::printf("  0x%-16llx %-6u %-8llu %-16s %-10s %s\n",
+                    static_cast<unsigned long long>(h.handle.raw()),
+                    static_cast<unsigned>(h.handle.table_id()),
+                    static_cast<unsigned long long>(h.object_id),
+                    xbox2pc::rt::ObjectTypeRegistry::instance().name(
+                        static_cast<xbox2pc::rt::TypeId>(h.type)).c_str(),
+                    xbox2pc::rt::access_rights_to_name(h.rights),
+                    h.inheritable ? "yes" : "no");
+    }
+    std::printf("\nNOTE: handles encode table id + slot + generation + type;\n");
+    std::printf("no raw addresses are ever exposed.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_resource_info(const std::optional<std::string>& json_out) {
+    DemoRuntime demo;
+    const auto g = demo.pm.global_stats();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("tool", "xbox2pc");
+        j.set("version", "0.4.0");
+        j.set("global", stats_json(g));
+        const std::string out = j.serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc resource accounting (live runtime)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("processes:         %u\n", g.process_count);
+    std::printf("address spaces:    %llu\n",
+                static_cast<unsigned long long>(g.address_space_count));
+    std::printf("reserved_bytes:    %llu\n", static_cast<unsigned long long>(g.reserved_bytes));
+    std::printf("committed_bytes:   %llu\n", static_cast<unsigned long long>(g.committed_bytes));
+    std::printf("regions:           %u\n", g.region_count);
+    std::printf("threads:           %u\n", g.thread_count);
+    std::printf("handles:           %u\n", g.handle_count);
+    std::printf("objects:           %u\n", g.object_count);
+    std::printf("module descriptors:%u\n", g.module_count);
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
 }  // namespace
 
 int cmd_runtime_info(const std::optional<std::string>& json_out) {
@@ -673,8 +1001,11 @@ int main(int argc, char** argv) {
     // analysis commands); they are valid at argc == 2.
     if (argc >= 2) {
         const std::string early_cmd = argv[1];
+        const bool m4_cmd = early_cmd == "memory-info" || early_cmd == "memory-regions" ||
+                            early_cmd == "process-info" || early_cmd == "thread-info" ||
+                            early_cmd == "handle-info" || early_cmd == "resource-info";
         if (early_cmd == "runtime-info" || early_cmd == "runtime-objects" ||
-            early_cmd == "runtime-services") {
+            early_cmd == "runtime-services" || m4_cmd) {
             std::optional<std::string> json_out;
             for (int i = 2; i < argc; ++i) {
                 if (std::strcmp(argv[i], "--json") == 0) {
@@ -693,7 +1024,13 @@ int main(int argc, char** argv) {
             }
             if (early_cmd == "runtime-info") return cmd_runtime_info(json_out);
             if (early_cmd == "runtime-objects") return cmd_runtime_objects(json_out);
-            return cmd_runtime_services(json_out);
+            if (early_cmd == "runtime-services") return cmd_runtime_services(json_out);
+            if (early_cmd == "memory-info") return cmd_memory_info(json_out);
+            if (early_cmd == "memory-regions") return cmd_memory_regions(json_out);
+            if (early_cmd == "process-info") return cmd_process_info(json_out);
+            if (early_cmd == "thread-info") return cmd_thread_info(json_out);
+            if (early_cmd == "handle-info") return cmd_handle_info(json_out);
+            return cmd_resource_info(json_out);  // resource-info
         }
     }
     if (argc < 3) {
