@@ -122,15 +122,54 @@ target_link_libraries(xbox2pc_rt_procman PUBLIC
     xbox2pc_rt_pal)
 target_compile_features(xbox2pc_rt_procman PUBLIC cxx_std_20)
 
+# ── M5: filesystem & packages layer ─────────────────────────────────────────
+#
+# rt_vfs sits above rt_handles/rt_pal (file objects + PAL confinement);
+# rt_vfs_backends extends it with the host-dir and memory backends;
+# rt_package is standalone parser safety over raw buffers (deps: error only);
+# rt_package_vfs (package mounting + discovery) above vfs + M1/M2 parsers;
+# rt_vfs_process wires namespaces to the M4 process manager.
+
+add_library(xbox2pc_rt_vfs STATIC vfs.cpp)
+target_include_directories(xbox2pc_rt_vfs PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_vfs PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_vfs PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_vfs_backends STATIC vfs_backends.cpp)
+target_include_directories(xbox2pc_rt_vfs_backends PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_vfs_backends PUBLIC xbox2pc_rt_vfs xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_vfs_backends PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_package STATIC packages.cpp)
+target_include_directories(xbox2pc_rt_package PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_package PUBLIC xbox2pc_rt_error)
+target_compile_features(xbox2pc_rt_package PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_package_vfs STATIC package_vfs.cpp)
+target_include_directories(xbox2pc_rt_package_vfs PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_package_vfs PUBLIC
+    xbox2pc_rt_vfs xbox2pc_rt_package xbox2pc_pe_parser xbox2pc_dep_analyzer
+    xbox2pc_diagnostics)
+target_compile_features(xbox2pc_rt_package_vfs PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_vfs_process STATIC vfs_process.cpp)
+target_include_directories(xbox2pc_rt_vfs_process PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_vfs_process PUBLIC
+    xbox2pc_rt_vfs_backends xbox2pc_rt_procman xbox2pc_rt_memory
+    xbox2pc_rt_process xbox2pc_rt_thread xbox2pc_rt_handles)
+target_compile_features(xbox2pc_rt_vfs_process PUBLIC cxx_std_20)
+
 add_library(xbox2pc_rt_core STATIC runtime_core.cpp)
 target_include_directories(xbox2pc_rt_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_core PUBLIC
     xbox2pc_rt_error xbox2pc_rt_pal xbox2pc_rt_object xbox2pc_rt_handles
     xbox2pc_rt_sync xbox2pc_rt_thread xbox2pc_rt_io xbox2pc_rt_process
-    xbox2pc_rt_services xbox2pc_rt_memory xbox2pc_rt_procman)
+    xbox2pc_rt_services xbox2pc_rt_memory xbox2pc_rt_procman
+    xbox2pc_rt_vfs xbox2pc_rt_vfs_backends xbox2pc_rt_package
+    xbox2pc_rt_package_vfs xbox2pc_rt_vfs_process)
 target_compile_features(xbox2pc_rt_core PUBLIC cxx_std_20)
 
-# Aggregate target: everything M1+M2+M3+M4 needs for tools and tests.
+# Aggregate target: everything M1..M5 needs for tools and tests.
 add_library(xbox2pc_core INTERFACE)
 target_link_libraries(xbox2pc_core INTERFACE
     xbox2pc_diagnostics
