@@ -1,11 +1,14 @@
 # M3 Architecture — Xbox Runtime Architecture & Object Model
 
-**Status: M1–M5 complete.** 180 tests pass (32 M1 + 45 M2 + 52 M3 +
-28 M4 + 20 M5 + 3 fuzz). Clean builds verified under the normal toolchain,
-AddressSanitizer+UBSan and ThreadSanitizer (0 findings). M4 additions:
-`rt_memory` (virtual memory model) and `rt_procman` (process manager +
-resource accounting) sit between the domain models and the facade; the
-handle layer gained table-scoped isolation + rights (M4 hardening).
+**Status: M1–M6 complete.** 222 tests pass (32 M1 + 45 M2 + 52 M3 +
+28 M4 + 20 M5 + 3 M5-fuzz + 34 M6 + 5 M6-fuzz). Clean builds verified
+under the normal toolchain, AddressSanitizer+UBSan and ThreadSanitizer
+(0 findings). M6 adds `rt_loader` (PE32+ executable loader: validation,
+mapping into M4 address spaces, DIR64 relocations, explicit import
+resolution, TLS metadata, execution preparation — **no execution**),
+see [pe-loader.md](pe-loader.md). Roadmap note: executable loading was
+delivered before GDK API compatibility (order adjusted explicitly; the
+GDK milestone remains planned).
 
 ## Scope and framing
 
@@ -170,18 +173,23 @@ Toolchain: C++20, CMake ≥ 3.20, g++ 14.2 (Linux host backend).
 | 5.8 | `xbox2pc_rt_package` | packages.cpp (M5: bounded reader, XPK synthetic format, classification) |
 | 5.8 | `xbox2pc_rt_package_vfs` | package_vfs.cpp (M5: package mounting + discovery) |
 | 5.9 | `xbox2pc_rt_vfs_process` | vfs_process.cpp (M5: process namespaces, M4 bridges) |
+| 5.95 | `xbox2pc_rt_loader` | image_loader.cpp (M6: PE validation, mapping, relocations, imports, TLS, lifecycle) |
 | 6 | `xbox2pc_rt_services` | service_registry.cpp |
 | 7 | `xbox2pc_rt_core` | runtime_core.cpp |
 
-Aggregate `xbox2pc_core` links M1+M2+M3 for tools/tests.
+Aggregate `xbox2pc_core` links M1..M6 for tools/tests.
 
 ## Explicit exclusions (M4+ territory)
 
-No Xbox kernel emulation, executable execution, CPU emulation, graphics
-or Direct3D translation, audio, GDK substitution, filesystem emulation,
-network stack, proprietary kernel internals, undocumented scheduling
-behavior, or full Xbox memory architecture. M3's PAL thread "suspension"
-is cooperative; M3 does not model Xbox scheduler preemption.
+No Xbox kernel emulation, CPU emulation, graphics or Direct3D
+translation, audio, GDK substitution, filesystem emulation, network
+stack, proprietary kernel internals, undocumented scheduling behavior,
+or full Xbox memory architecture. M3's PAL thread "suspension" is
+cooperative; M3 does not model Xbox scheduler preemption. M6 loads and
+maps executable images but does NOT execute them: entry-point execution,
+Xbox ABI compatibility, and game execution remain excluded (future
+milestones); GDK API compatibility is now the next planned milestone
+(roadmap order changed explicitly — executable loading first).
 
 ## Evidence base
 
@@ -208,6 +216,10 @@ Inferred (architectural choices for this project, no Xbox source):
 - service registry dependency ordering design.
 
 Per-topic docs:
+[pe-loader.md](pe-loader.md) ·
+[virtual-filesystem.md](virtual-filesystem.md) ·
+[package-formats.md](package-formats.md) ·
+[asset-discovery.md](asset-discovery.md) ·
 [runtime-object-model.md](runtime-object-model.md) ·
 [handle-management.md](handle-management.md) ·
 [process-thread-model.md](process-thread-model.md) ·
