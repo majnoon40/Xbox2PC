@@ -36,3 +36,13 @@ target_link_libraries(runtime_test PRIVATE
 target_compile_features(runtime_test PRIVATE cxx_std_20)
 
 add_test(NAME runtime_test COMMAND runtime_test)
+
+# M4: runtime management suite.
+add_executable(runtime_m4_test runtime_m4_test.cpp)
+target_link_libraries(runtime_m4_test PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(runtime_m4_test PRIVATE cxx_std_20)
+
+add_test(NAME runtime_m4_test COMMAND runtime_m4_test)
