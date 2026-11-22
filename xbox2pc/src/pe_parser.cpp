@@ -395,6 +395,7 @@ PeImage parse(const std::uint8_t* data, std::size_t size, std::string source_nam
     // ── Import / export tables (implemented in pe_tables.cpp) ──
     parse_imports(img, data, size, diags);
     parse_exports(img, data, size, diags);
+    parse_delay_imports(img, data, size, diags);
 
     return img;
 }

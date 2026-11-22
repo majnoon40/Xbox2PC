@@ -16,3 +16,13 @@ target_link_libraries(pe_parser_test PRIVATE
 target_compile_features(pe_parser_test PRIVATE cxx_std_20)
 
 add_test(NAME pe_parser_test COMMAND pe_parser_test)
+
+# M2: dependency intelligence suite.
+add_executable(deps_test deps_test.cpp)
+target_link_libraries(deps_test PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(deps_test PRIVATE cxx_std_20)
+
+add_test(NAME deps_test COMMAND deps_test)

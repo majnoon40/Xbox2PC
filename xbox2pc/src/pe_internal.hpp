@@ -16,4 +16,8 @@ void parse_imports(PeImage& img, const std::uint8_t* data, std::uint64_t size,
 void parse_exports(PeImage& img, const std::uint8_t* data, std::uint64_t size,
                   diag::Diagnostics& diags);
 
+// M2: delay-load import table parsing (ImgDelayDescr array, directory 13).
+void parse_delay_imports(PeImage& img, const std::uint8_t* data, std::uint64_t size,
+                         diag::Diagnostics& diags);
+
 }  // namespace xbox2pc::pe
