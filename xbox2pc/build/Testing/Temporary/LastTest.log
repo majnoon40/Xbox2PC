@@ -1,10 +1,10 @@
-Start testing: Nov 22 16:43 UTC
+Start testing: Nov 22 17:00 UTC
 ----------------------------------------------------------
-1/1 Testing: pe_parser_test
-1/1 Test: pe_parser_test
+1/2 Testing: pe_parser_test
+1/2 Test: pe_parser_test
 Command: "/home/z/my-project/xbox2pc/build/tests/pe_parser_test"
 Directory: /home/z/my-project/xbox2pc/build/tests
-"pe_parser_test" start time: Nov 22 16:43 UTC
+"pe_parser_test" start time: Nov 22 17:00 UTC
 Output:
 ----------------------------------------------------------
 [==========] Running 32 tests from 8 test suites.
@@ -104,8 +104,145 @@ Output:
 Test time =   0.00 sec
 ----------------------------------------------------------
 Test Passed.
-"pe_parser_test" end time: Nov 22 16:43 UTC
+"pe_parser_test" end time: Nov 22 17:00 UTC
 "pe_parser_test" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Nov 22 16:43 UTC
+2/2 Testing: deps_test
+2/2 Test: deps_test
+Command: "/home/z/my-project/xbox2pc/build/tests/deps_test"
+Directory: /home/z/my-project/xbox2pc/build/tests
+"deps_test" start time: Nov 22 17:00 UTC
+Output:
+----------------------------------------------------------
+[==========] Running 45 tests from 9 test suites.
+[----------] Global test environment set-up.
+[----------] 5 tests from DelayImportParseTest
+[ RUN      ] DelayImportParseTest.DecodesDelayTable
+[       OK ] DelayImportParseTest.DecodesDelayTable (0 ms)
+[ RUN      ] DelayImportParseTest.VaAddressedDescriptors
+[       OK ] DelayImportParseTest.VaAddressedDescriptors (0 ms)
+[ RUN      ] DelayImportParseTest.NoDelayDirectory
+[       OK ] DelayImportParseTest.NoDelayDirectory (0 ms)
+[ RUN      ] DelayImportParseTest.TruncatedDelayThunkArray
+[       OK ] DelayImportParseTest.TruncatedDelayThunkArray (0 ms)
+[ RUN      ] DelayImportParseTest.UnmappableDelayDirectory
+[       OK ] DelayImportParseTest.UnmappableDelayDirectory (0 ms)
+[----------] 5 tests from DelayImportParseTest (0 ms total)
+
+[----------] 2 tests from ImportMetadataTest
+[ RUN      ] ImportMetadataTest.FieldsPreserved
+[       OK ] ImportMetadataTest.FieldsPreserved (0 ms)
+[ RUN      ] ImportMetadataTest.BoundImportDetected
+[       OK ] ImportMetadataTest.BoundImportDetected (0 ms)
+[----------] 2 tests from ImportMetadataTest (0 ms total)
+
+[----------] 8 tests from DependencyAnalyzerTest
+[ RUN      ] DependencyAnalyzerTest.MultipleDllEnumeration
+[       OK ] DependencyAnalyzerTest.MultipleDllEnumeration (0 ms)
+[ RUN      ] DependencyAnalyzerTest.OrdinalAndByNameImports
+[       OK ] DependencyAnalyzerTest.OrdinalAndByNameImports (0 ms)
+[ RUN      ] DependencyAnalyzerTest.DuplicateDetection
+[       OK ] DependencyAnalyzerTest.DuplicateDetection (0 ms)
+[ RUN      ] DependencyAnalyzerTest.DelayImportsFlaggedAndMerged
+[       OK ] DependencyAnalyzerTest.DelayImportsFlaggedAndMerged (0 ms)
+[ RUN      ] DependencyAnalyzerTest.RegularPlusDelayMerge
+[       OK ] DependencyAnalyzerTest.RegularPlusDelayMerge (0 ms)
+[ RUN      ] DependencyAnalyzerTest.ForwardedExportsReported
+[       OK ] DependencyAnalyzerTest.ForwardedExportsReported (0 ms)
+[ RUN      ] DependencyAnalyzerTest.UnresolvedImportsCounted
+[       OK ] DependencyAnalyzerTest.UnresolvedImportsCounted (0 ms)
+[ RUN      ] DependencyAnalyzerTest.EmptyImage
+[       OK ] DependencyAnalyzerTest.EmptyImage (0 ms)
+[----------] 8 tests from DependencyAnalyzerTest (0 ms total)
+
+[----------] 6 tests from ApiRegistryTest
+[ RUN      ] ApiRegistryTest.XboxGraphicsStacks
+[       OK ] ApiRegistryTest.XboxGraphicsStacks (0 ms)
+[ RUN      ] ApiRegistryTest.XboxGameOsAndGdk
+[       OK ] ApiRegistryTest.XboxGameOsAndGdk (0 ms)
+[ RUN      ] ApiRegistryTest.Win32AndWinRt
+[       OK ] ApiRegistryTest.Win32AndWinRt (0 ms)
+[ RUN      ] ApiRegistryTest.UnknownStaysUnknown
+[       OK ] ApiRegistryTest.UnknownStaysUnknown (0 ms)
+[ RUN      ] ApiRegistryTest.FunctionLevelRequiresExactPair
+[       OK ] ApiRegistryTest.FunctionLevelRequiresExactPair (0 ms)
+[ RUN      ] ApiRegistryTest.EveryRecordCarriesEvidence
+[       OK ] ApiRegistryTest.EveryRecordCarriesEvidence (0 ms)
+[----------] 6 tests from ApiRegistryTest (0 ms total)
+
+[----------] 4 tests from CompatDbTest
+[ RUN      ] CompatDbTest.StatusesPerPlatform
+[       OK ] CompatDbTest.StatusesPerPlatform (0 ms)
+[ RUN      ] CompatDbTest.NoClaimsWithoutEvidence
+[       OK ] CompatDbTest.NoClaimsWithoutEvidence (0 ms)
+[ RUN      ] CompatDbTest.SignatureWhereKnown
+[       OK ] CompatDbTest.SignatureWhereKnown (0 ms)
+[ RUN      ] CompatDbTest.UnknownLibraryIsUnknown
+[       OK ] CompatDbTest.UnknownLibraryIsUnknown (0 ms)
+[----------] 4 tests from CompatDbTest (0 ms total)
+
+[----------] 10 tests from DepGraphTest
+[ RUN      ] DepGraphTest.SingleHopGraph
+[       OK ] DepGraphTest.SingleHopGraph (0 ms)
+[ RUN      ] DepGraphTest.FunctionRecordsOnEdges
+[       OK ] DepGraphTest.FunctionRecordsOnEdges (0 ms)
+[ RUN      ] DepGraphTest.CycleDetection
+[       OK ] DepGraphTest.CycleDetection (0 ms)
+[ RUN      ] DepGraphTest.SelfLoopCycle
+[       OK ] DepGraphTest.SelfLoopCycle (0 ms)
+[ RUN      ] DepGraphTest.NoCycleInDag
+[       OK ] DepGraphTest.NoCycleInDag (0 ms)
+[ RUN      ] DepGraphTest.MissingDependencies
+[       OK ] DepGraphTest.MissingDependencies (0 ms)
+[ RUN      ] DepGraphTest.TransitiveDependencies
+[       OK ] DepGraphTest.TransitiveDependencies (0 ms)
+[ RUN      ] DepGraphTest.CaseInsensitiveMerge
+[       OK ] DepGraphTest.CaseInsensitiveMerge (0 ms)
+[ RUN      ] DepGraphTest.TwoLevelGraphFromImages
+[       OK ] DepGraphTest.TwoLevelGraphFromImages (0 ms)
+[ RUN      ] DepGraphTest.CircularBetweenImages
+[       OK ] DepGraphTest.CircularBetweenImages (0 ms)
+[----------] 10 tests from DepGraphTest (0 ms total)
+
+[----------] 3 tests from MalformedDepsTest
+[ RUN      ] MalformedDepsTest.DelayImportNameRvaUnmappable
+[       OK ] MalformedDepsTest.DelayImportNameRvaUnmappable (0 ms)
+[ RUN      ] MalformedDepsTest.DelayRunawayDescriptors
+[       OK ] MalformedDepsTest.DelayRunawayDescriptors (0 ms)
+[ RUN      ] MalformedDepsTest.AnalyzerSurvivesMalformedTables
+[       OK ] MalformedDepsTest.AnalyzerSurvivesMalformedTables (0 ms)
+[----------] 3 tests from MalformedDepsTest (0 ms total)
+
+[----------] 5 tests from JsonWriterTest
+[ RUN      ] JsonWriterTest.EscapesControlChars
+[       OK ] JsonWriterTest.EscapesControlChars (0 ms)
+[ RUN      ] JsonWriterTest.SerializeStructure
+[       OK ] JsonWriterTest.SerializeStructure (0 ms)
+[ RUN      ] JsonWriterTest.IntPrecisionAndTypes
+[       OK ] JsonWriterTest.IntPrecisionAndTypes (0 ms)
+[ RUN      ] JsonWriterTest.DependencyReportJsonRoundTrip
+[       OK ] JsonWriterTest.DependencyReportJsonRoundTrip (0 ms)
+[ RUN      ] JsonWriterTest.GraphJsonContent
+[       OK ] JsonWriterTest.GraphJsonContent (0 ms)
+[----------] 5 tests from JsonWriterTest (0 ms total)
+
+[----------] 2 tests from AnalyzerClassificationTest
+[ RUN      ] AnalyzerClassificationTest.CategoriesOnEdges
+[       OK ] AnalyzerClassificationTest.CategoriesOnEdges (0 ms)
+[ RUN      ] AnalyzerClassificationTest.CompatOnEdges
+[       OK ] AnalyzerClassificationTest.CompatOnEdges (0 ms)
+[----------] 2 tests from AnalyzerClassificationTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 45 tests from 9 test suites ran. (1 ms total)
+[  PASSED  ] 45 tests.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"deps_test" end time: Nov 22 17:00 UTC
+"deps_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 22 17:00 UTC

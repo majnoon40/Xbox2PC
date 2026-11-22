@@ -1,0 +1,137 @@
+{
+  "nodes": [
+    {
+      "id": "d3d12_x.dll",
+      "normalized": "d3d12_x",
+      "is_root": false,
+      "missing": true,
+      "category": "Xbox-specific graphics",
+      "classified": true
+    },
+    {
+      "id": "../samples/demo_xbox_m2.exe",
+      "normalized": "demo_xbox_m2.exe",
+      "is_root": true,
+      "missing": false,
+      "category": "Unknown",
+      "classified": false
+    },
+    {
+      "id": "KERNEL32.dll",
+      "normalized": "kernel32",
+      "is_root": false,
+      "missing": true,
+      "category": "Windows Win32",
+      "classified": true
+    },
+    {
+      "id": "XboxOneNativeApi.dll",
+      "normalized": "xboxonenativeapi",
+      "is_root": false,
+      "missing": true,
+      "category": "Unknown",
+      "classified": false
+    },
+    {
+      "id": "xgameruntime.dll",
+      "normalized": "xgameruntime",
+      "is_root": false,
+      "missing": true,
+      "category": "Xbox GDK",
+      "classified": true
+    }
+  ],
+  "edges": [
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "KERNEL32.dll",
+      "delay_load": false,
+      "functions": [
+        {
+          "name": "CreateFileW",
+          "ordinal": 1,
+          "by_ordinal": false,
+          "delay_load": false
+        },
+        {
+          "name": "ReadFile",
+          "ordinal": 2,
+          "by_ordinal": false,
+          "delay_load": false
+        },
+        {
+          "name": "",
+          "ordinal": 7,
+          "by_ordinal": true,
+          "delay_load": false
+        },
+        {
+          "name": "CloseHandle",
+          "ordinal": 5,
+          "by_ordinal": false,
+          "delay_load": false
+        }
+      ]
+    },
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "d3d12_x.dll",
+      "delay_load": false,
+      "functions": [
+        {
+          "name": "D3D12XCreateDevice",
+          "ordinal": 3,
+          "by_ordinal": false,
+          "delay_load": false
+        }
+      ]
+    },
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "xgameruntime.dll",
+      "delay_load": true,
+      "functions": [
+        {
+          "name": "XGameRuntimeInitialize",
+          "ordinal": 0,
+          "by_ordinal": false,
+          "delay_load": true
+        }
+      ]
+    },
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "XboxOneNativeApi.dll",
+      "delay_load": true,
+      "functions": [
+        {
+          "name": "XamGetGamepadState",
+          "ordinal": 0,
+          "by_ordinal": false,
+          "delay_load": true
+        }
+      ]
+    }
+  ],
+  "cycles": [],
+  "missing_dependencies": [
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "KERNEL32.dll"
+    },
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "d3d12_x.dll"
+    },
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "xgameruntime.dll"
+    },
+    {
+      "from": "../samples/demo_xbox_m2.exe",
+      "to": "XboxOneNativeApi.dll"
+    }
+  ],
+  "node_count": 5,
+  "edge_count": 4
+}

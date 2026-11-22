@@ -138,8 +138,6 @@ build src/CMakeFiles/xbox2pc_diagnostics.dir/diagnostics.cpp.o: CXX_COMPILER__xb
   INCLUDES = -I/home/z/my-project/xbox2pc/include
   OBJECT_DIR = src/CMakeFiles/xbox2pc_diagnostics.dir
   OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_diagnostics.dir
-  TARGET_COMPILE_PDB = src/CMakeFiles/xbox2pc_diagnostics.dir/xbox2pc_diagnostics.pdb
-  TARGET_PDB = src/libxbox2pc_diagnostics.pdb
   TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_diagnostics.dir
 
 
@@ -156,9 +154,8 @@ build src/libxbox2pc_diagnostics.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_diagnosti
   OBJECT_DIR = src/CMakeFiles/xbox2pc_diagnostics.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = src/CMakeFiles/xbox2pc_diagnostics.dir/xbox2pc_diagnostics.pdb
   TARGET_FILE = src/libxbox2pc_diagnostics.a
-  TARGET_PDB = src/libxbox2pc_diagnostics.pdb
+  TARGET_PDB = xbox2pc_diagnostics.a.dbg
   TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_diagnostics.dir
 
 # =============================================================================
@@ -177,8 +174,6 @@ build src/CMakeFiles/xbox2pc_pe_parser.dir/pe_parser.cpp.o: CXX_COMPILER__xbox2p
   INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src
   OBJECT_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
   OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
-  TARGET_COMPILE_PDB = src/CMakeFiles/xbox2pc_pe_parser.dir/xbox2pc_pe_parser.pdb
-  TARGET_PDB = src/libxbox2pc_pe_parser.pdb
   TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
 
 build src/CMakeFiles/xbox2pc_pe_parser.dir/pe_tables.cpp.o: CXX_COMPILER__xbox2pc_pe_parser_unscanned_Release /home/z/my-project/xbox2pc/src/pe_tables.cpp || cmake_object_order_depends_target_xbox2pc_pe_parser
@@ -188,8 +183,6 @@ build src/CMakeFiles/xbox2pc_pe_parser.dir/pe_tables.cpp.o: CXX_COMPILER__xbox2p
   INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src
   OBJECT_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
   OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
-  TARGET_COMPILE_PDB = src/CMakeFiles/xbox2pc_pe_parser.dir/xbox2pc_pe_parser.pdb
-  TARGET_PDB = src/libxbox2pc_pe_parser.pdb
   TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
 
 
@@ -206,10 +199,189 @@ build src/libxbox2pc_pe_parser.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_pe_parser_R
   OBJECT_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = src/CMakeFiles/xbox2pc_pe_parser.dir/xbox2pc_pe_parser.pdb
   TARGET_FILE = src/libxbox2pc_pe_parser.a
-  TARGET_PDB = src/libxbox2pc_pe_parser.pdb
+  TARGET_PDB = xbox2pc_pe_parser.a.dbg
   TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_pe_parser.dir
+
+# =============================================================================
+# Object build statements for STATIC_LIBRARY target xbox2pc_json
+
+
+#############################################
+# Order-only phony target for xbox2pc_json
+
+build cmake_object_order_depends_target_xbox2pc_json: phony || .
+
+build src/CMakeFiles/xbox2pc_json.dir/json_writer.cpp.o: CXX_COMPILER__xbox2pc_json_unscanned_Release /home/z/my-project/xbox2pc/src/json_writer.cpp || cmake_object_order_depends_target_xbox2pc_json
+  CONFIG = Release
+  DEP_FILE = src/CMakeFiles/xbox2pc_json.dir/json_writer.cpp.o.d
+  FLAGS = -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Werror=return-type
+  INCLUDES = -I/home/z/my-project/xbox2pc/include
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_json.dir
+  OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_json.dir
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_json.dir
+
+
+# =============================================================================
+# Link build statements for STATIC_LIBRARY target xbox2pc_json
+
+
+#############################################
+# Link the static library src/libxbox2pc_json.a
+
+build src/libxbox2pc_json.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_json_Release src/CMakeFiles/xbox2pc_json.dir/json_writer.cpp.o
+  CONFIG = Release
+  LANGUAGE_COMPILE_FLAGS = -O3 -DNDEBUG
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_json.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = src/libxbox2pc_json.a
+  TARGET_PDB = xbox2pc_json.a.dbg
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_json.dir
+
+# =============================================================================
+# Object build statements for STATIC_LIBRARY target xbox2pc_api_registry
+
+
+#############################################
+# Order-only phony target for xbox2pc_api_registry
+
+build cmake_object_order_depends_target_xbox2pc_api_registry: phony || cmake_object_order_depends_target_xbox2pc_diagnostics
+
+build src/CMakeFiles/xbox2pc_api_registry.dir/api_registry.cpp.o: CXX_COMPILER__xbox2pc_api_registry_unscanned_Release /home/z/my-project/xbox2pc/src/api_registry.cpp || cmake_object_order_depends_target_xbox2pc_api_registry
+  CONFIG = Release
+  DEP_FILE = src/CMakeFiles/xbox2pc_api_registry.dir/api_registry.cpp.o.d
+  FLAGS = -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Werror=return-type
+  INCLUDES = -I/home/z/my-project/xbox2pc/include
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_api_registry.dir
+  OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_api_registry.dir
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_api_registry.dir
+
+
+# =============================================================================
+# Link build statements for STATIC_LIBRARY target xbox2pc_api_registry
+
+
+#############################################
+# Link the static library src/libxbox2pc_api_registry.a
+
+build src/libxbox2pc_api_registry.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_api_registry_Release src/CMakeFiles/xbox2pc_api_registry.dir/api_registry.cpp.o || src/libxbox2pc_diagnostics.a
+  CONFIG = Release
+  LANGUAGE_COMPILE_FLAGS = -O3 -DNDEBUG
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_api_registry.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = src/libxbox2pc_api_registry.a
+  TARGET_PDB = xbox2pc_api_registry.a.dbg
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_api_registry.dir
+
+# =============================================================================
+# Object build statements for STATIC_LIBRARY target xbox2pc_compat_db
+
+
+#############################################
+# Order-only phony target for xbox2pc_compat_db
+
+build cmake_object_order_depends_target_xbox2pc_compat_db: phony || cmake_object_order_depends_target_xbox2pc_api_registry cmake_object_order_depends_target_xbox2pc_diagnostics
+
+build src/CMakeFiles/xbox2pc_compat_db.dir/compat_db.cpp.o: CXX_COMPILER__xbox2pc_compat_db_unscanned_Release /home/z/my-project/xbox2pc/src/compat_db.cpp || cmake_object_order_depends_target_xbox2pc_compat_db
+  CONFIG = Release
+  DEP_FILE = src/CMakeFiles/xbox2pc_compat_db.dir/compat_db.cpp.o.d
+  FLAGS = -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Werror=return-type
+  INCLUDES = -I/home/z/my-project/xbox2pc/include
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_compat_db.dir
+  OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_compat_db.dir
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_compat_db.dir
+
+
+# =============================================================================
+# Link build statements for STATIC_LIBRARY target xbox2pc_compat_db
+
+
+#############################################
+# Link the static library src/libxbox2pc_compat_db.a
+
+build src/libxbox2pc_compat_db.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_compat_db_Release src/CMakeFiles/xbox2pc_compat_db.dir/compat_db.cpp.o || src/libxbox2pc_api_registry.a src/libxbox2pc_diagnostics.a
+  CONFIG = Release
+  LANGUAGE_COMPILE_FLAGS = -O3 -DNDEBUG
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_compat_db.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = src/libxbox2pc_compat_db.a
+  TARGET_PDB = xbox2pc_compat_db.a.dbg
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_compat_db.dir
+
+# =============================================================================
+# Object build statements for STATIC_LIBRARY target xbox2pc_dep_analyzer
+
+
+#############################################
+# Order-only phony target for xbox2pc_dep_analyzer
+
+build cmake_object_order_depends_target_xbox2pc_dep_analyzer: phony || cmake_object_order_depends_target_xbox2pc_api_registry cmake_object_order_depends_target_xbox2pc_compat_db cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_pe_parser
+
+build src/CMakeFiles/xbox2pc_dep_analyzer.dir/dep_analyzer.cpp.o: CXX_COMPILER__xbox2pc_dep_analyzer_unscanned_Release /home/z/my-project/xbox2pc/src/dep_analyzer.cpp || cmake_object_order_depends_target_xbox2pc_dep_analyzer
+  CONFIG = Release
+  DEP_FILE = src/CMakeFiles/xbox2pc_dep_analyzer.dir/dep_analyzer.cpp.o.d
+  FLAGS = -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Werror=return-type
+  INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_dep_analyzer.dir
+  OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_dep_analyzer.dir
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_dep_analyzer.dir
+
+
+# =============================================================================
+# Link build statements for STATIC_LIBRARY target xbox2pc_dep_analyzer
+
+
+#############################################
+# Link the static library src/libxbox2pc_dep_analyzer.a
+
+build src/libxbox2pc_dep_analyzer.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_dep_analyzer_Release src/CMakeFiles/xbox2pc_dep_analyzer.dir/dep_analyzer.cpp.o || src/libxbox2pc_api_registry.a src/libxbox2pc_compat_db.a src/libxbox2pc_diagnostics.a src/libxbox2pc_pe_parser.a
+  CONFIG = Release
+  LANGUAGE_COMPILE_FLAGS = -O3 -DNDEBUG
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_dep_analyzer.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = src/libxbox2pc_dep_analyzer.a
+  TARGET_PDB = xbox2pc_dep_analyzer.a.dbg
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_dep_analyzer.dir
+
+# =============================================================================
+# Object build statements for STATIC_LIBRARY target xbox2pc_dep_graph
+
+
+#############################################
+# Order-only phony target for xbox2pc_dep_graph
+
+build cmake_object_order_depends_target_xbox2pc_dep_graph: phony || cmake_object_order_depends_target_xbox2pc_api_registry cmake_object_order_depends_target_xbox2pc_compat_db cmake_object_order_depends_target_xbox2pc_dep_analyzer cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_json cmake_object_order_depends_target_xbox2pc_pe_parser
+
+build src/CMakeFiles/xbox2pc_dep_graph.dir/dep_graph.cpp.o: CXX_COMPILER__xbox2pc_dep_graph_unscanned_Release /home/z/my-project/xbox2pc/src/dep_graph.cpp || cmake_object_order_depends_target_xbox2pc_dep_graph
+  CONFIG = Release
+  DEP_FILE = src/CMakeFiles/xbox2pc_dep_graph.dir/dep_graph.cpp.o.d
+  FLAGS = -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Werror=return-type
+  INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_dep_graph.dir
+  OBJECT_FILE_DIR = src/CMakeFiles/xbox2pc_dep_graph.dir
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_dep_graph.dir
+
+
+# =============================================================================
+# Link build statements for STATIC_LIBRARY target xbox2pc_dep_graph
+
+
+#############################################
+# Link the static library src/libxbox2pc_dep_graph.a
+
+build src/libxbox2pc_dep_graph.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_dep_graph_Release src/CMakeFiles/xbox2pc_dep_graph.dir/dep_graph.cpp.o || src/libxbox2pc_api_registry.a src/libxbox2pc_compat_db.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_diagnostics.a src/libxbox2pc_json.a src/libxbox2pc_pe_parser.a
+  CONFIG = Release
+  LANGUAGE_COMPILE_FLAGS = -O3 -DNDEBUG
+  OBJECT_DIR = src/CMakeFiles/xbox2pc_dep_graph.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = src/libxbox2pc_dep_graph.a
+  TARGET_PDB = xbox2pc_dep_graph.a.dbg
+  TARGET_SUPPORT_DIR = src/CMakeFiles/xbox2pc_dep_graph.dir
 
 
 #############################################
@@ -309,8 +481,6 @@ build tests/CMakeFiles/xbox2pc_pe_builder.dir/__/src/pe_builder.cpp.o: CXX_COMPI
   INCLUDES = -I/home/z/my-project/xbox2pc/include
   OBJECT_DIR = tests/CMakeFiles/xbox2pc_pe_builder.dir
   OBJECT_FILE_DIR = tests/CMakeFiles/xbox2pc_pe_builder.dir/__/src
-  TARGET_COMPILE_PDB = tests/CMakeFiles/xbox2pc_pe_builder.dir/xbox2pc_pe_builder.pdb
-  TARGET_PDB = tests/libxbox2pc_pe_builder.pdb
   TARGET_SUPPORT_DIR = tests/CMakeFiles/xbox2pc_pe_builder.dir
 
 
@@ -327,9 +497,8 @@ build tests/libxbox2pc_pe_builder.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_pe_build
   OBJECT_DIR = tests/CMakeFiles/xbox2pc_pe_builder.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/CMakeFiles/xbox2pc_pe_builder.dir/xbox2pc_pe_builder.pdb
   TARGET_FILE = tests/libxbox2pc_pe_builder.a
-  TARGET_PDB = tests/libxbox2pc_pe_builder.pdb
+  TARGET_PDB = xbox2pc_pe_builder.a.dbg
   TARGET_SUPPORT_DIR = tests/CMakeFiles/xbox2pc_pe_builder.dir
 
 # =============================================================================
@@ -339,7 +508,7 @@ build tests/libxbox2pc_pe_builder.a: CXX_STATIC_LIBRARY_LINKER__xbox2pc_pe_build
 #############################################
 # Order-only phony target for pe_parser_test
 
-build cmake_object_order_depends_target_pe_parser_test: phony || cmake_object_order_depends_target_gtest cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_pe_builder cmake_object_order_depends_target_xbox2pc_pe_parser
+build cmake_object_order_depends_target_pe_parser_test: phony || cmake_object_order_depends_target_gtest cmake_object_order_depends_target_xbox2pc_api_registry cmake_object_order_depends_target_xbox2pc_compat_db cmake_object_order_depends_target_xbox2pc_dep_analyzer cmake_object_order_depends_target_xbox2pc_dep_graph cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_json cmake_object_order_depends_target_xbox2pc_pe_builder cmake_object_order_depends_target_xbox2pc_pe_parser
 
 build tests/CMakeFiles/pe_parser_test.dir/pe_parser_test.cpp.o: CXX_COMPILER__pe_parser_test_unscanned_Release /home/z/my-project/xbox2pc/tests/pe_parser_test.cpp || cmake_object_order_depends_target_pe_parser_test
   CONFIG = Release
@@ -348,8 +517,6 @@ build tests/CMakeFiles/pe_parser_test.dir/pe_parser_test.cpp.o: CXX_COMPILER__pe
   INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest/include -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest
   OBJECT_DIR = tests/CMakeFiles/pe_parser_test.dir
   OBJECT_FILE_DIR = tests/CMakeFiles/pe_parser_test.dir
-  TARGET_COMPILE_PDB = tests/CMakeFiles/pe_parser_test.dir/
-  TARGET_PDB = tests/pe_parser_test.pdb
   TARGET_SUPPORT_DIR = tests/CMakeFiles/pe_parser_test.dir
 
 
@@ -360,19 +527,57 @@ build tests/CMakeFiles/pe_parser_test.dir/pe_parser_test.cpp.o: CXX_COMPILER__pe
 #############################################
 # Link the executable tests/pe_parser_test
 
-build tests/pe_parser_test: CXX_EXECUTABLE_LINKER__pe_parser_test_Release tests/CMakeFiles/pe_parser_test.dir/pe_parser_test.cpp.o | tests/libxbox2pc_pe_builder.a lib/libgtest.a src/libxbox2pc_pe_parser.a src/libxbox2pc_diagnostics.a || lib/libgtest.a src/libxbox2pc_diagnostics.a src/libxbox2pc_pe_parser.a tests/libxbox2pc_pe_builder.a
+build tests/pe_parser_test: CXX_EXECUTABLE_LINKER__pe_parser_test_Release tests/CMakeFiles/pe_parser_test.dir/pe_parser_test.cpp.o | tests/libxbox2pc_pe_builder.a lib/libgtest.a src/libxbox2pc_dep_graph.a src/libxbox2pc_json.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_pe_parser.a src/libxbox2pc_compat_db.a src/libxbox2pc_api_registry.a src/libxbox2pc_diagnostics.a || lib/libgtest.a src/libxbox2pc_api_registry.a src/libxbox2pc_compat_db.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_dep_graph.a src/libxbox2pc_diagnostics.a src/libxbox2pc_json.a src/libxbox2pc_pe_parser.a tests/libxbox2pc_pe_builder.a
   CONFIG = Release
   DEP_FILE = tests/CMakeFiles/pe_parser_test.dir/link.d
   FLAGS = -O3 -DNDEBUG
   LINK_FLAGS = -Wl,--dependency-file=tests/CMakeFiles/pe_parser_test.dir/link.d
-  LINK_LIBRARIES = tests/libxbox2pc_pe_builder.a  lib/libgtest.a  src/libxbox2pc_pe_parser.a  src/libxbox2pc_diagnostics.a
+  LINK_LIBRARIES = tests/libxbox2pc_pe_builder.a  lib/libgtest.a  src/libxbox2pc_dep_graph.a  src/libxbox2pc_json.a  src/libxbox2pc_dep_analyzer.a  src/libxbox2pc_pe_parser.a  src/libxbox2pc_compat_db.a  src/libxbox2pc_api_registry.a  src/libxbox2pc_diagnostics.a
   OBJECT_DIR = tests/CMakeFiles/pe_parser_test.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tests/CMakeFiles/pe_parser_test.dir/
   TARGET_FILE = tests/pe_parser_test
-  TARGET_PDB = tests/pe_parser_test.pdb
+  TARGET_PDB = pe_parser_test.dbg
   TARGET_SUPPORT_DIR = tests/CMakeFiles/pe_parser_test.dir
+
+# =============================================================================
+# Object build statements for EXECUTABLE target deps_test
+
+
+#############################################
+# Order-only phony target for deps_test
+
+build cmake_object_order_depends_target_deps_test: phony || cmake_object_order_depends_target_gtest cmake_object_order_depends_target_xbox2pc_api_registry cmake_object_order_depends_target_xbox2pc_compat_db cmake_object_order_depends_target_xbox2pc_dep_analyzer cmake_object_order_depends_target_xbox2pc_dep_graph cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_json cmake_object_order_depends_target_xbox2pc_pe_builder cmake_object_order_depends_target_xbox2pc_pe_parser
+
+build tests/CMakeFiles/deps_test.dir/deps_test.cpp.o: CXX_COMPILER__deps_test_unscanned_Release /home/z/my-project/xbox2pc/tests/deps_test.cpp || cmake_object_order_depends_target_deps_test
+  CONFIG = Release
+  DEP_FILE = tests/CMakeFiles/deps_test.dir/deps_test.cpp.o.d
+  FLAGS = -O3 -DNDEBUG -std=c++20 -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Wnon-virtual-dtor -Wold-style-cast -Werror=return-type
+  INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest/include -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest
+  OBJECT_DIR = tests/CMakeFiles/deps_test.dir
+  OBJECT_FILE_DIR = tests/CMakeFiles/deps_test.dir
+  TARGET_SUPPORT_DIR = tests/CMakeFiles/deps_test.dir
+
+
+# =============================================================================
+# Link build statements for EXECUTABLE target deps_test
+
+
+#############################################
+# Link the executable tests/deps_test
+
+build tests/deps_test: CXX_EXECUTABLE_LINKER__deps_test_Release tests/CMakeFiles/deps_test.dir/deps_test.cpp.o | tests/libxbox2pc_pe_builder.a lib/libgtest.a src/libxbox2pc_dep_graph.a src/libxbox2pc_json.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_pe_parser.a src/libxbox2pc_compat_db.a src/libxbox2pc_api_registry.a src/libxbox2pc_diagnostics.a || lib/libgtest.a src/libxbox2pc_api_registry.a src/libxbox2pc_compat_db.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_dep_graph.a src/libxbox2pc_diagnostics.a src/libxbox2pc_json.a src/libxbox2pc_pe_parser.a tests/libxbox2pc_pe_builder.a
+  CONFIG = Release
+  DEP_FILE = tests/CMakeFiles/deps_test.dir/link.d
+  FLAGS = -O3 -DNDEBUG
+  LINK_FLAGS = -Wl,--dependency-file=tests/CMakeFiles/deps_test.dir/link.d
+  LINK_LIBRARIES = tests/libxbox2pc_pe_builder.a  lib/libgtest.a  src/libxbox2pc_dep_graph.a  src/libxbox2pc_json.a  src/libxbox2pc_dep_analyzer.a  src/libxbox2pc_pe_parser.a  src/libxbox2pc_compat_db.a  src/libxbox2pc_api_registry.a  src/libxbox2pc_diagnostics.a
+  OBJECT_DIR = tests/CMakeFiles/deps_test.dir
+  POST_BUILD = :
+  PRE_LINK = :
+  TARGET_FILE = tests/deps_test
+  TARGET_PDB = deps_test.dbg
+  TARGET_SUPPORT_DIR = tests/CMakeFiles/deps_test.dir
 
 
 #############################################
@@ -554,8 +759,6 @@ build tests/googletest-build/googlemock/CMakeFiles/gmock.dir/src/gmock-all.cc.o:
   INCLUDES = -I/home/z/my-project/xbox2pc/third_party/googletest/googlemock/include -I/home/z/my-project/xbox2pc/third_party/googletest/googlemock -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest/include -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest
   OBJECT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock.dir
   OBJECT_FILE_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock.dir/src
-  TARGET_COMPILE_PDB = lib/libgmock.pdb
-  TARGET_PDB = bin/libgmock.pdb
   TARGET_SUPPORT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock.dir
 
 
@@ -572,9 +775,8 @@ build lib/libgmock.a: CXX_STATIC_LIBRARY_LINKER__gmock_Release tests/googletest-
   OBJECT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = lib/libgmock.pdb
   TARGET_FILE = lib/libgmock.a
-  TARGET_PDB = bin/libgmock.pdb
+  TARGET_PDB = gmock.a.dbg
   TARGET_SUPPORT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock.dir
 
 # =============================================================================
@@ -593,8 +795,6 @@ build tests/googletest-build/googlemock/CMakeFiles/gmock_main.dir/src/gmock_main
   INCLUDES = -isystem /home/z/my-project/xbox2pc/third_party/googletest/googlemock/include -isystem /home/z/my-project/xbox2pc/third_party/googletest/googlemock -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest/include -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest
   OBJECT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock_main.dir
   OBJECT_FILE_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock_main.dir/src
-  TARGET_COMPILE_PDB = lib/libgmock_main.pdb
-  TARGET_PDB = bin/libgmock_main.pdb
   TARGET_SUPPORT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock_main.dir
 
 
@@ -611,9 +811,8 @@ build lib/libgmock_main.a: CXX_STATIC_LIBRARY_LINKER__gmock_main_Release tests/g
   OBJECT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock_main.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = lib/libgmock_main.pdb
   TARGET_FILE = lib/libgmock_main.a
-  TARGET_PDB = bin/libgmock_main.pdb
+  TARGET_PDB = gmock_main.a.dbg
   TARGET_SUPPORT_DIR = tests/googletest-build/googlemock/CMakeFiles/gmock_main.dir
 
 
@@ -714,8 +913,6 @@ build tests/googletest-build/googletest/CMakeFiles/gtest.dir/src/gtest-all.cc.o:
   INCLUDES = -I/home/z/my-project/xbox2pc/third_party/googletest/googletest/include -I/home/z/my-project/xbox2pc/third_party/googletest/googletest
   OBJECT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest.dir
   OBJECT_FILE_DIR = tests/googletest-build/googletest/CMakeFiles/gtest.dir/src
-  TARGET_COMPILE_PDB = lib/libgtest.pdb
-  TARGET_PDB = bin/libgtest.pdb
   TARGET_SUPPORT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest.dir
 
 
@@ -732,9 +929,8 @@ build lib/libgtest.a: CXX_STATIC_LIBRARY_LINKER__gtest_Release tests/googletest-
   OBJECT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = lib/libgtest.pdb
   TARGET_FILE = lib/libgtest.a
-  TARGET_PDB = bin/libgtest.pdb
+  TARGET_PDB = gtest.a.dbg
   TARGET_SUPPORT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest.dir
 
 # =============================================================================
@@ -753,8 +949,6 @@ build tests/googletest-build/googletest/CMakeFiles/gtest_main.dir/src/gtest_main
   INCLUDES = -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest/include -isystem /home/z/my-project/xbox2pc/third_party/googletest/googletest
   OBJECT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest_main.dir
   OBJECT_FILE_DIR = tests/googletest-build/googletest/CMakeFiles/gtest_main.dir/src
-  TARGET_COMPILE_PDB = lib/libgtest_main.pdb
-  TARGET_PDB = bin/libgtest_main.pdb
   TARGET_SUPPORT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest_main.dir
 
 
@@ -771,9 +965,8 @@ build lib/libgtest_main.a: CXX_STATIC_LIBRARY_LINKER__gtest_main_Release tests/g
   OBJECT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest_main.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = lib/libgtest_main.pdb
   TARGET_FILE = lib/libgtest_main.a
-  TARGET_PDB = bin/libgtest_main.pdb
+  TARGET_PDB = gtest_main.a.dbg
   TARGET_SUPPORT_DIR = tests/googletest-build/googletest/CMakeFiles/gtest_main.dir
 
 
@@ -865,7 +1058,7 @@ build tests/googletest-build/googletest/install/strip: phony tests/googletest-bu
 #############################################
 # Order-only phony target for xbox2pc
 
-build cmake_object_order_depends_target_xbox2pc: phony || cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_pe_parser
+build cmake_object_order_depends_target_xbox2pc: phony || cmake_object_order_depends_target_xbox2pc_api_registry cmake_object_order_depends_target_xbox2pc_compat_db cmake_object_order_depends_target_xbox2pc_dep_analyzer cmake_object_order_depends_target_xbox2pc_dep_graph cmake_object_order_depends_target_xbox2pc_diagnostics cmake_object_order_depends_target_xbox2pc_json cmake_object_order_depends_target_xbox2pc_pe_parser
 
 build tools/CMakeFiles/xbox2pc.dir/xbox2pc_cli.cpp.o: CXX_COMPILER__xbox2pc_unscanned_Release /home/z/my-project/xbox2pc/tools/xbox2pc_cli.cpp || cmake_object_order_depends_target_xbox2pc
   CONFIG = Release
@@ -874,8 +1067,6 @@ build tools/CMakeFiles/xbox2pc.dir/xbox2pc_cli.cpp.o: CXX_COMPILER__xbox2pc_unsc
   INCLUDES = -I/home/z/my-project/xbox2pc/include -I/home/z/my-project/xbox2pc/src
   OBJECT_DIR = tools/CMakeFiles/xbox2pc.dir
   OBJECT_FILE_DIR = tools/CMakeFiles/xbox2pc.dir
-  TARGET_COMPILE_PDB = tools/CMakeFiles/xbox2pc.dir/
-  TARGET_PDB = tools/xbox2pc.pdb
   TARGET_SUPPORT_DIR = tools/CMakeFiles/xbox2pc.dir
 
 
@@ -886,18 +1077,17 @@ build tools/CMakeFiles/xbox2pc.dir/xbox2pc_cli.cpp.o: CXX_COMPILER__xbox2pc_unsc
 #############################################
 # Link the executable tools/xbox2pc
 
-build tools/xbox2pc: CXX_EXECUTABLE_LINKER__xbox2pc_Release tools/CMakeFiles/xbox2pc.dir/xbox2pc_cli.cpp.o | src/libxbox2pc_pe_parser.a src/libxbox2pc_diagnostics.a || src/libxbox2pc_diagnostics.a src/libxbox2pc_pe_parser.a
+build tools/xbox2pc: CXX_EXECUTABLE_LINKER__xbox2pc_Release tools/CMakeFiles/xbox2pc.dir/xbox2pc_cli.cpp.o | src/libxbox2pc_dep_graph.a src/libxbox2pc_json.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_pe_parser.a src/libxbox2pc_compat_db.a src/libxbox2pc_api_registry.a src/libxbox2pc_diagnostics.a || src/libxbox2pc_api_registry.a src/libxbox2pc_compat_db.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_dep_graph.a src/libxbox2pc_diagnostics.a src/libxbox2pc_json.a src/libxbox2pc_pe_parser.a
   CONFIG = Release
   DEP_FILE = tools/CMakeFiles/xbox2pc.dir/link.d
   FLAGS = -O3 -DNDEBUG
   LINK_FLAGS = -Wl,--dependency-file=tools/CMakeFiles/xbox2pc.dir/link.d
-  LINK_LIBRARIES = src/libxbox2pc_pe_parser.a  src/libxbox2pc_diagnostics.a
+  LINK_LIBRARIES = src/libxbox2pc_dep_graph.a  src/libxbox2pc_json.a  src/libxbox2pc_dep_analyzer.a  src/libxbox2pc_pe_parser.a  src/libxbox2pc_compat_db.a  src/libxbox2pc_api_registry.a  src/libxbox2pc_diagnostics.a
   OBJECT_DIR = tools/CMakeFiles/xbox2pc.dir
   POST_BUILD = :
   PRE_LINK = :
-  TARGET_COMPILE_PDB = tools/CMakeFiles/xbox2pc.dir/
   TARGET_FILE = tools/xbox2pc
-  TARGET_PDB = tools/xbox2pc.pdb
+  TARGET_PDB = xbox2pc.dbg
   TARGET_SUPPORT_DIR = tools/CMakeFiles/xbox2pc.dir
 
 
@@ -980,6 +1170,8 @@ build tools/install/strip: phony tools/CMakeFiles/install/strip.util
 # =============================================================================
 # Target aliases.
 
+build deps_test: phony tests/deps_test
+
 build gmock: phony lib/libgmock.a
 
 build gmock_main: phony lib/libgmock_main.a
@@ -996,7 +1188,17 @@ build libgtest.a: phony lib/libgtest.a
 
 build libgtest_main.a: phony lib/libgtest_main.a
 
+build libxbox2pc_api_registry.a: phony src/libxbox2pc_api_registry.a
+
+build libxbox2pc_compat_db.a: phony src/libxbox2pc_compat_db.a
+
+build libxbox2pc_dep_analyzer.a: phony src/libxbox2pc_dep_analyzer.a
+
+build libxbox2pc_dep_graph.a: phony src/libxbox2pc_dep_graph.a
+
 build libxbox2pc_diagnostics.a: phony src/libxbox2pc_diagnostics.a
+
+build libxbox2pc_json.a: phony src/libxbox2pc_json.a
 
 build libxbox2pc_pe_builder.a: phony tests/libxbox2pc_pe_builder.a
 
@@ -1006,7 +1208,17 @@ build pe_parser_test: phony tests/pe_parser_test
 
 build xbox2pc: phony tools/xbox2pc
 
+build xbox2pc_api_registry: phony src/libxbox2pc_api_registry.a
+
+build xbox2pc_compat_db: phony src/libxbox2pc_compat_db.a
+
+build xbox2pc_dep_analyzer: phony src/libxbox2pc_dep_analyzer.a
+
+build xbox2pc_dep_graph: phony src/libxbox2pc_dep_graph.a
+
 build xbox2pc_diagnostics: phony src/libxbox2pc_diagnostics.a
+
+build xbox2pc_json: phony src/libxbox2pc_json.a
 
 build xbox2pc_pe_builder: phony tests/libxbox2pc_pe_builder.a
 
@@ -1027,14 +1239,14 @@ build all: phony src/all tests/all tools/all
 #############################################
 # Folder: /home/z/my-project/xbox2pc/build/src
 
-build src/all: phony src/libxbox2pc_diagnostics.a src/libxbox2pc_pe_parser.a
+build src/all: phony src/libxbox2pc_diagnostics.a src/libxbox2pc_pe_parser.a src/libxbox2pc_json.a src/libxbox2pc_api_registry.a src/libxbox2pc_compat_db.a src/libxbox2pc_dep_analyzer.a src/libxbox2pc_dep_graph.a
 
 # =============================================================================
 
 #############################################
 # Folder: /home/z/my-project/xbox2pc/build/tests
 
-build tests/all: phony tests/libxbox2pc_pe_builder.a tests/pe_parser_test
+build tests/all: phony tests/libxbox2pc_pe_builder.a tests/pe_parser_test tests/deps_test
 
 # =============================================================================
 
@@ -1071,14 +1283,14 @@ build tools/all: phony tools/xbox2pc
 #############################################
 # Re-run CMake if any of its inputs changed.
 
-build build.ninja /home/z/my-project/xbox2pc/build/cmake_install.cmake /home/z/my-project/xbox2pc/build/src/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googlemock/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googletest/cmake_install.cmake /home/z/my-project/xbox2pc/build/tools/cmake_install.cmake /home/z/my-project/xbox2pc/build/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googlemock/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googletest/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tools/CTestTestfile.cmake: RERUN_CMAKE | /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/BasicConfigVersion-AnyNewerVersion.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompiler.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerABI.c /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompiler.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCompilerIdDetection.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDependentOption.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerSupport.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeNinjaFindMake.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakePackageConfigHelpers.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitIncludeInfo.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitLinkInfo.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseLibraryArchitecture.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystem.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCompilerCommon.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCXXSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFile.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFileCXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckLibraryExists.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ADSP-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMCC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/AppleClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Borland-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Bruce-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompilerInternal.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Compaq-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Cray-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CrayClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Diab-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Embarcadero-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Fujitsu-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GHS-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-CXXImportStd.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/HP-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/HP-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IAR-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMCPP-C-DetermineVersionInternal.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMClang-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Intel-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/LCC-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/MSVC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVHPC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVIDIA-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OrangeC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PGI-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PathScale-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PellesC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Renesas-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SCO-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SDCC-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SunPro-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TI-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TIClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Tasking-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TinyCC-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/VisualAge-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Watcom-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XL-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XL-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XLClang-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/zOS-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageHandleStandardArgs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageMessage.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindThreads.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/GNUInstallDirs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeDetermineLinkerId.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeInspectCLinker.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeInspectCXXLinker.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckCommon.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/FeatureTesting.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Determine-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/WriteBasicConfigVersionFile.cmake /home/z/my-project/xbox2pc/CMakeLists.txt /home/z/my-project/xbox2pc/src/CMakeLists.txt /home/z/my-project/xbox2pc/tests/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/Config.cmake.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/internal_utils.cmake /home/z/my-project/xbox2pc/tools/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.5/CMakeCCompiler.cmake CMakeFiles/4.4.5/CMakeCXXCompiler.cmake CMakeFiles/4.4.5/CMakeSystem.cmake
+build build.ninja /home/z/my-project/xbox2pc/build/cmake_install.cmake /home/z/my-project/xbox2pc/build/src/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googlemock/cmake_install.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googletest/cmake_install.cmake /home/z/my-project/xbox2pc/build/tools/cmake_install.cmake /home/z/my-project/xbox2pc/build/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googlemock/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tests/googletest-build/googletest/CTestTestfile.cmake /home/z/my-project/xbox2pc/build/tools/CTestTestfile.cmake: RERUN_CMAKE | /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/BasicConfigVersion-AnyNewerVersion.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDependentOption.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakePackageConfigHelpers.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCXXSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFile.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFileCXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckLibraryExists.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageHandleStandardArgs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageMessage.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindThreads.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/GNUInstallDirs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckCommon.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/WriteBasicConfigVersionFile.cmake /home/z/my-project/xbox2pc/CMakeLists.txt /home/z/my-project/xbox2pc/src/CMakeLists.txt /home/z/my-project/xbox2pc/tests/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/Config.cmake.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/internal_utils.cmake /home/z/my-project/xbox2pc/tools/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.5/CMakeCCompiler.cmake CMakeFiles/4.4.5/CMakeCXXCompiler.cmake CMakeFiles/4.4.5/CMakeSystem.cmake
   pool = console
 
 
 #############################################
 # A missing CMake input file is not an error.
 
-build /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/BasicConfigVersion-AnyNewerVersion.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompiler.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerABI.c /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompiler.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCompilerIdDetection.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDependentOption.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerSupport.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeNinjaFindMake.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakePackageConfigHelpers.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitIncludeInfo.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitLinkInfo.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseLibraryArchitecture.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystem.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCompilerCommon.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCXXSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFile.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFileCXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckLibraryExists.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ADSP-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMCC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/ARMClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/AppleClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Borland-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Bruce-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Clang-DetermineCompilerInternal.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Compaq-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Compaq-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Cray-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CrayClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Diab-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Embarcadero-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Fujitsu-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/FujitsuClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GHS-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-CXXImportStd.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/HP-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/HP-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IAR-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMCPP-C-DetermineVersionInternal.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMCPP-CXX-DetermineVersionInternal.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMClang-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IBMClang-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Intel-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/IntelLLVM-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/LCC-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/LCC-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/MSVC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVHPC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/NVIDIA-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OpenWatcom-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/OrangeC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PGI-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PathScale-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/PellesC-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Renesas-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SCO-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SDCC-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SunPro-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/SunPro-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TI-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TIClang-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Tasking-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/TinyCC-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/VisualAge-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/VisualAge-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/Watcom-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XL-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XL-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XLClang-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/XLClang-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/zOS-C-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/zOS-CXX-DetermineCompiler.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageHandleStandardArgs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageMessage.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindThreads.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/GNUInstallDirs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeDetermineLinkerId.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeInspectCLinker.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeInspectCXXLinker.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckCommon.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/FeatureTesting.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Determine-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/WriteBasicConfigVersionFile.cmake /home/z/my-project/xbox2pc/CMakeLists.txt /home/z/my-project/xbox2pc/src/CMakeLists.txt /home/z/my-project/xbox2pc/tests/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/Config.cmake.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/internal_utils.cmake /home/z/my-project/xbox2pc/tools/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.5/CMakeCCompiler.cmake CMakeFiles/4.4.5/CMakeCXXCompiler.cmake CMakeFiles/4.4.5/CMakeSystem.cmake: phony
+build /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/BasicConfigVersion-AnyNewerVersion.cmake.in /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeDependentOption.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeGenericSystem.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeInitializeConfigs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeLanguageInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakePackageConfigHelpers.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeSystemSpecificInitialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckCXXSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFile.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckIncludeFileCXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/CheckLibraryExists.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/CMakeCommonCompilerMacros.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageHandleStandardArgs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindPackageMessage.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/FindThreads.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/GNUInstallDirs.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCXXLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CMakeCommonLinkerInformation.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckCommon.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckSourceCompiles.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linker/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-C.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU-CXX.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-GNU.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux-Initialize.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/Linux.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/Platform/UnixPaths.cmake /home/z/.venv/lib/python3.12/site-packages/cmake/data/share/cmake-4.4/Modules/WriteBasicConfigVersionFile.cmake /home/z/my-project/xbox2pc/CMakeLists.txt /home/z/my-project/xbox2pc/src/CMakeLists.txt /home/z/my-project/xbox2pc/tests/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googlemock/cmake/gmock_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/CMakeLists.txt /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/Config.cmake.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/gtest_main.pc.in /home/z/my-project/xbox2pc/third_party/googletest/googletest/cmake/internal_utils.cmake /home/z/my-project/xbox2pc/tools/CMakeLists.txt CMakeCache.txt CMakeFiles/4.4.5/CMakeCCompiler.cmake CMakeFiles/4.4.5/CMakeCXXCompiler.cmake CMakeFiles/4.4.5/CMakeSystem.cmake: phony
 
 
 #############################################

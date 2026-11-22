@@ -1,0 +1,20 @@
+================================================================
+xbox2pc API classification
+source: ../samples/demo_valid.exe
+================================================================
+
+KERNEL32.dll [Windows Win32]
+  evidence: [MS-SEARCH]
+  note:     Windows kernel API host (process/thread/file/memory)
+  compatibility: Compatible
+    windows equivalent: same DLL on Windows PC (loader-resolved system library)
+    CreateFileW: Windows Win32 | Compatible
+    ReadFile: Windows Win32
+    CloseHandle: Windows Win32
+
+XboxOneNativeApi.dll [Unknown]
+  classification: Unknown (no evidence-based record)
+
+summary: 1 classified, 1 unknown DLL(s)
+export name: Xbox2PCTest.dll (3 exported function(s))
+================================================================

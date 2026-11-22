@@ -1,0 +1,42 @@
+================================================================
+xbox2pc dependency analysis
+source: demo_xbox_m2.exe
+================================================================
+
+imported DLLs (4 distinct, 7 function imports):
+  KERNEL32.dll  [Windows Win32]
+      duplicate dependency
+      compatibility: Compatible
+        windows equivalent: same DLL on Windows PC (loader-resolved system library)
+      CreateFileW
+      ReadFile
+      #7 (ordinal)
+      CloseHandle
+  d3d12_x.dll  [Xbox-specific graphics]
+      compatibility: Unsupported
+        windows equivalent: d3d12.dll on Windows PC (requires API surface translation — see note)
+      D3D12XCreateDevice
+  xgameruntime.dll  [Xbox GDK]
+      imported via: delay-load
+      compatibility: Partially compatible
+        windows equivalent: same DLL via Gaming Services on Windows PC
+      XGameRuntimeInitialize (delay)
+  XboxOneNativeApi.dll  [Unknown]
+      imported via: delay-load
+      XamGetGamepadState (delay)
+
+forwarded exports (1):
+  XblCleanup -> XboxOneNativeApi.XblInitCore (target XboxOneNativeApi!XblInitCore)
+
+summary:
+  distinct DLLs:          4
+  function imports:      7
+  duplicates:            1
+  unresolved functions:  0
+  unresolved DLLs:       0
+  delay-load DLLs:       yes
+
+diagnostics:
+  [warning] duplicate dependency on 'KERNEL32.dll' (2 import descriptors)
+  [info] 1 forwarded export(s) — implicit dependencies on the forward targets
+================================================================

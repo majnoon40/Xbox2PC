@@ -1,0 +1,99 @@
+{
+  "tool": "xbox2pc",
+  "version": "0.2.0",
+  "source": "../samples/demo_valid.exe",
+  "dependencies": [
+    {
+      "dll": "KERNEL32.dll",
+      "category": "Windows Win32",
+      "classified": true,
+      "regular_import": true,
+      "delay_import": false,
+      "duplicate": false,
+      "function_count": 4,
+      "import_sources": [
+        "regular"
+      ],
+      "iat_rva": 4165,
+      "int_rva": 4125,
+      "functions": [
+        {
+          "name": "CreateFileW",
+          "hint_ordinal": 1,
+          "delay_load": false,
+          "unresolved": false
+        },
+        {
+          "name": "ReadFile",
+          "hint_ordinal": 2,
+          "delay_load": false,
+          "unresolved": false
+        },
+        {
+          "name": "CloseHandle",
+          "hint_ordinal": 3,
+          "delay_load": false,
+          "unresolved": false
+        },
+        {
+          "name": "",
+          "ordinal": 7,
+          "by_ordinal": true,
+          "delay_load": false,
+          "unresolved": false
+        }
+      ],
+      "compatibility": {
+        "status": "Compatible",
+        "known": true,
+        "windows_equivalent": "same DLL on Windows PC (loader-resolved system library)"
+      }
+    },
+    {
+      "dll": "XboxOneNativeApi.dll",
+      "category": "Unknown",
+      "classified": false,
+      "regular_import": true,
+      "delay_import": false,
+      "duplicate": false,
+      "function_count": 2,
+      "import_sources": [
+        "regular"
+      ],
+      "iat_rva": 4289,
+      "int_rva": 4265,
+      "functions": [
+        {
+          "name": "XamGetGamepadState",
+          "hint_ordinal": 3,
+          "delay_load": false,
+          "unresolved": false
+        },
+        {
+          "name": "XThreadCreate",
+          "hint_ordinal": 4,
+          "delay_load": false,
+          "unresolved": false
+        }
+      ],
+      "compatibility": {
+        "status": "Unknown",
+        "known": false
+      }
+    }
+  ],
+  "forwarded_exports": [
+    {
+      "export": "XblCleanup",
+      "forwarder": "XboxOneNativeApi.XblInitCore",
+      "target_dll": "XboxOneNativeApi",
+      "target_api": "XblInitCore"
+    }
+  ],
+  "distinct_dll_count": 2,
+  "total_function_imports": 6,
+  "duplicate_dependencies": 0,
+  "unresolved_functions": 0,
+  "unresolved_dlls": 0,
+  "has_delay_imports": false
+}

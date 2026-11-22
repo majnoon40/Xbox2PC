@@ -1,0 +1,34 @@
+================================================================
+xbox2pc API classification
+source: demo_xbox_m2.exe
+================================================================
+
+KERNEL32.dll [Windows Win32]
+  evidence: [MS-SEARCH]
+  note:     Windows kernel API host (process/thread/file/memory)
+  compatibility: Compatible
+    windows equivalent: same DLL on Windows PC (loader-resolved system library)
+    CreateFileW: Windows Win32 | Compatible
+    ReadFile: Windows Win32
+    CloseHandle: Windows Win32
+
+d3d12_x.dll [Xbox-specific graphics]
+  evidence: [GDK-SUBVAL]
+  note:     Xbox One (Gen8) graphics stack
+  compatibility: Unsupported
+    windows equivalent: d3d12.dll on Windows PC (requires API surface translation — see note)
+    D3D12XCreateDevice: Xbox-specific graphics
+
+xgameruntime.dll [Xbox GDK]
+  evidence: [GDK-CUSTOM]
+  note:     GRTS runtime DLL (XGameRuntimeInitialize etc.)
+  compatibility: Partially compatible
+    windows equivalent: same DLL via Gaming Services on Windows PC
+    XGameRuntimeInitialize: Xbox GDK | Partially compatible
+
+XboxOneNativeApi.dll [Unknown]
+  classification: Unknown (no evidence-based record)
+
+summary: 3 classified, 1 unknown DLL(s)
+export name: Xbox2PCTest.dll (2 exported function(s))
+================================================================

@@ -1,0 +1,25 @@
+================================================================
+xbox2pc dependency graph
+================================================================
+
+nodes (5):
+  d3d12_x.dll                        Xbox-specific graphics [missing]
+  demo_xbox_m2.exe                   Unknown                [root]
+  KERNEL32.dll                       Windows Win32          [missing]
+  XboxOneNativeApi.dll               Unknown                [missing]
+  xgameruntime.dll                   Xbox GDK               [missing]
+
+edges (4):
+  demo_xbox_m2.exe -> KERNEL32.dll  (4 function(s))
+  demo_xbox_m2.exe -> d3d12_x.dll  (1 function(s))
+  demo_xbox_m2.exe -> xgameruntime.dll  (1 function(s), delay-load)
+  demo_xbox_m2.exe -> XboxOneNativeApi.dll  (1 function(s), delay-load)
+
+circular dependencies: 0
+
+missing dependencies: 4
+  demo_xbox_m2.exe -> KERNEL32.dll
+  demo_xbox_m2.exe -> d3d12_x.dll
+  demo_xbox_m2.exe -> xgameruntime.dll
+  demo_xbox_m2.exe -> XboxOneNativeApi.dll
+================================================================

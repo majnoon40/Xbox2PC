@@ -1,0 +1,93 @@
+{
+  "nodes": [
+    {
+      "id": "../samples/demo_valid.exe",
+      "normalized": "demo_valid.exe",
+      "is_root": true,
+      "missing": false,
+      "category": "Unknown",
+      "classified": false
+    },
+    {
+      "id": "KERNEL32.dll",
+      "normalized": "kernel32",
+      "is_root": false,
+      "missing": true,
+      "category": "Windows Win32",
+      "classified": true
+    },
+    {
+      "id": "XboxOneNativeApi.dll",
+      "normalized": "xboxonenativeapi",
+      "is_root": false,
+      "missing": true,
+      "category": "Unknown",
+      "classified": false
+    }
+  ],
+  "edges": [
+    {
+      "from": "../samples/demo_valid.exe",
+      "to": "KERNEL32.dll",
+      "delay_load": false,
+      "functions": [
+        {
+          "name": "CreateFileW",
+          "ordinal": 1,
+          "by_ordinal": false,
+          "delay_load": false
+        },
+        {
+          "name": "ReadFile",
+          "ordinal": 2,
+          "by_ordinal": false,
+          "delay_load": false
+        },
+        {
+          "name": "CloseHandle",
+          "ordinal": 3,
+          "by_ordinal": false,
+          "delay_load": false
+        },
+        {
+          "name": "",
+          "ordinal": 7,
+          "by_ordinal": true,
+          "delay_load": false
+        }
+      ]
+    },
+    {
+      "from": "../samples/demo_valid.exe",
+      "to": "XboxOneNativeApi.dll",
+      "delay_load": false,
+      "functions": [
+        {
+          "name": "XamGetGamepadState",
+          "ordinal": 3,
+          "by_ordinal": false,
+          "delay_load": false
+        },
+        {
+          "name": "XThreadCreate",
+          "ordinal": 4,
+          "by_ordinal": false,
+          "delay_load": false
+        }
+      ]
+    }
+  ],
+  "cycles": [],
+  "missing_dependencies": [
+    {
+      "from": "../samples/demo_valid.exe",
+      "to": "KERNEL32.dll"
+    },
+    {
+      "from": "../samples/demo_valid.exe",
+      "to": "XboxOneNativeApi.dll"
+    }
+  ],
+  "node_count": 3,
+  "edge_count": 2
+}

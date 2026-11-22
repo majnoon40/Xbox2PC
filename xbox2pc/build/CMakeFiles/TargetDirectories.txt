@@ -7,6 +7,11 @@
 /home/z/my-project/xbox2pc/build/CMakeFiles/install/strip.dir
 /home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_diagnostics.dir
 /home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_pe_parser.dir
+/home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_json.dir
+/home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_api_registry.dir
+/home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_compat_db.dir
+/home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_dep_analyzer.dir
+/home/z/my-project/xbox2pc/build/src/CMakeFiles/xbox2pc_dep_graph.dir
 /home/z/my-project/xbox2pc/build/src/CMakeFiles/test.dir
 /home/z/my-project/xbox2pc/build/src/CMakeFiles/edit_cache.dir
 /home/z/my-project/xbox2pc/build/src/CMakeFiles/rebuild_cache.dir
@@ -16,6 +21,7 @@
 /home/z/my-project/xbox2pc/build/src/CMakeFiles/install/strip.dir
 /home/z/my-project/xbox2pc/build/tests/CMakeFiles/xbox2pc_pe_builder.dir
 /home/z/my-project/xbox2pc/build/tests/CMakeFiles/pe_parser_test.dir
+/home/z/my-project/xbox2pc/build/tests/CMakeFiles/deps_test.dir
 /home/z/my-project/xbox2pc/build/tests/CMakeFiles/test.dir
 /home/z/my-project/xbox2pc/build/tests/CMakeFiles/edit_cache.dir
 /home/z/my-project/xbox2pc/build/tests/CMakeFiles/rebuild_cache.dir
