@@ -103,15 +103,34 @@ target_include_directories(xbox2pc_rt_services PUBLIC ${PROJECT_SOURCE_DIR}/incl
 target_link_libraries(xbox2pc_rt_services PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
 target_compile_features(xbox2pc_rt_services PUBLIC cxx_std_20)
 
+# ── M4: runtime management layer ────────────────────────────────────────────
+#
+# rt_memory (virtual memory model over PAL subranges) sits above the PAL;
+# rt_procman (process manager + managed processes + resource accounting)
+# sits above rt_memory/rt_process/rt_thread. The facade keeps its M3
+# surface and additionally exposes the manager.
+
+add_library(xbox2pc_rt_memory STATIC memory_management.cpp)
+target_include_directories(xbox2pc_rt_memory PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_memory PUBLIC xbox2pc_rt_pal xbox2pc_rt_error)
+target_compile_features(xbox2pc_rt_memory PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_procman STATIC process_management.cpp)
+target_include_directories(xbox2pc_rt_procman PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_procman PUBLIC
+    xbox2pc_rt_memory xbox2pc_rt_process xbox2pc_rt_thread xbox2pc_rt_handles
+    xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_procman PUBLIC cxx_std_20)
+
 add_library(xbox2pc_rt_core STATIC runtime_core.cpp)
 target_include_directories(xbox2pc_rt_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_core PUBLIC
     xbox2pc_rt_error xbox2pc_rt_pal xbox2pc_rt_object xbox2pc_rt_handles
     xbox2pc_rt_sync xbox2pc_rt_thread xbox2pc_rt_io xbox2pc_rt_process
-    xbox2pc_rt_services)
+    xbox2pc_rt_services xbox2pc_rt_memory xbox2pc_rt_procman)
 target_compile_features(xbox2pc_rt_core PUBLIC cxx_std_20)
 
-# Aggregate target: everything M1+M2+M3 needs for tools and tests.
+# Aggregate target: everything M1+M2+M3+M4 needs for tools and tests.
 add_library(xbox2pc_core INTERFACE)
 target_link_libraries(xbox2pc_core INTERFACE
     xbox2pc_diagnostics
