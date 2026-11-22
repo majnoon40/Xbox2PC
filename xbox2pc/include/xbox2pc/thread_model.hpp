@@ -1,0 +1,132 @@
+#pragma once
+// xbox2pc/thread_model.hpp — M3 abstract thread representation.
+//
+// Design (docs/process-thread-model.md):
+//   - RtThread is a runtime OBJECT (registered in the object manager) that
+//     wraps a PAL host thread. Thread identity is the runtime thread id
+//     (uint64), NOT the host pthread id (host ids are backend metadata).
+//   - Lifecycle: Created -> Ready -> Running -> {Blocked | Suspended} ->
+//     Terminated; Failed reachable from any pre-terminal state on error.
+//     Transitions are validated (table in thread_model.cpp); invalid
+//     transitions return InvalidTransition with a descriptive context.
+//   - TLS: per-thread slot map (uint64 key -> bytes), host-independent.
+//   - Scheduling metadata: priority is an abstract enum (Idle..Critical);
+//     M3 does NOT implement a scheduler (explicit exclusion — the PAL
+//     thread runs host-scheduled).
+//   - No undocumented Xbox scheduling internals are reproduced; the state
+//     machine is an architectural model (documented as inferred).
+//
+// Concurrency: state transitions take an internal mutex; readers use the
+// atomic state(). The joined exit status is written once at termination.
+
+#include <atomic>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "xbox2pc/handle_manager.hpp"
+#include "xbox2pc/platform.hpp"
+
+namespace xbox2pc::rt {
+
+// ── thread states ─────────────────────────────────────────────────────────
+enum class ThreadState {
+    Created,    // object exists; host thread not started
+    Ready,      // started + gate released, runnable
+    Running,    // executing on the host
+    Blocked,    // waiting on a sync primitive
+    Suspended,  // cooperative suspend requested
+    Terminated, // exited; joinable for exit code
+    Failed,     // aborted by error
+};
+
+const char* thread_state_to_name(ThreadState s);
+
+// ── priority abstraction ───────────────────────────────────────────────────
+enum class ThreadPriority { Idle = 0, Low = 1, Normal = 2, High = 3, Critical = 4 };
+const char* thread_priority_to_name(ThreadPriority p);
+
+// ── scheduling metadata (abstract; host maps it best-effort) ────────────────
+struct ThreadScheduling {
+    ThreadPriority priority = ThreadPriority::Normal;
+    std::uint64_t ideal_processor = 0;   // abstract core mask/index (M3: info only)
+    std::uint64_t quantum_hint_ms = 0;  // M3: informational, not enforced
+};
+
+// ── thread object ──────────────────────────────────────────────────────────
+
+class RtThread : public RuntimeObject {
+public:
+    XBOX2PC_RUNTIME_OBJECT_TYPE(RtThread, Thread)
+
+    using ThreadMain = void* (*)(RtThread& self, void* user_arg);
+
+    RtThread(ThreadMain main, void* arg, std::string name);
+    ~RtThread() override;
+
+    // Lifecycle control.
+    Result<void> start();           // Created -> Ready (host thread spawned)
+    Result<void> suspend();         // Running/Ready -> Suspended (cooperative)
+    Result<void> resume();          // Suspended -> Ready
+    Result<void> block_note();      // Running -> Blocked (called by sync waits)
+    Result<void> unblock_note();    // Blocked -> Running/Ready
+    Result<void> terminate(std::uint64_t exit_code);  // -> Terminated
+    Result<void> fail(std::string reason);            // -> Failed
+
+    Result<std::uint64_t> join_ns(pal::MonotonicNs timeout_ns);  // wait exit
+    bool joinable() const;
+
+    // Introspection.
+    ThreadState state() const { return state_.load(std::memory_order_acquire); }
+    std::uint64_t thread_id() const { return thread_id_; }
+    std::uint64_t exit_code() const;
+    ThreadPriority priority() const { return sched_.priority; }
+    void set_priority(ThreadPriority p);   // abstract; host mapping later
+    const ThreadScheduling& scheduling() const { return sched_; }
+    std::string fail_reason() const;
+
+    // Cooperative stop flag (PAL request_stop mirrors it).
+    void request_stop();
+    bool stop_requested() const;
+
+    // ── TLS (host-independent) ──────────────────────────────────────────
+    // Slots are byte arrays keyed by uint64 (TLS index). Freeing other
+    // threads' slots is prohibited (validated).
+    Result<void> tls_set(std::uint64_t key, const void* data, std::size_t len);
+    Result<std::vector<std::uint8_t>> tls_get(std::uint64_t key) const;
+    Result<std::size_t> tls_size() const;
+
+    // Static-thread bootstrap helper: PAL threads take plain fn(void*);
+    // trampoline adapts.
+    static void* pal_trampoline(void* self_ptr);
+
+private:
+    void on_destroy() override;
+
+    const std::uint64_t thread_id_;        // runtime id (unique, never zero)
+    ThreadMain const main_;
+    void* const arg_;
+    std::string name_;
+    std::atomic<ThreadState> state_{ThreadState::Created};
+    ThreadScheduling sched_;
+    std::unique_ptr<pal::PalThread> host_;
+    mutable std::mutex transition_lock_;   // serializes transitions (const readers lock too)
+    std::atomic<bool> stop_flag_{false};
+    std::atomic<std::uint64_t> exit_code_{0};
+    std::atomic<bool> exited_{false};
+    std::string fail_reason_;
+    // TLS (guarded by transition_lock_ + thread affinity)
+    std::map<std::uint64_t, std::vector<std::uint8_t>> tls_;
+
+    // Id assignment (thread ids from a process-wide counter via helper).
+    static std::uint64_t next_thread_id();
+};
+
+// ── validated transition helper (exposed for tests) ────────────────────────
+// Returns true when from -> to is legal per the M3 state machine.
+bool thread_transition_valid(ThreadState from, ThreadState to);
+
+}  // namespace xbox2pc::rt
