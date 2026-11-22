@@ -135,6 +135,9 @@ public:
 
     // Refcount pin: incremented by RefGuard/ObjectManager while any caller
     // holds an access reference; destroy() waits for the pin to drop.
+    // M4: unpin() notifies the drain condvar when the object is mid-destroy
+    // so ObjectManager::destroy() wakes promptly (condvar pin drain; the
+    // drain coordinator is installed by the manager at registration).
     void pin();
     void unpin();
     std::uint64_t pin_count() const { return pins_.load(std::memory_order_acquire); }
@@ -157,6 +160,23 @@ private:
     std::string name_;
     mutable std::mutex meta_lock_;   // PAL mutex for metadata
     std::vector<std::pair<std::string, std::string>> meta_;
+
+public:
+    // ── M4 drain notification plumbing ──
+    // Called by ObjectManager at registration: when unpin() drops the last
+    // pin of a DESTROYING object, the notify fires. The callback receives
+    // the SNAPSHOTTED context (the owning manager pointer), captured
+    // BEFORE the pin decrement — after the decrement the object may be
+    // destroyed concurrently, so the callback must not touch the object.
+    using DrainNotify = void (*)(void* drain_context);
+    void set_drain_notification(DrainNotify fn);
+    DrainNotify drain_notification() const { return drain_notify_.load(std::memory_order_acquire); }
+    void set_drain_context(void* ctx) { drain_context_.store(ctx, std::memory_order_release); }
+    void* drain_context() const { return drain_context_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<DrainNotify> drain_notify_{nullptr};
+    std::atomic<void*> drain_context_{nullptr};
 };
 
 template <typename T>

@@ -27,8 +27,10 @@
 // silently dropped (see runtime_error.hpp).
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -40,12 +42,26 @@ namespace xbox2pc::rt {
 
 class ObjectManager;
 
+// Process-table id allocation (0 = runtime root table; 1..511 process
+// tables; exhaustion returns the reserved 0 — documented 9-bit limit).
+std::uint16_t allocate_table_id();
+
 // ── handle representation ────────────────────────────────────────────────
 //
 // 64-bit layout (little-endian packing, value computed arithmetically):
 //   bits 0..8   : type id (9 bits, mirrors TypeId for cheap validation)
 //   bits 9..39  : generation (31 bits, nonzero while slot in use)
-//   bits 40..63 : slot index (24 bits, max 16M entries per table)
+//   bits 40..54 : slot index (15 bits, max 32K entries per table)
+//   bits 55..63 : table id (9 bits, owning table — M4 hardening)
+//
+// M4 change (documented architectural fix): the owning TABLE ID is now
+// encoded in the handle. In M3, two handles from different tables with
+// the same slot index/generation/type produced the SAME raw value, so a
+// handle passed to the wrong table could alias a foreign object. With the
+// table id embedded, cross-table lookups fail with InvalidHandle (the
+// table checks its own id first). Capacity per table drops 16M -> 32K
+// entries, which exceeds every realistic M4 use (per-process tables hold
+// at most thousands of objects; the limit is typed as HandleTableFull).
 class Handle {
 public:
     Handle() = default;
@@ -58,16 +74,28 @@ public:
         return static_cast<std::uint32_t>((raw_ >> 9) & 0x7FFFFFFF);
     }
     constexpr std::uint32_t index() const {
-        return static_cast<std::uint32_t>(raw_ >> 40);
+        return static_cast<std::uint32_t>((raw_ >> 40) & 0x7FFF);
+    }
+    constexpr std::uint16_t table_id() const {
+        return static_cast<std::uint16_t>(raw_ >> 55);
     }
 
     static constexpr Handle from_parts(std::uint32_t index, std::uint32_t gen,
-                                       std::uint16_t type) {
+                                       std::uint16_t type,
+                                       std::uint16_t table_id) {
         Handle h;
-        h.raw_ = (static_cast<std::uint64_t>(index) << 40) |
+        h.raw_ = (static_cast<std::uint64_t>(table_id & 0x1FF) << 55) |
+                 (static_cast<std::uint64_t>(index & 0x7FFF) << 40) |
                  (static_cast<std::uint64_t>(gen & 0x7FFFFFFF) << 9) |
                  static_cast<std::uint64_t>(type & 0x1FF);
         return h;
+    }
+
+    // Legacy 3-part form (M3 tests): table id 0 = the runtime's own table
+    // keeps old encodings working where the table id is irrelevant.
+    static constexpr Handle from_parts(std::uint32_t index, std::uint32_t gen,
+                                       std::uint16_t type) {
+        return from_parts(index, gen, type, 0);
     }
 
     constexpr bool operator==(const Handle& o) const { return raw_ == o.raw_; }
@@ -77,6 +105,41 @@ private:
     explicit constexpr Handle(std::uint64_t raw) : raw_(raw) {}
     std::uint64_t raw_ = 0;
 };
+
+// ── access rights (M4) ───────────────────────────────────────────────────
+//
+// A capability mask on each handle: what the holder may DO with the
+// object. Rights only ever NARROW on duplication (the lattice below);
+// defaults grant everything but Synchronize is meaningful only for sync
+// objects (checked at use, not stored per-object-type).
+enum class AccessRights : std::uint16_t {
+    None = 0,
+    // Single rights (bitfield).
+    Read = 1,
+    Write = 2,
+    Execute = 4,
+    Duplicate = 8,
+    Close = 16,
+    Synchronize = 32,
+    // Common bundles.
+    ReadWrite = Read | Write,
+    All = Read | Write | Execute | Duplicate | Close | Synchronize,
+};
+
+constexpr AccessRights operator|(AccessRights a, AccessRights b) {
+    return static_cast<AccessRights>(static_cast<std::uint16_t>(a) |
+                                      static_cast<std::uint16_t>(b));
+}
+constexpr AccessRights operator&(AccessRights a, AccessRights b) {
+    return static_cast<AccessRights>(static_cast<std::uint16_t>(a) &
+                                      static_cast<std::uint16_t>(b));
+}
+constexpr bool has_right(AccessRights have, AccessRights need) {
+    return (static_cast<std::uint16_t>(have) &
+            static_cast<std::uint16_t>(need)) ==
+           static_cast<std::uint16_t>(need);
+}
+const char* access_rights_to_name(AccessRights r);  // "read|write|close"
 
 // ── RefGuard ─────────────────────────────────────────────────────────────
 //
@@ -90,8 +153,14 @@ public:
         if (obj_ != nullptr) obj_->pin();
     }
     ~RefGuard() {
-        if (obj_ != nullptr && obj_->state() != ObjectState::Destroyed) {
-            obj_->unpin();
+        if (obj_ != nullptr) {
+            // Read the state BEFORE unpinning: the unpin below can drop the
+            // LAST pin, after which a concurrent destroy() may free the
+            // object — touching obj_ after unpin would be use-after-free.
+            const ObjectState s = obj_->state();
+            if (s != ObjectState::Destroyed) {
+                obj_->unpin();
+            }
         }
     }
 
@@ -127,8 +196,12 @@ public:
     }
 
     void release() {
-        if (obj_ != nullptr && obj_->state() != ObjectState::Destroyed) {
-            obj_->unpin();
+        if (obj_ != nullptr) {
+            // Same ordering rule as the destructor (see above).
+            const ObjectState s = obj_->state();
+            if (s != ObjectState::Destroyed) {
+                obj_->unpin();
+            }
         }
         obj_ = nullptr;
     }
@@ -141,27 +214,56 @@ private:
 //
 // One table per process (plus the runtime's own table for process objects).
 // Free lists make slot allocation O(1); generation bumps on close.
+//
+// M4 hardening: tables own a unique TABLE ID (0 = runtime root table);
+// handles embed it, so a handle from table B cannot resolve in table A
+// (cross-table isolation, typed InvalidHandle). Slots carry ACCESS RIGHTS
+// + INHERITANCE metadata; duplication validates the Duplicate right and
+// may reduce rights; closure requires the Close right.
 
 class ObjectManager;  // fwd
 
 class HandleTable {
 public:
-    static constexpr std::uint32_t kMaxSlots = 1u << 24;   // 16M
+    static constexpr std::uint32_t kMaxSlots = 1u << 15;   // 32K (M4 layout)
     static constexpr std::uint32_t kMaxGeneration = 0x7FFFFFFF;
+    static constexpr std::uint16_t kRuntimeTableId = 0;
 
+    // Runtime root table (id 0). Per-process tables get ids 1..511.
     explicit HandleTable(ObjectManager& owner);
+    // Table with an explicit id (id 0 is reserved for the runtime table).
+    HandleTable(ObjectManager& owner, std::uint16_t table_id);
 
-    // Creates a handle bound to `obj` (any table entry holds only a
-    // back-reference id; the manager resolves ids to objects).
+    // Creates a handle with FULL rights (the creation grant).
     Result<Handle> create(RuntimeObject& obj);
 
-    // Resolves a handle to a pinned object; validates generation + type.
+    // Creates a handle with explicit rights (the creation grant can be
+    // narrower than All; e.g. read-only views handed to other components).
+    Result<Handle> create_with_rights(RuntimeObject& obj, AccessRights rights,
+                                       bool inheritable);
+
+    // Resolves a handle to a pinned object; validates table id, generation,
+    // and type. Rights are NOT checked here (lookup is id resolution);
+    // use rights_of() + has_right() at the operation site.
     Result<RefGuard> lookup(Handle h) const;
 
-    // Closes one handle: frees the slot (generation bump), unpins.
+    // Rights of a live handle (None on any validation failure).
+    AccessRights rights_of(Handle h) const;
+    // Inheritance flag of a live handle.
+    bool inheritable(Handle h) const;
+
+    // Closes one handle: requires the Close right; frees the slot
+    // (generation bump). Closing WITHOUT the right returns LockNotOwned-
+    // style typed error (InvalidArgument).
     Result<void> close(Handle h);
 
-    // Issues a NEW handle to the same object (independent slot).
+    // Issues a NEW handle to the same object (independent slot). Requires
+    // the Duplicate right on the source. The new handle's rights are
+    // `reduced` (must be a SUBSET of the source rights — validated), and
+    // its inheritable flag is caller-chosen but never widens the rights.
+    Result<Handle> duplicate(Handle h, AccessRights reduced,
+                              bool inheritable);
+    // Full-rights duplicate (convenience; preserves source rights).
     Result<Handle> duplicate(Handle h);
 
     // Type validation helper used by typed close paths.
@@ -169,12 +271,24 @@ public:
 
     std::uint32_t live_count() const;
     std::uint32_t slot_capacity() const { return kMaxSlots; }
+    std::uint16_t table_id() const { return table_id_; }
 
     // All live handles (CLI/diagnostics).
     std::vector<Handle> all_handles() const;
 
-    // Close every live slot (process teardown).
+    // Close every live slot (process teardown) regardless of rights.
     Result<void> close_all();
+
+    // Diagnostic listing entry (CLI handle-info).
+    struct HandleInfo {
+        Handle handle;
+        std::uint64_t object_id;
+        std::uint16_t type;
+        std::string type_name;
+        AccessRights rights;
+        bool inheritable;
+    };
+    std::vector<HandleInfo> list_handles() const;
 
 private:
     struct Slot {
@@ -182,9 +296,12 @@ private:
         std::uint16_t type = 0;
         std::uint32_t generation = 0;        // 0 = free slot
         bool in_use = false;
+        std::uint16_t rights = static_cast<std::uint16_t>(AccessRights::All);
+        bool inheritable = true;
     };
 
     ObjectManager* owner_ = nullptr;   // installed by the runtime facade
+    const std::uint16_t table_id_;
     mutable std::shared_mutex lock_;
     std::vector<Slot> slots_;                 // dense, grows
     std::vector<std::uint32_t> free_;        // free slot stack
@@ -275,11 +392,33 @@ public:
     // For HandleTable back-reference resolution.
     Result<RefGuard> resolve_id(std::uint64_t id) const;
 
+    // ── M4: rights-aware handle ops on the runtime table ──
+    Result<Handle> create_handle_with_rights(RuntimeObject& obj,
+                                               AccessRights rights,
+                                               bool inheritable);
+    Result<Handle> duplicate_handle_with_rights(Handle h, AccessRights reduced,
+                                                 bool inheritable);
+
+    // Pin-drain notification (called by RuntimeObject::unpin when the
+    // object is mid-destroy; see runtime_object.cpp).
+    void notify_drain();
+
+    // Static entry installed on every registered object: receives the
+    // snapshotted drain context (this manager) and notifies its drain
+    // condvar — never touches the (possibly destroyed) object.
+    static void on_object_unpinned(void* drain_context);
+
 private:
     mutable std::shared_mutex lock_;
     std::unordered_map<std::uint64_t, std::unique_ptr<RuntimeObject>> objects_;
     std::atomic<std::uint64_t> next_id_{1};
     HandleTable table_;
+    // M4: condvar-based pin drain (replaces the M3 bounded spin). Pairs
+    // with drain_mutex_ (its OWN mutex — the map lock is released while
+    // waiting, so guard releases never contend on the map lock).
+    std::condition_variable drain_cv_;
+    std::mutex drain_mutex_;
+    friend class RuntimeObject;  // unpin() wake path touches nothing private
 };
 
 }  // namespace xbox2pc::rt
