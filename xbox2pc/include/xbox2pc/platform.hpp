@@ -64,7 +64,14 @@ public:
     virtual Result<void> request_stop() = 0;
     virtual bool stop_requested() const = 0;
     virtual HostThread id() const = 0;
+    // M4: best-effort thread naming (Linux: pthread_setname_np, truncated
+    // to 16 bytes by the OS — documented host limit, not an Xbox fact).
+    virtual Result<void> set_name(const std::string& name) = 0;
 };
+
+// M4: identity of the CALLING thread (backend pthread_self); used for
+// join-self detection and ownership validation.
+HostThread current_thread();
 
 // Factory implemented by the backend (keeps PAL users backend-agnostic).
 std::unique_ptr<PalThread> make_host_thread();
@@ -130,6 +137,16 @@ public:
     // No-execute / read-write protections as far as the host allows;
     // errors are surfaced, never ignored (never silently discard errors).
     virtual Result<void> protect(bool read, bool write, bool exec) = 0;
+    // M4: protect a SUBRANGE [offset, offset+size) of the region. Runtime
+    // layers validate page alignment first; the backend maps to mprotect.
+    // Implementations may round outward to host page boundaries.
+    virtual Result<void> protect_subrange(std::uint64_t offset,
+                                           std::uint64_t size,
+                                           bool read, bool write, bool exec) = 0;
+    // M4: commit a previously-PROT_NONE reserved subrange (Linux: mprotect
+    // RW; a Windows backend would VirtualAlloc MEM_COMMIT over the range).
+    virtual Result<void> commit_subrange(std::uint64_t offset,
+                                         std::uint64_t size) = 0;
 };
 
 // reserve = reserve address space without committing; commit = accessible.
