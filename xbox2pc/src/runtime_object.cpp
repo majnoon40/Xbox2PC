@@ -134,6 +134,20 @@ void RuntimeObject::manager_mark_destroyed() {
 void RuntimeObject::pin() { pins_.fetch_add(1, std::memory_order_acq_rel); }
 
 void RuntimeObject::unpin() {
+    // M4 use-after-free fix (2 rounds, see docs/runtime-object-model.md):
+    // after the pin decrement a concurrent destroy() may erase+delete the
+    // object, so EVERYTHING the wake path needs is snapshotted BEFORE the
+    // decrement, and the callback receives the snapshot (never `this`):
+    //   1. candidate-last-pin check + state + fn + context (all reads);
+    //   2. the decrement itself (the object's final legal touch);
+    //   3. fn(context) — touches only the manager, never this object.
+    const bool last_pin_candidate = pins_.load(std::memory_order_acquire) == 1;
+    const ObjectState snapshot_state = state_.load(std::memory_order_acquire);
+    const bool firing = last_pin_candidate && snapshot_state == ObjectState::Destroying;
+    const DrainNotify snapshot_fn =
+        firing ? drain_notify_.load(std::memory_order_acquire) : nullptr;
+    void* snapshot_ctx =
+        firing ? drain_context_.load(std::memory_order_acquire) : nullptr;
     const std::uint64_t prev =
         pins_.fetch_sub(1, std::memory_order_acq_rel);
     if (prev == 0) {
@@ -141,6 +155,13 @@ void RuntimeObject::unpin() {
         throw RuntimeError(RuntimeErrc::InvalidState,
                            "object pin underflow (unpin without pin)");
     }
+    if (prev == 1 && snapshot_fn != nullptr && snapshot_ctx != nullptr) {
+        snapshot_fn(snapshot_ctx);
+    }
+}
+
+void RuntimeObject::set_drain_notification(DrainNotify fn) {
+    drain_notify_.store(fn, std::memory_order_release);
 }
 
 bool RuntimeObject::is_alive() const {
