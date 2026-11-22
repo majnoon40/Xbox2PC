@@ -26,3 +26,13 @@ target_link_libraries(deps_test PRIVATE
 target_compile_features(deps_test PRIVATE cxx_std_20)
 
 add_test(NAME deps_test COMMAND deps_test)
+
+# M3: runtime architecture suite.
+add_executable(runtime_test runtime_test.cpp)
+target_link_libraries(runtime_test PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(runtime_test PRIVATE cxx_std_20)
+
+add_test(NAME runtime_test COMMAND runtime_test)

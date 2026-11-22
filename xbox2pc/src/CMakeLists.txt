@@ -48,7 +48,70 @@ target_link_libraries(xbox2pc_dep_graph PUBLIC
     xbox2pc_dep_analyzer xbox2pc_json xbox2pc_pe_parser xbox2pc_api_registry)
 target_compile_features(xbox2pc_dep_graph PUBLIC cxx_std_20)
 
-# Aggregate target: everything M1+M2 needs for tools and tests.
+# ── M3: runtime_core subsystem ──────────────────────────────────────────────
+#
+# Layering (docs/architecture.md): runtime_error/platform at the bottom (no
+# deps beyond diagnostics-free headers), object model + handle management
+# above them, sync/thread/process/io objects above those, service registry
+# and the facade on top. One library per layer keeps components independently
+# testable; no layer links upward.
+
+add_library(xbox2pc_rt_error STATIC runtime_error.cpp)
+target_include_directories(xbox2pc_rt_error PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(xbox2pc_rt_error PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_pal STATIC pal_linux.cpp)
+target_include_directories(xbox2pc_rt_pal PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_pal PUBLIC xbox2pc_rt_error)
+target_compile_features(xbox2pc_rt_pal PUBLIC cxx_std_20)
+find_package(Threads REQUIRED)
+target_link_libraries(xbox2pc_rt_pal PUBLIC Threads::Threads)
+
+add_library(xbox2pc_rt_object STATIC runtime_object.cpp)
+target_include_directories(xbox2pc_rt_object PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_object PUBLIC xbox2pc_rt_error)
+target_compile_features(xbox2pc_rt_object PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_handles STATIC handle_manager.cpp)
+target_include_directories(xbox2pc_rt_handles PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_handles PUBLIC xbox2pc_rt_object)
+target_compile_features(xbox2pc_rt_handles PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_sync STATIC sync_objects.cpp)
+target_include_directories(xbox2pc_rt_sync PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_sync PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_sync PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_thread STATIC thread_model.cpp)
+target_include_directories(xbox2pc_rt_thread PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_thread PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_thread PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_io STATIC io_objects.cpp)
+target_include_directories(xbox2pc_rt_io PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_io PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_io PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_process STATIC process_model.cpp)
+target_include_directories(xbox2pc_rt_process PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_process PUBLIC
+    xbox2pc_rt_handles xbox2pc_rt_pal xbox2pc_dep_analyzer)
+target_compile_features(xbox2pc_rt_process PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_services STATIC service_registry.cpp)
+target_include_directories(xbox2pc_rt_services PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_services PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_services PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_core STATIC runtime_core.cpp)
+target_include_directories(xbox2pc_rt_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_core PUBLIC
+    xbox2pc_rt_error xbox2pc_rt_pal xbox2pc_rt_object xbox2pc_rt_handles
+    xbox2pc_rt_sync xbox2pc_rt_thread xbox2pc_rt_io xbox2pc_rt_process
+    xbox2pc_rt_services)
+target_compile_features(xbox2pc_rt_core PUBLIC cxx_std_20)
+
+# Aggregate target: everything M1+M2+M3 needs for tools and tests.
 add_library(xbox2pc_core INTERFACE)
 target_link_libraries(xbox2pc_core INTERFACE
     xbox2pc_diagnostics
@@ -57,4 +120,5 @@ target_link_libraries(xbox2pc_core INTERFACE
     xbox2pc_api_registry
     xbox2pc_compat_db
     xbox2pc_dep_analyzer
-    xbox2pc_dep_graph)
+    xbox2pc_dep_graph
+    xbox2pc_rt_core)
