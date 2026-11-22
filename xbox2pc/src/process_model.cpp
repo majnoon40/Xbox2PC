@@ -22,14 +22,20 @@ std::atomic<std::uint64_t> g_next_pid{1};
 //   Terminated/Failed terminal (Terminated -> Terminated idempotent).
 constexpr bool kTrans[7][7] = {
     // to:       Created Init Running Suspended Term-inate Term-ined Failed
-    /* Created */ {false, true, false, false, false, false, true},
-    /* Init */ {false, false, true, false, false, false, true},
+    /* Created */ {false, true, false, false, true, false, true},
+    /* Init */ {false, false, true, false, true, false, true},
     /* Running */ {false, false, false, true, true, false, true},
     /* Suspended */ {false, false, true, false, true, false, true},
     /* Terminating */ {false, false, false, false, false, true, true},
     /* Terminated */ {false, false, false, false, false, true, false},
     /* Failed */ {false, false, false, false, false, false, true},
 };
+// M4 change (documented in docs/process-management.md): Created and
+// Initializing may now transition to Terminating — M4 requires that ANY
+// pre-terminal process be terminable (deterministic cleanup of partially
+// initialized processes is a milestone requirement; the M3 table only
+// allowed termination from Running/Suspended). process_transition_valid()
+// tests updated accordingly.
 
 int idx(ProcessState s) {
     switch (s) {
