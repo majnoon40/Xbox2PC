@@ -40,6 +40,29 @@ struct ExportFunc {
     std::string forwarder;  // non-empty -> forwarder string
 };
 
+// One base-relocation entry to embed (M6 loader tests). Types follow the
+// PE/COFF spec: 0=ABSOLUTE (padding), 3=HIGHLOW, 10=DIR64.
+struct RelocSpec {
+    std::uint16_t type = 10;         // IMAGE_REL_BASED_DIR64 default
+    std::uint32_t target_rva = 0;    // where the fixup applies
+    std::uint64_t addend = 0;       // value planted at target (pre-reloc)
+};
+
+// One relocation BLOCK (page-rva + entries). The builder packs entries
+// into blocks per the spec (page-relative 12-bit offsets).
+struct RelocBlockSpec {
+    std::uint32_t page_rva = 0;
+    std::vector<RelocSpec> entries;
+};
+
+// TLS directory content to embed (M6): template bytes (planted in .rdata),
+// zero-fill size, and callback VAs (planted as an array; NEVER executed).
+struct TlsSpec {
+    std::vector<std::uint8_t> template_data;   // copied to .rdata
+    std::uint32_t zero_fill = 0;               // SizeOfZeroFill
+    std::vector<std::uint64_t> callback_vas;   // synthetic (never run)
+};
+
 struct PeBuildSpec {
     std::uint16_t machine = 0x8664;         // AMD64 default
     std::uint16_t subsystem = 3;             // console
@@ -50,6 +73,8 @@ struct PeBuildSpec {
     std::vector<ExportFunc> exports;
     std::vector<DelayImportDll> delay_imports;  // M2: directory 13 content
     bool export_with_forwarder_chain = false;   // M2: ForwarderChain != 0 metadata
+    std::vector<RelocBlockSpec> reloc_blocks;    // M6: directory 5 content
+    TlsSpec tls;                                 // M6: directory 9 (when template non-empty)
     std::uint16_t number_of_sections_override = 0;   // 0 = actual count
     std::uint32_t size_of_optional_override = 0;     // 0 = real size
     std::uint32_t number_of_rva_override = 0;        // 0 = 16
