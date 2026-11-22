@@ -1,0 +1,1 @@
+error: missing MZ (DOS) signature at offset 0x0

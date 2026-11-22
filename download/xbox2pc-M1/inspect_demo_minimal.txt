@@ -1,0 +1,33 @@
+================================================================
+xbox2pc PE inspection report
+source: samples/demo_minimal.exe
+================================================================
+architecture:  x86-64 (AMD64)
+pe_format:     PE32+ (x86-64, 64-bit addresses)
+entry_point:   RVA 0x1000 (VA 0x140001000)
+image_base:    0x140000000
+subsystem:     3 (Windows Console (CUI))
+size_of_image: 0x4000
+timestamp:     1752445488 (0x68743230)
+linker:        14.0
+dll_characteristics: 0x8160
+image_type:    DLL
+
+sections (3):
+  name     vsize      vaddr      rawsz      raw@      
+  .text    0x10       0x1000     0x200      0x400      512 B r code
+  .rdata   0x200      0x2000     0x200      0x600      512 B r
+  .data    0x200      0x3000     0x200      0x800      512 B r w
+
+data_directories:
+  (none)
+
+imports:
+  (none)
+
+exports:
+  (none)
+
+diagnostics:
+  (no warnings or errors)
+================================================================

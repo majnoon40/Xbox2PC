@@ -1,0 +1,111 @@
+Start testing: Nov 22 16:43 UTC
+----------------------------------------------------------
+1/1 Testing: pe_parser_test
+1/1 Test: pe_parser_test
+Command: "/home/z/my-project/xbox2pc/build/tests/pe_parser_test"
+Directory: /home/z/my-project/xbox2pc/build/tests
+"pe_parser_test" start time: Nov 22 16:43 UTC
+Output:
+----------------------------------------------------------
+[==========] Running 32 tests from 8 test suites.
+[----------] Global test environment set-up.
+[----------] 8 tests from ValidPeTest
+[ RUN      ] ValidPeTest.ParsesAndClassifies
+[       OK ] ValidPeTest.ParsesAndClassifies (0 ms)
+[ RUN      ] ValidPeTest.OptionalHeaderFields
+[       OK ] ValidPeTest.OptionalHeaderFields (0 ms)
+[ RUN      ] ValidPeTest.ImportTableDecoded
+[       OK ] ValidPeTest.ImportTableDecoded (0 ms)
+[ RUN      ] ValidPeTest.ExportTableDecoded
+[       OK ] ValidPeTest.ExportTableDecoded (0 ms)
+[ RUN      ] ValidPeTest.RvaToOffsetRoundTrip
+[       OK ] ValidPeTest.RvaToOffsetRoundTrip (0 ms)
+[ RUN      ] ValidPeTest.CleanImageNoWarnings
+[       OK ] ValidPeTest.CleanImageNoWarnings (0 ms)
+[ RUN      ] ValidPeTest.DataDirectoriesPresent
+[       OK ] ValidPeTest.DataDirectoriesPresent (0 ms)
+[ RUN      ] ValidPeTest.EmptyImageNoImports
+[       OK ] ValidPeTest.EmptyImageNoImports (0 ms)
+[----------] 8 tests from ValidPeTest (0 ms total)
+
+[----------] 6 tests from InvalidSignatureTest
+[ RUN      ] InvalidSignatureTest.MissingMz
+[       OK ] InvalidSignatureTest.MissingMz (0 ms)
+[ RUN      ] InvalidSignatureTest.MissingPeSignature
+[       OK ] InvalidSignatureTest.MissingPeSignature (0 ms)
+[ RUN      ] InvalidSignatureTest.EmptyFile
+[       OK ] InvalidSignatureTest.EmptyFile (0 ms)
+[ RUN      ] InvalidSignatureTest.GarbageHeader
+[       OK ] InvalidSignatureTest.GarbageHeader (0 ms)
+[ RUN      ] InvalidSignatureTest.ELfanewOutOfRange
+[       OK ] InvalidSignatureTest.ELfanewOutOfRange (0 ms)
+[ RUN      ] InvalidSignatureTest.ELfanewTooSmall
+[       OK ] InvalidSignatureTest.ELfanewTooSmall (0 ms)
+[----------] 6 tests from InvalidSignatureTest (0 ms total)
+
+[----------] 2 tests from TruncatedTest
+[ RUN      ] TruncatedTest.CutEverywhere
+[       OK ] TruncatedTest.CutEverywhere (0 ms)
+[ RUN      ] TruncatedTest.CutSectionContent
+[       OK ] TruncatedTest.CutSectionContent (0 ms)
+[----------] 2 tests from TruncatedTest (0 ms total)
+
+[----------] 3 tests from SectionTest
+[ RUN      ] SectionTest.RawOffsetBeyondEof
+[       OK ] SectionTest.RawOffsetBeyondEof (0 ms)
+[ RUN      ] SectionTest.NumberOfSectionsTooLarge
+[       OK ] SectionTest.NumberOfSectionsTooLarge (0 ms)
+[ RUN      ] SectionTest.ZeroVirtualAddressWithSize
+[       OK ] SectionTest.ZeroVirtualAddressWithSize (0 ms)
+[----------] 3 tests from SectionTest (0 ms total)
+
+[----------] 3 tests from MalformedImportTest
+[ RUN      ] MalformedImportTest.DirectoryRvaUnmappable
+[       OK ] MalformedImportTest.DirectoryRvaUnmappable (0 ms)
+[ RUN      ] MalformedImportTest.TruncatedThunkArray
+[       OK ] MalformedImportTest.TruncatedThunkArray (0 ms)
+[ RUN      ] MalformedImportTest.RunawayDescriptorCount
+[       OK ] MalformedImportTest.RunawayDescriptorCount (0 ms)
+[----------] 3 tests from MalformedImportTest (0 ms total)
+
+[----------] 5 tests from OverflowTest
+[ RUN      ] OverflowTest.SectionRawSizeOverflow
+[       OK ] OverflowTest.SectionRawSizeOverflow (0 ms)
+[ RUN      ] OverflowTest.DirectorySizeMax
+[       OK ] OverflowTest.DirectorySizeMax (0 ms)
+[ RUN      ] OverflowTest.EntryVaWrap
+[       OK ] OverflowTest.EntryVaWrap (0 ms)
+[ RUN      ] OverflowTest.EntryVaExactWrap
+[       OK ] OverflowTest.EntryVaExactWrap (0 ms)
+[ RUN      ] OverflowTest.ManyDirectoriesClamped
+[       OK ] OverflowTest.ManyDirectoriesClamped (0 ms)
+[----------] 5 tests from OverflowTest (0 ms total)
+
+[----------] 4 tests from MissingOptionalTest
+[ RUN      ] MissingOptionalTest.SizeZero
+[       OK ] MissingOptionalTest.SizeZero (0 ms)
+[ RUN      ] MissingOptionalTest.ObjectFileNoOptional
+[       OK ] MissingOptionalTest.ObjectFileNoOptional (0 ms)
+[ RUN      ] MissingOptionalTest.BadOptionalMagic
+[       OK ] MissingOptionalTest.BadOptionalMagic (0 ms)
+[ RUN      ] MissingOptionalTest.UnknownMagic
+[       OK ] MissingOptionalTest.UnknownMagic (0 ms)
+[----------] 4 tests from MissingOptionalTest (0 ms total)
+
+[----------] 1 test from DiagnosticsTest
+[ RUN      ] DiagnosticsTest.RecordAndCount
+[       OK ] DiagnosticsTest.RecordAndCount (0 ms)
+[----------] 1 test from DiagnosticsTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 32 tests from 8 test suites ran. (0 ms total)
+[  PASSED  ] 32 tests.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"pe_parser_test" end time: Nov 22 16:43 UTC
+"pe_parser_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 22 16:43 UTC

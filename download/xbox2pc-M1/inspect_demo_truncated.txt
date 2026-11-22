@@ -1,0 +1,32 @@
+note: 2 warning(s) during parse
+================================================================
+xbox2pc PE inspection report
+source: samples/demo_truncated.exe
+================================================================
+architecture:  x86-64 (AMD64)
+pe_format:     PE32+ (x86-64, 64-bit addresses)
+entry_point:   RVA 0x1000 (VA 0x140001000)
+image_base:    0x140000000
+subsystem:     3 (Windows Console (CUI))
+size_of_image: 0x4000
+timestamp:     1752445488 (0x68743230)
+linker:        14.0
+dll_characteristics: 0x8160
+image_type:    DLL
+
+sections (0):
+  name     vsize      vaddr      rawsz      raw@      
+
+data_directories:
+  (none)
+
+imports:
+  (none)
+
+exports:
+  (none)
+
+diagnostics:
+  [warning] section table extends beyond end of file; parsing 0 of 3 entries (offset 0x188)
+  [warning] image has no sections
+================================================================
