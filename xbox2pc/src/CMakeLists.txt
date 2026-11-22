@@ -159,6 +159,20 @@ target_link_libraries(xbox2pc_rt_vfs_process PUBLIC
     xbox2pc_rt_process xbox2pc_rt_thread xbox2pc_rt_handles)
 target_compile_features(xbox2pc_rt_vfs_process PUBLIC cxx_std_20)
 
+# ── M6: executable loader layer ─────────────────────────────────────────────
+#
+# rt_loader sits above rt_procman/rt_memory (mapping into managed process
+# address spaces) and the M1 PE parser (validation + section/import/TLS/
+# relocation decoding); rt_vfs_process is a link-only dependency for the
+# process-with-VFS creation path used by tests/CLI integration.
+
+add_library(xbox2pc_rt_loader STATIC image_loader.cpp)
+target_include_directories(xbox2pc_rt_loader PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_loader PUBLIC
+    xbox2pc_rt_procman xbox2pc_rt_memory xbox2pc_rt_vfs_process
+    xbox2pc_pe_parser xbox2pc_diagnostics)
+target_compile_features(xbox2pc_rt_loader PUBLIC cxx_std_20)
+
 add_library(xbox2pc_rt_core STATIC runtime_core.cpp)
 target_include_directories(xbox2pc_rt_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_core PUBLIC
@@ -166,7 +180,7 @@ target_link_libraries(xbox2pc_rt_core PUBLIC
     xbox2pc_rt_sync xbox2pc_rt_thread xbox2pc_rt_io xbox2pc_rt_process
     xbox2pc_rt_services xbox2pc_rt_memory xbox2pc_rt_procman
     xbox2pc_rt_vfs xbox2pc_rt_vfs_backends xbox2pc_rt_package
-    xbox2pc_rt_package_vfs xbox2pc_rt_vfs_process)
+    xbox2pc_rt_package_vfs xbox2pc_rt_vfs_process xbox2pc_rt_loader)
 target_compile_features(xbox2pc_rt_core PUBLIC cxx_std_20)
 
 # Aggregate target: everything M1..M5 needs for tools and tests.

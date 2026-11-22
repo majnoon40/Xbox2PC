@@ -31,6 +31,7 @@
 #include "xbox2pc/vfs_backends.hpp"
 #include "xbox2pc/vfs_process.hpp"
 #include "xbox2pc/runtime_core.hpp"
+#include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/service_registry.hpp"
 #include "xbox2pc/thread_model.hpp"
 
@@ -84,6 +85,13 @@ void usage() {
                  "       xbox2pc read <path> [--limit N] [--json <out>]\n"
                  "       xbox2pc packages [--json <out>]\n"
                  "       xbox2pc discover [path] [--json <out>]\n"
+                 "       xbox2pc validate-pe <pe-file> [--json <out>]\n"
+                 "       xbox2pc map-image <pe-file> [--base 0xVA] [--json <out>]\n"
+                 "       xbox2pc relocations <pe-file> [--json <out>]\n"
+                 "       xbox2pc imports <pe-file> [--json <out>]\n"
+                 "       xbox2pc load-image <pe-file> [--json <out>]\n"
+                 "       xbox2pc unload-image <pe-file>\n"
+                 "       xbox2pc image-info <pe-file> [--json <out>]\n"
                  "       xbox2pc --version\n");
 }
 
@@ -1458,6 +1466,589 @@ int cmd_discover(const std::string& root,
 
 }  // namespace
 
+
+// ── M6: executable loader CLI commands ─────────────────────────────────────
+//
+// Every M6 command loads the PE file (bytes + M1 parse), then exercises
+// the loader against a LIVE runtime: a managed process with its own
+// address space. `load-image`/`map-image` show the complete lifecycle;
+// `validate-pe`/`relocations`/`imports` are inspection-only (no process
+// needed for validate; the mapping ones use a scratch process).
+// State is per-invocation (documented: the CLI is stateless across runs).
+
+namespace {
+
+// Read a whole file into a byte vector (bounded by fstream).
+std::optional<std::vector<std::uint8_t>> read_pe_bytes(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::vector<std::uint8_t> bytes;
+    char buf[4096];
+    while (in.read(buf, sizeof(buf)) || in.gcount() > 0) {
+        bytes.insert(bytes.end(), buf, buf + in.gcount());
+    }
+    return bytes;
+}
+
+using namespace xbox2pc::rt::loader;
+
+// Shared world for the mapping-bearing commands: runtime + process.
+struct LoaderWorld {
+    xbox2pc::rt::RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm;
+    xbox2pc::rt::Handle process;
+    xbox2pc::rt::loader::ImageLoader loader;
+
+    LoaderWorld() : pm(core.objects()) {
+        if (!core.initialize().ok()) return;
+        auto p = pm.create_process("m6-cli.exe", 64ull << 20);
+        if (p.ok()) process = p.value();
+    }
+    ~LoaderWorld() { (void)core.shutdown(); }
+    bool ok() const { return !process.is_null(); }
+};
+
+// Resolve the ManagedProcess for the world handle.
+xbox2pc::rt::ManagedProcess* world_process(LoaderWorld& w) {
+    auto found = w.core.objects().lookup_handle(w.process);
+    return found.ok() ? found.value().get()->as<xbox2pc::rt::ManagedProcess>()
+                      : nullptr;
+}
+
+std::string prot_name(xbox2pc::rt::MemProtect p) {
+    return xbox2pc::rt::mem_protect_to_name(p);
+}
+
+}  // namespace
+
+int cmd_validate_pe(const std::string& path,
+                    const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        if (json_out.has_value()) {
+            Json j = Json::object();
+            j.set("file", path);
+            j.set("valid", false);
+            j.set("error", e.what());
+            if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+            std::printf("wrote %s\n", json_out->c_str());
+            return 0;
+        }
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    const auto rep = xbox2pc::rt::loader::validate_image(img, bytes->data(),
+                                                        bytes->size());
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("file", path);
+        j.set("valid", rep.valid);
+        j.set("size_of_image", rep.size_of_image);
+        j.set("size_of_headers", rep.size_of_headers);
+        j.set("preferred_base", rep.preferred_base);
+        j.set("entry_rva", static_cast<std::uint64_t>(rep.entry_rva));
+        j.set("needs_relocation", rep.needs_relocation);
+        j.set("has_tls_directory", rep.has_tls_directory);
+        Json arr = Json::array();
+        for (const auto& i : rep.issues) {
+            Json ij = Json::object();
+            ij.set("code", i.code);
+            ij.set("message", i.message);
+            arr.push_back(std::move(ij));
+        }
+        j.set("issues", std::move(arr));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc validate-pe %s\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("valid=%d SizeOfImage=%s SizeOfHeaders=%s\n",
+                rep.valid ? 1 : 0, hex(rep.size_of_image).c_str(),
+                hex(rep.size_of_headers).c_str());
+    std::printf("preferred-base=%s entry-rva=%s relocs=%d tls-dir=%d\n",
+                hex(rep.preferred_base).c_str(), hex(rep.entry_rva).c_str(),
+                rep.needs_relocation ? 1 : 0, rep.has_tls_directory ? 1 : 0);
+    if (!rep.issues.empty()) std::printf("issues:\n");
+    for (const auto& i : rep.issues) {
+        std::printf("  [%s] %s\n", i.code.c_str(), i.message.c_str());
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return rep.valid ? 0 : 1;
+}
+
+int cmd_relocations(const std::string& path,
+                     const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    auto blocks = xbox2pc::rt::loader::decode_relocations(
+        img, bytes->data(), bytes->size(), 1u << 20);
+    if (!blocks.ok()) {
+        std::fprintf(stderr, "error: %s\n", blocks.error_string().c_str());
+        return 1;
+    }
+    std::uint64_t total = 0;
+    for (const auto& b : blocks.value()) total += b.entries.size();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("file", path);
+        j.set("blocks", static_cast<std::uint64_t>(blocks.value().size()));
+        j.set("entries", total);
+        Json arr = Json::array();
+        for (const auto& b : blocks.value()) {
+            Json bj = Json::object();
+            bj.set("page_rva", b.page_rva);
+            bj.set("block_size", static_cast<std::uint64_t>(b.block_size));
+            Json es = Json::array();
+            for (const auto& e : b.entries) {
+                Json ej = Json::object();
+                ej.set("type", static_cast<std::uint64_t>(e.type));
+                ej.set("type_name", xbox2pc::rt::loader::reloc_type_to_name(e.type));
+                ej.set("target_rva", e.target_rva);
+                es.push_back(std::move(ej));
+            }
+            bj.set("entries", std::move(es));
+            arr.push_back(std::move(bj));
+        }
+        j.set("detail", std::move(arr));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc relocations %s (decoded, not applied)\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& b : blocks.value()) {
+        std::printf("block page-rva=%s size=%u entries=%zu\n",
+                    hex(b.page_rva).c_str(), b.block_size, b.entries.size());
+        for (const auto& e : b.entries) {
+            std::printf("  %-9s target-rva=%s\n",
+                        xbox2pc::rt::loader::reloc_type_to_name(e.type),
+                        hex(e.target_rva).c_str());
+        }
+    }
+    std::printf("%llu blocks, %llu entries\n",
+                static_cast<unsigned long long>(blocks.value().size()),
+                static_cast<unsigned long long>(total));
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_imports(const std::string& path,
+                const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    // Enumerate import bindings with the NullResolver: statuses then are
+    // Unsupported (module unknown) — showing exactly what WOULD need a
+    // resolver. For by-name listing we mirror M1's decoded view instead.
+    LoaderWorld w;
+    if (!w.ok()) {
+        std::fprintf(stderr, "error: runtime init failed\n");
+        return 1;
+    }
+    auto* proc = world_process(w);
+    LoadDiagnostics diag;
+    xbox2pc::rt::loader::NullResolver null_res;
+    auto layout = w.loader.map_image(proc->address_space(), img,
+                                      bytes->data(), bytes->size(), 0, diag);
+    if (!layout.ok()) {
+        std::fprintf(stderr, "error: map for import inspection failed: %s\n",
+                     layout.error_string().c_str());
+        return 1;
+    }
+    auto bindings = w.loader.resolve_imports(proc->address_space(), layout.value(),
+                                            img, bytes->data(), bytes->size(),
+                                            null_res, diag);
+    if (!bindings.ok()) {
+        std::fprintf(stderr, "error: import walk failed: %s\n",
+                     bindings.error_string().c_str());
+        return 1;
+    }
+    std::uint64_t by_name = 0, by_ord = 0;
+    for (const auto& b : bindings.value()) {
+        if (b.lookup.by_ordinal) ++by_ord; else ++by_name;
+    }
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("file", path);
+        j.set("count", static_cast<std::uint64_t>(bindings.value().size()));
+        Json arr = Json::array();
+        for (const auto& b : bindings.value()) {
+            Json bj = Json::object();
+            bj.set("dll", b.lookup.dll);
+            if (b.lookup.by_ordinal) {
+                bj.set("ordinal", static_cast<std::uint64_t>(b.lookup.ordinal));
+            } else {
+                bj.set("symbol", b.lookup.symbol);
+            }
+            bj.set("by_ordinal", b.lookup.by_ordinal);
+            // Null-resolver statuses: what a real resolver must cover.
+            bj.set("requires_resolver", true);
+            arr.push_back(std::move(bj));
+        }
+        j.set("imports", std::move(arr));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc imports %s (resolver-required view)\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& b : bindings.value()) {
+        if (b.lookup.by_ordinal) {
+            std::printf("  %-24s #%u\n", b.lookup.dll.c_str(), b.lookup.ordinal);
+        } else {
+            std::printf("  %-24s %s\n", b.lookup.dll.c_str(),
+                        b.lookup.symbol.c_str());
+        }
+    }
+    std::printf("%llu imports (%llu by-name, %llu by-ordinal); NONE are "
+                "bound (no resolver in inspection mode)\n",
+                static_cast<unsigned long long>(bindings.value().size()),
+                static_cast<unsigned long long>(by_name),
+                static_cast<unsigned long long>(by_ord));
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_map_image(const std::string& path, std::uint64_t want_base,
+                  const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    const auto rep = xbox2pc::rt::loader::validate_image(img, bytes->data(),
+                                                         bytes->size());
+    if (!rep.valid) {
+        std::fprintf(stderr, "error: image fails validation:\n");
+        for (const auto& i : rep.issues)
+            std::fprintf(stderr, "  [%s] %s\n", i.code.c_str(), i.message.c_str());
+        return 1;
+    }
+    LoaderWorld w;
+    if (!w.ok()) {
+        std::fprintf(stderr, "error: runtime init failed\n");
+        return 1;
+    }
+    auto* proc = world_process(w);
+    LoadDiagnostics diag;
+    auto layout = w.loader.map_image(proc->address_space(), img,
+                                     bytes->data(), bytes->size(), want_base,
+                                     diag);
+    if (!layout.ok()) {
+        std::fprintf(stderr, "error: map failed: %s\n",
+                     layout.error_string().c_str());
+        return 1;
+    }
+    const auto& lay = layout.value();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("file", path);
+        j.set("preferred_base", lay.preferred_base);
+        j.set("actual_base", lay.actual_base);
+        j.set("mapped_size", lay.mapped_size);
+        j.set("relocated", lay.relocated);
+        j.set("delta", lay.delta);
+        j.set("entry_rva", static_cast<std::uint64_t>(lay.entry_rva));
+        j.set("entry_va", lay.entry_va);
+        Json secs = Json::array();
+        for (const auto& s : lay.sections) {
+            Json sj = Json::object();
+            sj.set("name", s.name);
+            sj.set("rva", static_cast<std::uint64_t>(s.rva));
+            sj.set("virtual_size", static_cast<std::uint64_t>(s.virtual_size));
+            sj.set("mapped_base", s.mapped_base);
+            sj.set("mapped_size", s.mapped_size);
+            sj.set("protection", prot_name(s.protection));
+            sj.set("file_backed", s.file_backed);
+            secs.push_back(std::move(sj));
+        }
+        j.set("sections", std::move(secs));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc map-image %s (live M4 address space)\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("preferred=%s actual=%s %s (delta %s)\n",
+                hex(lay.preferred_base).c_str(), hex(lay.actual_base).c_str(),
+                lay.relocated ? "RELOCATED" : "at-preferred",
+                hex(lay.delta).c_str());
+    std::printf("mapped=%s entry-va=%s\n", hex(lay.mapped_size).c_str(),
+                hex(lay.entry_va).c_str());
+    std::printf("headers-region=%s+%s\n",
+                hex(lay.headers_region_xbox_va).c_str(),
+                hex(lay.headers_region_size).c_str());
+    std::printf("sections (%zu):\n", lay.sections.size());
+    for (const auto& s : lay.sections) {
+        std::printf("  %-8s rva=%-6s vsz=%-6s map=%s+%s %s%s\n",
+                    s.name.c_str(), hex(s.rva).c_str(),
+                    hex(s.virtual_size).c_str(), hex(s.mapped_base).c_str(),
+                    hex(s.mapped_size).c_str(), prot_name(s.protection).c_str(),
+                    s.file_backed ? "" : " (zero-fill)");
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_load_image(const std::string& path,
+                   const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    LoaderWorld w;
+    if (!w.ok()) {
+        std::fprintf(stderr, "error: runtime init failed\n");
+        return 1;
+    }
+    // Controlled resolver: registers exactly the DLLs the image imports
+    // (CLI demo policy — clearly labeled; NOTHING binds to host functions).
+    xbox2pc::rt::loader::StaticResolver res;
+    for (const auto& e : img.imports.entries) {
+        res.add_module(e.dll_name, e.functions);
+    }
+    LoadDiagnostics diag;
+    LoadResult out;
+    auto h = w.loader.load_image(w.pm, w.core.objects(), w.process, img,
+                                 bytes->data(), bytes->size(), &res, diag, out);
+    if (!h.ok()) {
+        if (json_out.has_value()) {
+            Json j = Json::object();
+            j.set("file", path);
+            j.set("loaded", false);
+            j.set("state", load_state_to_name(out.final_state));
+            j.set("error", out.error);
+            if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+            std::printf("wrote %s\n", json_out->c_str());
+            return 0;
+        }
+        std::fprintf(stderr, "error: load failed at %s: %s\n",
+                     load_state_to_name(out.final_state), out.error.c_str());
+        return 1;
+    }
+    const auto& e = out.exec;
+    const bool fully_resolved = e.imports_resolved_all;
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("file", path);
+        j.set("loaded", true);
+        j.set("validated", e.validated);
+        j.set("mapped", e.mapped);
+        j.set("relocated", e.relocated);
+        j.set("imports_resolved", e.imports_resolved);
+        j.set("imports_unresolved", e.imports_unresolved);
+        j.set("imports_resolved_all", fully_resolved);
+        j.set("prepared", e.prepared);
+        j.set("actual_base", out.layout.actual_base);
+        j.set("entry_va", e.entry_va);
+        j.set("image_size", e.image_size);
+        j.set("relocations_applied", e.relocations_applied);
+        j.set("tls_present", e.tls_present);
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc load-image %s (full lifecycle, live runtime)\n",
+                path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  validated:  %s\n", e.validated ? "yes" : "NO");
+    std::printf("  mapped:     %s (base %s, size %s)\n",
+                e.mapped ? "yes" : "NO", hex(out.layout.actual_base).c_str(),
+                hex(e.image_size).c_str());
+    std::printf("  relocated:  %s (%llu DIR64 entries)\n",
+                e.relocated ? "yes" : "NO",
+                static_cast<unsigned long long>(e.relocations_applied));
+    std::printf("  imports:    %llu resolved, %llu unresolved (resolver: "
+                "controlled static test resolver)\n",
+                static_cast<unsigned long long>(e.imports_resolved),
+                static_cast<unsigned long long>(e.imports_unresolved));
+    std::printf("  prepared:  %s (entry-va %s)\n", e.prepared ? "yes" : "NO",
+                hex(e.entry_va).c_str());
+    std::printf("NOTE: reaching Prepared is NOT execution. No entry point "
+                "is started.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_unload_image(const std::string& path) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    LoaderWorld w;
+    if (!w.ok()) return 1;
+    xbox2pc::rt::loader::StaticResolver res;
+    for (const auto& e : img.imports.entries) res.add_module(e.dll_name, e.functions);
+    LoadDiagnostics diag;
+    LoadResult out;
+    auto h = w.loader.load_image(w.pm, w.core.objects(), w.process, img,
+                                  bytes->data(), bytes->size(), &res, diag, out);
+    if (!h.ok()) {
+        std::fprintf(stderr, "error: load for unload failed: %s\n",
+                     out.error.c_str());
+        return 1;
+    }
+    auto un = w.loader.unload_image(w.pm, w.core.objects(), w.process, h.value());
+    if (!un.ok()) {
+        std::fprintf(stderr, "error: unload failed: %s\n",
+                     un.error_string().c_str());
+        return 1;
+    }
+    auto list = w.loader.list_images(w.pm, w.core.objects(), w.process);
+    auto& space = world_process(w)->address_space();
+    std::printf("loaded then unloaded %s\n", path.c_str());
+    std::printf("remaining images: %zu; remaining regions: %u\n",
+                list.ok() ? list.value().size() : 0u,
+                space.stats().region_count);
+    return 0;
+}
+
+int cmd_image_info(const std::string& path,
+                   const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    LoaderWorld w;
+    if (!w.ok()) return 1;
+    xbox2pc::rt::loader::StaticResolver res;
+    for (const auto& e : img.imports.entries) res.add_module(e.dll_name, e.functions);
+    LoadDiagnostics diag;
+    LoadResult out;
+    auto h = w.loader.load_image(w.pm, w.core.objects(), w.process, img,
+                                  bytes->data(), bytes->size(), &res, diag, out);
+    if (!h.ok()) {
+        std::fprintf(stderr, "error: load failed: %s\n", out.error.c_str());
+        return 1;
+    }
+    auto list = w.loader.list_images(w.pm, w.core.objects(), w.process);
+    if (!list.ok() || list.value().empty()) {
+        std::fprintf(stderr, "error: no loaded image info\n");
+        return 1;
+    }
+    const auto& info = list.value().front();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("file", path);
+        j.set("name", info.name);
+        j.set("state", load_state_to_name(info.state));
+        j.set("actual_base", info.layout.actual_base);
+        j.set("preferred_base", info.layout.preferred_base);
+        j.set("mapped_size", info.layout.mapped_size);
+        j.set("entry_va", info.layout.entry_va);
+        j.set("imports_resolved", info.imports_resolved);
+        j.set("imports_unresolved", info.imports_unresolved);
+        j.set("relocations_applied", diag.relocations_applied);
+        j.set("tls_present", diag.has_tls);
+        Json secs = Json::array();
+        for (const auto& s : info.layout.sections) {
+            Json sj = Json::object();
+            sj.set("name", s.name);
+            sj.set("protection", prot_name(s.protection));
+            sj.set("mapped_base", s.mapped_base);
+            sj.set("mapped_size", s.mapped_size);
+            secs.push_back(std::move(sj));
+        }
+        j.set("sections", std::move(secs));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc image-info %s (loaded image view)\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("state=%s name=%s\n", load_state_to_name(info.state),
+                info.name.c_str());
+    std::printf("base: preferred=%s actual=%s size=%s\n",
+                hex(info.layout.preferred_base).c_str(),
+                hex(info.layout.actual_base).c_str(),
+                hex(info.layout.mapped_size).c_str());
+    std::printf("entry-va=%s imports: %llu resolved / %llu unresolved\n",
+                hex(info.layout.entry_va).c_str(),
+                static_cast<unsigned long long>(info.imports_resolved),
+                static_cast<unsigned long long>(info.imports_unresolved));
+    std::printf("relocations applied: %llu; TLS present: %d\n",
+                static_cast<unsigned long long>(diag.relocations_applied),
+                diag.has_tls ? 1 : 0);
+    for (const auto& s : info.layout.sections) {
+        std::printf("  %-8s %s %s+%s\n", s.name.c_str(),
+                    prot_name(s.protection).c_str(),
+                    hex(s.mapped_base).c_str(), hex(s.mapped_size).c_str());
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0)) {
         std::printf("xbox2pc 0.3.0 (M1: PE32+ inspection; M2: dependency "
@@ -1475,6 +2066,51 @@ int main(int argc, char** argv) {
                             early_cmd == "list" || early_cmd == "stat" ||
                             early_cmd == "read" || early_cmd == "packages" ||
                             early_cmd == "discover";
+        const bool m6_cmd = early_cmd == "validate-pe" || early_cmd == "map-image" ||
+                            early_cmd == "relocations" || early_cmd == "imports" ||
+                            early_cmd == "load-image" || early_cmd == "unload-image" ||
+                            early_cmd == "image-info";
+        if (m6_cmd) {
+            // M6 syntax: <cmd> <pe-file> [--base 0xVA (map-image)] [--json <out>]
+            std::string file;
+            std::optional<std::string> json_out;
+            std::uint64_t want_base = 0;
+            bool have_file = false;
+            for (int i = 2; i < argc; ++i) {
+                if (std::strcmp(argv[i], "--json") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --json requires an output path\n");
+                        return 2;
+                    }
+                    json_out = argv[i + 1];
+                    ++i;
+                } else if (std::strcmp(argv[i], "--base") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --base requires a value\n");
+                        return 2;
+                    }
+                    want_base = std::strtoull(argv[i + 1], nullptr, 0);
+                    ++i;
+                } else if (!have_file) {
+                    file = argv[i];
+                    have_file = true;
+                } else {
+                    std::fprintf(stderr, "error: unexpected argument '%s'\n", argv[i]);
+                    return 2;
+                }
+            }
+            if (!have_file) {
+                std::fprintf(stderr, "error: %s requires a PE file\n", early_cmd.c_str());
+                return 2;
+            }
+            if (early_cmd == "validate-pe") return cmd_validate_pe(file, json_out);
+            if (early_cmd == "map-image") return cmd_map_image(file, want_base, json_out);
+            if (early_cmd == "relocations") return cmd_relocations(file, json_out);
+            if (early_cmd == "imports") return cmd_imports(file, json_out);
+            if (early_cmd == "load-image") return cmd_load_image(file, json_out);
+            if (early_cmd == "unload-image") return cmd_unload_image(file);
+            return cmd_image_info(file, json_out);
+        }
         if (early_cmd == "runtime-info" || early_cmd == "runtime-objects" ||
             early_cmd == "runtime-services" || m4_cmd) {
             std::optional<std::string> json_out;

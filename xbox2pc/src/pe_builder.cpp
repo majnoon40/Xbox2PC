@@ -346,14 +346,77 @@ std::vector<std::uint8_t> PeBuilder::build() const {
         delay_dir_size = static_cast<std::uint32_t>(desc_count * 32);
     }
 
+    // ── M6: base relocation directory (directory 5) ──
+    // Blocks are appended to .data content. Entry offsets are page-
+    // relative (12-bit); every DIR64 entry's target gets its ADDEND
+    // planted into .text (the builder's code-bearing section) when the
+    // target falls inside .text's materialized extent.
+    std::uint32_t reloc_dir_size = 0;  // RVA is a pass-2 cursor
+    ByteBuf relocs;  // staged directory bytes (appended to .data in pass 2)
+    if (!spec.reloc_blocks.empty()) {
+        for (const auto& blk : spec.reloc_blocks) {
+            // Block size = 8 (header) + 2*entries, padded to a multiple of
+            // 4 with ABSOLUTE (type 0) padding entries (spec rule — an odd
+            // entry count yields size 8+2n which must round up).
+            const std::size_t n_entries = blk.entries.size();
+            const std::uint32_t block_size =
+                static_cast<std::uint32_t>(8 + ((n_entries + 1) / 2 * 2) * 2);
+            const std::uint64_t start = relocs.size();
+            relocs.resize(start + block_size);
+            relocs.u32(start + 0, blk.page_rva);
+            relocs.u32(start + 4, block_size);
+            for (std::size_t i = 0; i < n_entries; ++i) {
+                const auto& e = blk.entries[i];
+                const std::uint16_t ent =
+                    static_cast<std::uint16_t>((e.type << 12) |
+                                               (e.target_rva - blk.page_rva));
+                relocs.u16(start + 8 + i * 2, ent);
+                // Plant the pre-relocation value at the target (DIR64
+                // only, .text targets only).
+                if (e.type == 10 && e.target_rva >= text_rva &&
+                    e.target_rva + 8 <= text_rva + text.size()) {
+                    text.u64(e.target_rva - text_rva, e.addend);
+                }
+            }
+            // Padding slots stay zero (type 0 = ABSOLUTE, offset 0).
+        }
+        reloc_dir_size = static_cast<std::uint32_t>(relocs.size());
+    }
+
+    // ── M6: TLS directory (directory 9) ──
+    // Template bytes are planted into .rdata in pass 2; the directory
+    // struct is appended to .data after the relocation directory. Callback
+    // VAs are SYNTHETIC values (never executed by the loader). The tls_dir
+    // SIZE is finalized here; its RVA is a pass-2 cursor.
+    std::uint32_t tls_dir_size = 0;
+    if (!spec.tls.template_data.empty()) {
+        tls_dir_size = 64;
+    }
+
     // ── Pass 2: assemble the whole file ──
     const std::uint32_t text_file_size = align_up(static_cast<std::uint32_t>(text.size()), kFileAlignment);
     const std::uint32_t rdata_rva = align_up(text_rva + text_file_size, kSectionAlignment);
-    const std::uint32_t rdata_file_size = 0x200;
+    // .rdata hosts the TLS template (when requested) before the fixed pad.
+    const std::uint32_t tls_template_size =
+        static_cast<std::uint32_t>(spec.tls.template_data.size());
+    const std::uint32_t rdata_file_size =
+        align_up(0x200 + tls_template_size, kFileAlignment);
+    const std::uint32_t tls_template_rva =
+        tls_template_size != 0 ? rdata_rva + 0x200 : 0;
     const std::uint32_t data_rva = align_up(rdata_rva + rdata_file_size, kSectionAlignment);
-    const std::uint32_t data_file_size = 0x200;
+    // .data hosts the relocation directory then the TLS directory struct.
+    const std::uint32_t data_payload =
+        reloc_dir_size + tls_dir_size +
+        static_cast<std::uint32_t>(spec.tls.callback_vas.size() * 8) +
+        (tls_dir_size != 0 ? 8 : 0);  // callback array NUL terminator
+    const std::uint32_t data_file_size = align_up(0x200 + data_payload, kFileAlignment);
     const std::uint32_t headers = 0x400;
     const std::uint32_t size_of_image = align_up(data_rva + data_file_size, kSectionAlignment);
+    const std::uint32_t reloc_dir_rva = reloc_dir_size != 0 ? data_rva : 0;
+    const std::uint32_t tls_dir_rva =
+        tls_dir_size != 0 ? data_rva + reloc_dir_size : 0;
+    const std::uint32_t tls_callbacks_rva =
+        tls_dir_size != 0 ? tls_dir_rva + 64 : 0;
 
     ByteBuf out;
     // DOS header: magic + reserved + e_lfanew.
@@ -425,6 +488,14 @@ std::vector<std::uint8_t> PeBuilder::build() const {
         out.u32(dirs + 8 * 13, delay_dir_rva);   // DelayImport directory
         out.u32(dirs + 8 * 13 + 4, delay_dir_size);
     }
+    if (reloc_dir_rva != 0) {
+        out.u32(dirs + 8 * 5, reloc_dir_rva);    // BaseRelocation (M6)
+        out.u32(dirs + 8 * 5 + 4, reloc_dir_size);
+    }
+    if (tls_dir_rva != 0) {
+        out.u32(dirs + 8 * 9, tls_dir_rva);      // TLS (M6)
+        out.u32(dirs + 8 * 9 + 4, tls_dir_size);
+    }
 
     // Section table at pe + 24 + opt_size.
     const std::uint64_t sect_table = pe + 24 + opt_size;
@@ -457,7 +528,38 @@ std::vector<std::uint8_t> PeBuilder::build() const {
     for (std::size_t i = 0; i < text.size(); ++i) {
         out.u8(text_off + i, text.data()[i]);
     }
-    // .rdata / .data left as zero padding (file already grown).
+    // M6: TLS template bytes into .rdata (after the 0x200 fixed pad).
+    if (tls_template_size != 0) {
+        for (std::size_t i = 0; i < tls_template_size; ++i) {
+            out.u8(rdata_off + 0x200 + i, spec.tls.template_data[i]);
+        }
+    }
+    // M6: relocation directory bytes into .data at the cursor.
+    if (reloc_dir_size != 0) {
+        for (std::size_t i = 0; i < relocs.size(); ++i) {
+            out.u8(data_off + i, relocs.data()[i]);
+        }
+    }
+    // M6: TLS directory struct + callback array right after.
+    if (tls_dir_size != 0) {
+        const std::uint64_t td = data_off + reloc_dir_size;
+        const std::uint64_t base = spec.image_base;
+        out.u64(td + 0, base + tls_template_rva);         // StartOfRawData (VA)
+        out.u64(td + 8, base + tls_template_rva +
+                         static_cast<std::uint64_t>(tls_template_size));  // End
+        out.u64(td + 16, base + 0);                       // Index slot (VA; loader treats as RVA-0 marker: fixed placeholder)
+        // Callback array VA (immediately after the struct).
+        out.u64(td + 24, base + tls_callbacks_rva);
+        out.u32(td + 32, spec.tls.zero_fill);             // SizeOfZeroFill
+        out.u32(td + 36, 0);                              // Characteristics
+        // Callback array: entries + NUL terminator.
+        std::uint64_t cbp = td + 64;
+        for (std::size_t i = 0; i < spec.tls.callback_vas.size(); ++i) {
+            out.u64(cbp + 8 * i, spec.tls.callback_vas[i]);
+        }
+        out.u64(cbp + 8 * spec.tls.callback_vas.size(), 0);  // terminator
+    }
+    // .rdata / .data remainder left as zero padding (file already grown).
 
     return out.data();
 }
