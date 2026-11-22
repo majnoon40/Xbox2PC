@@ -24,6 +24,8 @@
 #include "xbox2pc/diagnostics.hpp"
 #include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
+#include "xbox2pc/runtime_core.hpp"
+#include "xbox2pc/service_registry.hpp"
 
 using xbox2pc::compat::CompatibilityDb;
 using xbox2pc::deps::DependencyReport;
@@ -59,6 +61,9 @@ void usage() {
                  "       xbox2pc dependencies <pe-file> [--json <out>]\n"
                  "       xbox2pc graph <pe-file> [--json <out>]\n"
                  "       xbox2pc classify <pe-file>\n"
+                 "       xbox2pc runtime-info [--json <out>]\n"
+                 "       xbox2pc runtime-objects [--json <out>]\n"
+                 "       xbox2pc runtime-services [--json <out>]\n"
                  "       xbox2pc --version\n");
 }
 
@@ -472,12 +477,224 @@ int cmd_classify(const std::string& path) {
     });
 }
 
+// ── M3: runtime architecture inspection ──────────────────────────────────
+//
+// Each command boots a REAL RuntimeCore (initialize + create a few live
+// objects so the architecture is exercised, not an empty shell) and reports
+// actual state. Nothing here emulates Xbox OS behavior — the runtime is the
+// xbox2pc architecture itself, and the output says so.
+
+namespace {
+
+Json runtime_info_json(const xbox2pc::rt::RuntimeCore& core) {
+    const auto s = core.summary();
+    Json j = Json::object();
+    j.set("tool", "xbox2pc");
+    j.set("version", "0.3.0");
+    j.set("runtime_state", s.state);
+    j.set("pal_backend", s.pal_backend);
+    j.set("pal_clock", s.pal_clock);
+    j.set("page_size", static_cast<std::uint64_t>(s.page_size));
+    j.set("object_count", static_cast<std::uint64_t>(s.object_count));
+    j.set("service_count", static_cast<std::uint64_t>(s.service_count));
+    j.set("handle_count", static_cast<std::uint64_t>(s.handle_count));
+    j.set("services_initialized", s.services_initialized);
+    j.set("layers", Json::array());  // filled by caller if needed
+    return j;
+}
+
+Json runtime_objects_json(const xbox2pc::rt::RuntimeCore& core) {
+    Json arr = Json::array();
+    for (const auto& o : core.objects().list_objects()) {
+        Json j = Json::object();
+        j.set("id", static_cast<std::uint64_t>(o.id));
+        j.set("type", o.type_name);
+        j.set("name", o.name);
+        j.set("state", xbox2pc::rt::object_state_to_name(o.state));
+        j.set("pins", static_cast<std::uint64_t>(o.pins));
+        arr.push_back(std::move(j));
+    }
+    return arr;
+}
+
+Json runtime_services_json(const xbox2pc::rt::RuntimeCore& core) {
+    Json arr = Json::array();
+    for (const auto& s : core.services().list_services()) {
+        Json j = Json::object();
+        j.set("name", s.name);
+        j.set("object_id", static_cast<std::uint64_t>(s.object_id));
+        j.set("state", xbox2pc::rt::service_state_to_name(s.state));
+        Json deps = Json::array();
+        for (const auto& d : s.dependencies) deps.push_back(d);
+        j.set("dependencies", std::move(deps));
+        if (!s.last_error.empty()) j.set("last_error", s.last_error);
+        arr.push_back(std::move(j));
+    }
+    return arr;
+}
+
+}  // namespace
+
+int cmd_runtime_info(const std::optional<std::string>& json_out) {
+    xbox2pc::rt::RuntimeCore core;
+    if (const auto r = core.initialize(); !r.ok()) {
+        std::fprintf(stderr, "error: runtime init failed: %s\n",
+                     r.error_string().c_str());
+        return 1;
+    }
+    if (json_out.has_value()) {
+        const std::string out = runtime_info_json(core).serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    const auto s = core.summary();
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc runtime architecture info\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("runtime_state:     %s\n", s.state.c_str());
+    std::printf("pal_backend:       %s\n", s.pal_backend.c_str());
+    std::printf("pal_clock:         %s\n", s.pal_clock.c_str());
+    std::printf("page_size:         %llu\n",
+                static_cast<unsigned long long>(s.page_size));
+    std::printf("objects:           %zu\n", s.object_count);
+    std::printf("services:          %zu\n", s.service_count);
+    std::printf("handles:           %zu\n", s.handle_count);
+    std::printf("services_initialized: %s\n", s.services_initialized ? "yes" : "no");
+    std::printf("\nlayers (bottom-up):\n");
+    std::printf("  1. runtime error model + type ids\n");
+    std::printf("  2. platform abstraction (Linux backend)\n");
+    std::printf("  3. object manager + object type registry\n");
+    std::printf("  4. handle management (generation-protected)\n");
+    std::printf("  5. sync / thread / process / io object models\n");
+    std::printf("  6. runtime service registry\n");
+    std::printf("  7. RuntimeCore facade (init/shutdown sequencing)\n");
+    std::printf("\nNOTE: this is the xbox2pc runtime architecture itself; no Xbox\n");
+    std::printf("OS emulation is claimed or performed.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_runtime_objects(const std::optional<std::string>& json_out) {
+    xbox2pc::rt::RuntimeCore core;
+    if (const auto r = core.initialize(); !r.ok()) {
+        std::fprintf(stderr, "error: runtime init failed: %s\n",
+                     r.error_string().c_str());
+        return 1;
+    }
+    // Create a few representative objects so the listing shows a living
+    // architecture (event, mutex, semaphore, memory region, process).
+    (void)core.create_event(true, false, "demo-event");
+    (void)core.create_mutex("demo-mutex");
+    (void)core.create_semaphore(1, 4, "demo-semaphore");
+    (void)core.create_memory_region(4096, true, "demo-region");
+    (void)core.create_process("demo-image.exe");
+
+    if (json_out.has_value()) {
+        const std::string out = runtime_objects_json(core).serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc runtime objects (live instance)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    const auto objs = core.objects().list_objects();
+    std::printf("%zu live object(s):\n", objs.size());
+    std::printf("  %-6s %-16s %-20s %-12s %s\n", "id", "type", "name", "state",
+                "pins");
+    for (const auto& o : objs) {
+        std::printf("  %-6llu %-16s %-20s %-12s %llu\n",
+                    static_cast<unsigned long long>(o.id), o.type_name.c_str(),
+                    o.name.c_str(),
+                    xbox2pc::rt::object_state_to_name(o.state),
+                    static_cast<unsigned long long>(o.pins));
+    }
+    std::printf("\nNOTE: demo objects created by this command in a fresh\n");
+    std::printf("runtime; no Xbox runtime objects are fabricated.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_runtime_services(const std::optional<std::string>& json_out) {
+    xbox2pc::rt::RuntimeCore core;
+    if (const auto r = core.initialize(); !r.ok()) {
+        std::fprintf(stderr, "error: runtime init failed: %s\n",
+                     r.error_string().c_str());
+        return 1;
+    }
+    if (json_out.has_value()) {
+        const std::string out = runtime_services_json(core).serialize();
+        if (!write_file(*json_out, out + "\n")) {
+            std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+            return 1;
+        }
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc runtime services (live instance)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    const auto svcs = core.services().list_services();
+    std::printf("%zu registered service(s):\n", svcs.size());
+    std::printf("  %-16s %-12s %-12s %s\n", "name", "state", "object", "deps");
+    for (const auto& s : svcs) {
+        std::string deps;
+        for (std::size_t i = 0; i < s.dependencies.size(); ++i) {
+            deps += s.dependencies[i];
+            if (i + 1 < s.dependencies.size()) deps += ", ";
+        }
+        std::printf("  %-16s %-12s %-12llu %s\n", s.name.c_str(),
+                    xbox2pc::rt::service_state_to_name(s.state),
+                    static_cast<unsigned long long>(s.object_id),
+                    deps.empty() ? "-" : deps.c_str());
+    }
+    std::printf("\nNOTE: only the built-in platform_info service exists in M3;\n");
+    std::printf("graphics/audio/input/... register in later milestones.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0)) {
-        std::printf("xbox2pc 0.2.0 (M1: PE32+ inspection; M2: dependency intelligence)\n");
+        std::printf("xbox2pc 0.3.0 (M1: PE32+ inspection; M2: dependency "
+                    "intelligence; M3: runtime architecture)\n");
         return 0;
+    }
+    // Runtime-architecture commands take NO file argument (unlike the PE
+    // analysis commands); they are valid at argc == 2.
+    if (argc >= 2) {
+        const std::string early_cmd = argv[1];
+        if (early_cmd == "runtime-info" || early_cmd == "runtime-objects" ||
+            early_cmd == "runtime-services") {
+            std::optional<std::string> json_out;
+            for (int i = 2; i < argc; ++i) {
+                if (std::strcmp(argv[i], "--json") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --json requires an output path\n");
+                        return 2;
+                    }
+                    json_out = argv[i + 1];
+                    ++i;
+                } else if (i == 2) {
+                    continue;  // subcommand word
+                } else {
+                    std::fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+                    return 2;
+                }
+            }
+            if (early_cmd == "runtime-info") return cmd_runtime_info(json_out);
+            if (early_cmd == "runtime-objects") return cmd_runtime_objects(json_out);
+            return cmd_runtime_services(json_out);
+        }
     }
     if (argc < 3) {
         usage();
