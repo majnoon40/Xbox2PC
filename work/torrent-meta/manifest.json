@@ -1,0 +1,553 @@
+{
+ "name": "GTA6.Xbox.v1.0.2.1-CYBERLEEK",
+ "total_bytes": 223880932870,
+ "num_files": 108,
+ "piece_length": 16777216,
+ "num_pieces": 13345,
+ "creation_date": 1795114175,
+ "creator": "go.torrent",
+ "comment": "dynamic metainfo from client",
+ "info_hash_v1": "465d6a0eac381e68ca77115f44f19f0c968b9590",
+ "files": [
+  {
+   "idx": 0,
+   "bytes": 255488,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/Bink2Scarlett.dll"
+  },
+  {
+   "idx": 1,
+   "bytes": 815104,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/Catalog000.bin"
+  },
+  {
+   "idx": 2,
+   "bytes": 2542,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/MicrosoftGame.Config"
+  },
+  {
+   "idx": 3,
+   "bytes": 1,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/Update.alignmentchunk"
+  },
+  {
+   "idx": 4,
+   "bytes": 199152,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/XCurl.dll"
+  },
+  {
+   "idx": 5,
+   "bytes": 884224,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/XboxBvhBuilder.dll"
+  },
+  {
+   "idx": 6,
+   "bytes": 13312,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/amd_fidelityfx_loader_xbox.dll"
+  },
+  {
+   "idx": 7,
+   "bytes": 786432,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/amd_fidelityfx_upscaler_xbox.dll"
+  },
+  {
+   "idx": 8,
+   "bytes": 4407626384,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/anim.rpf"
+  },
+  {
+   "idx": 9,
+   "bytes": 8880,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/appdata0.rpf"
+  },
+  {
+   "idx": 10,
+   "bytes": 3394,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/appxmanifest.xml"
+  },
+  {
+   "idx": 11,
+   "bytes": 28543454672,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/audio.rpf"
+  },
+  {
+   "idx": 12,
+   "bytes": 6642192,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/common.rpf"
+  },
+  {
+   "idx": 13,
+   "bytes": 298992,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/concrt140.dll"
+  },
+  {
+   "idx": 14,
+   "bytes": 34411776,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/graphics/ttdb_graphics.ttpf"
+  },
+  {
+   "idx": 15,
+   "bytes": 883202048,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_0_3.ttpf"
+  },
+  {
+   "idx": 16,
+   "bytes": 898113536,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_1_3.ttpf"
+  },
+  {
+   "idx": 17,
+   "bytes": 881431552,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_2_3.ttpf"
+  },
+  {
+   "idx": 18,
+   "bytes": 900875008,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_3_3.ttpf"
+  },
+  {
+   "idx": 19,
+   "bytes": 151531776,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/lighting/lighting.ttpf"
+  },
+  {
+   "idx": 20,
+   "bytes": 1765679616,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_0_7.ttpf"
+  },
+  {
+   "idx": 21,
+   "bytes": 1746187776,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_1_7.ttpf"
+  },
+  {
+   "idx": 22,
+   "bytes": 1818806528,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_2_7.ttpf"
+  },
+  {
+   "idx": 23,
+   "bytes": 1787349760,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_3_7.ttpf"
+  },
+  {
+   "idx": 24,
+   "bytes": 1791670784,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_4_7.ttpf"
+  },
+  {
+   "idx": 25,
+   "bytes": 1840029440,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_5_7.ttpf"
+  },
+  {
+   "idx": 26,
+   "bytes": 1745923072,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_6_7.ttpf"
+  },
+  {
+   "idx": 27,
+   "bytes": 1755748608,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_7_7.ttpf"
+  },
+  {
+   "idx": 28,
+   "bytes": 494316032,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_0_3.ttpf"
+  },
+  {
+   "idx": 29,
+   "bytes": 510001152,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_1_3.ttpf"
+  },
+  {
+   "idx": 30,
+   "bytes": 491507456,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_2_3.ttpf"
+  },
+  {
+   "idx": 31,
+   "bytes": 497391360,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_3_3.ttpf"
+  },
+  {
+   "idx": 32,
+   "bytes": 135676160,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/peds_loose.ttpf"
+  },
+  {
+   "idx": 33,
+   "bytes": 953116416,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_0_3.ttpf"
+  },
+  {
+   "idx": 34,
+   "bytes": 965556736,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_1_3.ttpf"
+  },
+  {
+   "idx": 35,
+   "bytes": 937699072,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_2_3.ttpf"
+  },
+  {
+   "idx": 36,
+   "bytes": 957291520,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_3_3.ttpf"
+  },
+  {
+   "idx": 37,
+   "bytes": 983620352,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/octa_imposters.ttpf"
+  },
+  {
+   "idx": 38,
+   "bytes": 1304458240,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_0_3.ttpf"
+  },
+  {
+   "idx": 39,
+   "bytes": 1256908800,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_1_3.ttpf"
+  },
+  {
+   "idx": 40,
+   "bytes": 1239990784,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_2_3.ttpf"
+  },
+  {
+   "idx": 41,
+   "bytes": 1328911616,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_3_3.ttpf"
+  },
+  {
+   "idx": 42,
+   "bytes": 2775084288,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_0_7.ttpf"
+  },
+  {
+   "idx": 43,
+   "bytes": 2739444480,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_1_7.ttpf"
+  },
+  {
+   "idx": 44,
+   "bytes": 2780145920,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_2_7.ttpf"
+  },
+  {
+   "idx": 45,
+   "bytes": 2718679808,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_3_7.ttpf"
+  },
+  {
+   "idx": 46,
+   "bytes": 2741339648,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_4_7.ttpf"
+  },
+  {
+   "idx": 47,
+   "bytes": 2674379008,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_5_7.ttpf"
+  },
+  {
+   "idx": 48,
+   "bytes": 2688808960,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_6_7.ttpf"
+  },
+  {
+   "idx": 49,
+   "bytes": 2828296704,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_7_7.ttpf"
+  },
+  {
+   "idx": 50,
+   "bytes": 1946070528,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_image_based_0_1.ttpf"
+  },
+  {
+   "idx": 51,
+   "bytes": 1890978048,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_image_based_1_1.ttpf"
+  },
+  {
+   "idx": 52,
+   "bytes": 222976,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/ui/platform.ttpf"
+  },
+  {
+   "idx": 53,
+   "bytes": 845115648,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/ui/ttdb_ui.ttpf"
+  },
+  {
+   "idx": 54,
+   "bytes": 195418624,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vehicles/ttdb_vehicles.ttpf"
+  },
+  {
+   "idx": 55,
+   "bytes": 838474496,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vehicles/ttdb_vehicles_loose_0_1.ttpf"
+  },
+  {
+   "idx": 56,
+   "bytes": 890206208,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vehicles/ttdb_vehicles_loose_1_1.ttpf"
+  },
+  {
+   "idx": 57,
+   "bytes": 238897664,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vfx/ttdb_vfx.ttpf"
+  },
+  {
+   "idx": 58,
+   "bytes": 1421518080,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/weapons/ttdb_weapons.ttpf"
+  },
+  {
+   "idx": 59,
+   "bytes": 739758848,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/weapons/weapon_liveries.ttpf"
+  },
+  {
+   "idx": 60,
+   "bytes": 481544304,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/data.rpf"
+  },
+  {
+   "idx": 61,
+   "bytes": 348069888,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/gameos.xvd"
+  },
+  {
+   "idx": 62,
+   "bytes": 13698,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/layout_3202719e-b4b4-421c-9f8f-70d1c4a7d60b_xs.xml"
+  },
+  {
+   "idx": 63,
+   "bytes": 76155065056,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/levels.rpf"
+  },
+  {
+   "idx": 64,
+   "bytes": 975856,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/libHttpClient.GDK.dll"
+  },
+  {
+   "idx": 65,
+   "bytes": 8192,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/microsoft_gameconfig.bin"
+  },
+  {
+   "idx": 66,
+   "bytes": 8832481776,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/movies.rpf"
+  },
+  {
+   "idx": 67,
+   "bytes": 565232,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140.dll"
+  },
+  {
+   "idx": 68,
+   "bytes": 26104,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_1.dll"
+  },
+  {
+   "idx": 69,
+   "bytes": 187888,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_2.dll"
+  },
+  {
+   "idx": 70,
+   "bytes": 57312,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_atomic_wait.dll"
+  },
+  {
+   "idx": 71,
+   "bytes": 22008,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_codecvt_ids.dll"
+  },
+  {
+   "idx": 72,
+   "bytes": 6707512496,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/navmeshes.rpf"
+  },
+  {
+   "idx": 73,
+   "bytes": 8297921520,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_bvh4/core_bvh4.rpf"
+  },
+  {
+   "idx": 74,
+   "bytes": 13536,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_licenses/core_licenses_data.rpf"
+  },
+  {
+   "idx": 75,
+   "bytes": 1295760752,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/core_restofworld.rpf"
+  },
+  {
+   "idx": 76,
+   "bytes": 24529408,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/peds/ttdb_peds.ttpf"
+  },
+  {
+   "idx": 77,
+   "bytes": 35286784,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/props/ttdb_props.ttpf"
+  },
+  {
+   "idx": 78,
+   "bytes": 21081856,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/textures_loose.ttpf"
+  },
+  {
+   "idx": 79,
+   "bytes": 4729600,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/ui/ttdb_ui.ttpf"
+  },
+  {
+   "idx": 80,
+   "bytes": 3129600,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/vfx/ttdb_vfx.ttpf"
+  },
+  {
+   "idx": 81,
+   "bytes": 791984,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld001/core_restofworld001.rpf"
+  },
+  {
+   "idx": 82,
+   "bytes": 38656,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld001/data/ttdb/ui/ttdb_ui.ttpf"
+  },
+  {
+   "idx": 83,
+   "bytes": 193522176,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000/data/ttdb/maps/ttdb_maps.ttpf"
+  },
+  {
+   "idx": 84,
+   "bytes": 1427712,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000/data/ttdb/terrain/ttdb_terrain_image_based.ttpf"
+  },
+  {
+   "idx": 85,
+   "bytes": 810581008,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000/shared_minigame000.rpf"
+  },
+  {
+   "idx": 86,
+   "bytes": 61987040,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000_bvh4/shared_minigame000_bvh4.rpf"
+  },
+  {
+   "idx": 87,
+   "bytes": 697378560,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/data/ttdb/maps/ttdb_maps.ttpf"
+  },
+  {
+   "idx": 88,
+   "bytes": 222333440,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/data/ttdb/terrain/ttdb_terrain_image_based.ttpf"
+  },
+  {
+   "idx": 89,
+   "bytes": 3357184,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/data/ttdb/vfx/ttdb_vfx.ttpf"
+  },
+  {
+   "idx": 90,
+   "bytes": 20022508672,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/story000.rpf"
+  },
+  {
+   "idx": 91,
+   "bytes": 78023728,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/story000_script.rpf"
+  },
+  {
+   "idx": 92,
+   "bytes": 5632,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000_bvh4/story000_bvh4.rpf"
+  },
+  {
+   "idx": 93,
+   "bytes": 198354992,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000_restofworld/story000_restofworld.rpf"
+  },
+  {
+   "idx": 94,
+   "bytes": 4798213264,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/packs.rpf"
+  },
+  {
+   "idx": 95,
+   "bytes": 1152,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/resources.pri"
+  },
+  {
+   "idx": 96,
+   "bytes": 4358960,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/script.rpf"
+  },
+  {
+   "idx": 97,
+   "bytes": 411695600,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/shaders.rpf"
+  },
+  {
+   "idx": 98,
+   "bytes": 192585024,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/textures.rpf"
+  },
+  {
+   "idx": 99,
+   "bytes": 336888,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/vccorlib140.dll"
+  },
+  {
+   "idx": 100,
+   "bytes": 72176,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/vcomp140.dll"
+  },
+  {
+   "idx": 101,
+   "bytes": 97776,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/vcruntime140.dll"
+  },
+  {
+   "idx": 102,
+   "bytes": 37848,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/vcruntime140_1.dll"
+  },
+  {
+   "idx": 103,
+   "bytes": 54536,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_150.png"
+  },
+  {
+   "idx": 104,
+   "bytes": 7102,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_44.png"
+  },
+  {
+   "idx": 105,
+   "bytes": 404663,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_480.png"
+  },
+  {
+   "idx": 106,
+   "bytes": 29356,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_store.png"
+  },
+  {
+   "idx": 107,
+   "bytes": 2507194,
+   "path": "GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_splash.png"
+  }
+ ]
+}

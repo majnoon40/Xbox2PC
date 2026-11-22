@@ -1,0 +1,126 @@
+file: /home/z/my-project/work/torrent-meta/meta_mirror.torrent
+file size: 273989 bytes
+computed info-hash (SHA-1 of raw info dict): 465d6a0eac381e68ca77115f44f19f0c968b9590
+magnet btih:                              465d6a0eac381e68ca77115f44f19f0c968b9590
+hash match: YES
+
+libtorrent info_hashes  v1=465d6a0eac381e68ca77115f44f19f0c968b9590  v2=0000000000000000000000000000000000000000000000000000000000000000
+name: GTA6.Xbox.v1.0.2.1-CYBERLEEK
+comment: 'dynamic metainfo from client'
+created by: 'go.torrent'
+creation date: 1795114175 (unix)
+piece length: 16777216  pieces: 13345
+total size: 223880932870 bytes (208.51 GiB)
+num files: 108
+
+=== TRACKERS ===
+
+=== FILE TREE ===
+      0    249.50 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/Bink2Scarlett.dll
+      1    796.00 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/Catalog000.bin
+      2      2.48 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/MicrosoftGame.Config
+      3           1 B  GTA6.Xbox.v1.0.2.1-CYBERLEEK/Update.alignmentchunk
+      4    194.48 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/XCurl.dll
+      5    863.50 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/XboxBvhBuilder.dll
+      6     13.00 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/amd_fidelityfx_loader_xbox.dll
+      7    768.00 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/amd_fidelityfx_upscaler_xbox.dll
+      8      4.10 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/anim.rpf
+      9      8.67 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/appdata0.rpf
+     10      3.31 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/appxmanifest.xml
+     11     26.58 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/audio.rpf
+     12      6.33 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/common.rpf
+     13    291.98 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/concrt140.dll
+     14     32.82 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/graphics/ttdb_graphics.ttpf
+     15    842.29 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_0_3.ttpf
+     16    856.51 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_1_3.ttpf
+     17    840.60 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_2_3.ttpf
+     18    859.14 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/interiors/ttdb_interiors_3_3.ttpf
+     19    144.51 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/lighting/lighting.ttpf
+     20      1.64 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_0_7.ttpf
+     21      1.63 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_1_7.ttpf
+     22      1.69 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_2_7.ttpf
+     23      1.66 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_3_7.ttpf
+     24      1.67 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_4_7.ttpf
+     25      1.71 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_5_7.ttpf
+     26      1.63 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_6_7.ttpf
+     27      1.64 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/maps/ttdb_maps_7_7.ttpf
+     28    471.42 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_0_3.ttpf
+     29    486.38 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_1_3.ttpf
+     30    468.74 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_2_3.ttpf
+     31    474.35 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/decorations_3_3.ttpf
+     32    129.39 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/peds_loose.ttpf
+     33    908.96 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_0_3.ttpf
+     34    920.83 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_1_3.ttpf
+     35    894.26 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_2_3.ttpf
+     36    912.94 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/peds/ttdb_peds_3_3.ttpf
+     37    938.05 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/octa_imposters.ttpf
+     38      1.21 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_0_3.ttpf
+     39      1.17 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_1_3.ttpf
+     40      1.15 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_2_3.ttpf
+     41      1.24 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/props/ttdb_props_3_3.ttpf
+     42      2.58 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_0_7.ttpf
+     43      2.55 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_1_7.ttpf
+     44      2.59 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_2_7.ttpf
+     45      2.53 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_3_7.ttpf
+     46      2.55 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_4_7.ttpf
+     47      2.49 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_5_7.ttpf
+     48      2.50 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_6_7.ttpf
+     49      2.63 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_7_7.ttpf
+     50      1.81 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_image_based_0_1.ttpf
+     51      1.76 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/terrain/ttdb_terrain_image_based_1_1.ttpf
+     52    217.75 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/ui/platform.ttpf
+     53    805.97 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/ui/ttdb_ui.ttpf
+     54    186.37 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vehicles/ttdb_vehicles.ttpf
+     55    799.63 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vehicles/ttdb_vehicles_loose_0_1.ttpf
+     56    848.97 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vehicles/ttdb_vehicles_loose_1_1.ttpf
+     57    227.83 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/vfx/ttdb_vfx.ttpf
+     58      1.32 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/weapons/ttdb_weapons.ttpf
+     59    705.49 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data/ttdb/weapons/weapon_liveries.ttpf
+     60    459.24 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/data.rpf
+     61    331.95 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/gameos.xvd
+     62     13.38 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/layout_3202719e-b4b4-421c-9f8f-70d1c4a7d60b_xs.xml
+     63     70.92 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/levels.rpf
+     64    952.98 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/libHttpClient.GDK.dll
+     65      8.00 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/microsoft_gameconfig.bin
+     66      8.23 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/movies.rpf
+     67    551.98 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140.dll
+     68     25.49 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_1.dll
+     69    183.48 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_2.dll
+     70     55.97 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_atomic_wait.dll
+     71     21.49 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/msvcp140_codecvt_ids.dll
+     72      6.25 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/navmeshes.rpf
+     73      7.73 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_bvh4/core_bvh4.rpf
+     74     13.22 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_licenses/core_licenses_data.rpf
+     75      1.21 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/core_restofworld.rpf
+     76     23.39 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/peds/ttdb_peds.ttpf
+     77     33.65 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/props/ttdb_props.ttpf
+     78     20.11 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/textures_loose.ttpf
+     79      4.51 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/ui/ttdb_ui.ttpf
+     80      2.98 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld/data/ttdb/vfx/ttdb_vfx.ttpf
+     81    773.42 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld001/core_restofworld001.rpf
+     82     37.75 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/core_restofworld001/data/ttdb/ui/ttdb_ui.ttpf
+     83    184.56 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000/data/ttdb/maps/ttdb_maps.ttpf
+     84      1.36 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000/data/ttdb/terrain/ttdb_terrain_image_based.ttpf
+     85    773.03 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000/shared_minigame000.rpf
+     86     59.12 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/shared_minigame000_bvh4/shared_minigame000_bvh4.rpf
+     87    665.07 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/data/ttdb/maps/ttdb_maps.ttpf
+     88    212.03 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/data/ttdb/terrain/ttdb_terrain_image_based.ttpf
+     89      3.20 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/data/ttdb/vfx/ttdb_vfx.ttpf
+     90     18.65 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/story000.rpf
+     91     74.41 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000/story000_script.rpf
+     92      5.50 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000_bvh4/story000_bvh4.rpf
+     93    189.17 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/pack/story000_restofworld/story000_restofworld.rpf
+     94      4.47 GiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/packs.rpf
+     95      1.12 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/resources.pri
+     96      4.16 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/script.rpf
+     97    392.62 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/shaders.rpf
+     98    183.66 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/textures.rpf
+     99    328.99 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/vccorlib140.dll
+    100     70.48 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/vcomp140.dll
+    101     95.48 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/vcruntime140.dll
+    102     36.96 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/vcruntime140_1.dll
+    103     53.26 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_150.png
+    104      6.94 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_44.png
+    105    395.18 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_480.png
+    106     28.67 KiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_logo_store.png
+    107      2.39 MiB  GTA6.Xbox.v1.0.2.1-CYBERLEEK/xbs_splash.png
