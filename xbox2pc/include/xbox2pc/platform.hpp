@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "xbox2pc/runtime_error.hpp"
 
@@ -175,6 +176,45 @@ enum class FileOpenMode { ReadExisting, WriteNew, ReadWriteAppend };
 
 Result<std::unique_ptr<PalFile>> open_file(const std::string& host_path,
                                            FileOpenMode mode);
+
+// ── M5: host directory/metadata operations (PAL-only surface) ─────────────
+//
+// All host-filesystem access stays inside the PAL; the VFS layers above
+// see only these typed interfaces. Paths are host-relative; the CALLER
+// (host backend) is responsible for confinement — the PAL itself applies
+// no sandboxing beyond its own bounds checking.
+
+struct PalFileInfo {
+    bool is_directory = false;
+    std::uint64_t size = 0;       // files only (0 for directories)
+    bool exists = true;           // false only via probe
+};
+
+// Probe existence + type/size (never opens).
+Result<PalFileInfo> stat_host_path(const std::string& host_path);
+
+// Symlink probe (lstat semantics — does NOT follow the link). Used by the
+// VFS host backend to reject symlink escapes at its security boundary.
+Result<bool> host_path_is_symlink(const std::string& host_path);
+
+// Create/remove a directory (empty only for remove — host semantics).
+Result<void> create_host_directory(const std::string& host_path);
+Result<void> remove_host_directory(const std::string& host_path);
+
+// Remove a file.
+Result<void> remove_host_file(const std::string& host_path);
+
+// Enumerate ONE directory level: child names (no paths, no recursion).
+// Order is host-defined; the VFS layer sorts for determinism.
+struct PalDirEntry {
+    std::string name;             // base name only
+    bool is_directory = false;
+};
+Result<std::vector<PalDirEntry>> list_host_directory(const std::string& host_path);
+
+// Recursive delete for confined roots (used by test fixtures). The PAL
+// implementation validates that `host_path` exists and is a directory.
+Result<void> remove_host_tree(const std::string& host_path);
 
 // ── backend identification ────────────────────────────────────────────────
 

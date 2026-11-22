@@ -15,12 +15,14 @@
 #include <string>
 #include <utility>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 #include <unistd.h>
 
 namespace xbox2pc::pal {
@@ -761,6 +763,158 @@ PalInfo describe_backend() {
     info.page_size = host_page_size();
     info.clock = "clock_gettime(CLOCK_MONOTONIC)";
     return info;
+}
+
+// ── M5: host directory/metadata operations ──────────────────────────────
+
+namespace {
+
+// errno translation for directory ops; distinguish NotFound where the
+// syscall reports ENOENT (typed NotFound beats IoError for VFS semantics).
+Result<void> errno_dir_result(const char* what, int en) {
+    if (en == ENOENT) {
+        return Result<void>(RuntimeErrc::NotFound,
+                            std::string(what) + ": path does not exist");
+    }
+    if (en == EEXIST) {
+        return Result<void>(RuntimeErrc::AlreadyExists,
+                            std::string(what) + ": already exists");
+    }
+    if (en == ENOTEMPTY) {
+        return Result<void>(RuntimeErrc::InvalidState,
+                            std::string(what) + ": directory not empty");
+    }
+    if (en == EACCES || en == EPERM) {
+        return Result<void>(RuntimeErrc::PlatformError,
+                            std::string(what) + ": permission denied");
+    }
+    errno = en;
+    return Result<void>(RuntimeErrc::IoError,
+                        std::string(what) + ": " + std::string(std::strerror(en)));
+}
+
+}  // namespace
+
+Result<bool> host_path_is_symlink(const std::string& host_path) {
+    struct stat st {};
+    if (::lstat(host_path.c_str(), &st) != 0) {
+        const int en = errno;
+        if (en == ENOENT) {
+            return Result<bool>(false);  // absent = not a link
+        }
+        return Result<bool>(RuntimeErrc::IoError,
+                            std::string("lstat: ") + std::strerror(en));
+    }
+    return Result<bool>(S_ISLNK(st.st_mode));
+}
+
+Result<PalFileInfo> stat_host_path(const std::string& host_path) {
+    struct stat st {};
+    if (::stat(host_path.c_str(), &st) != 0) {
+        const int en = errno;
+        if (en == ENOENT) {
+            PalFileInfo missing;
+            missing.exists = false;
+            return Result<PalFileInfo>(missing);
+        }
+        return Result<PalFileInfo>(RuntimeErrc::IoError,
+                                   std::string("stat: ") + std::strerror(en));
+    }
+    PalFileInfo info;
+    info.exists = true;
+    info.is_directory = S_ISDIR(st.st_mode);
+    info.size = S_ISREG(st.st_mode)
+        ? static_cast<std::uint64_t>(st.st_size)
+        : 0;
+    return Result<PalFileInfo>(info);
+}
+
+Result<void> create_host_directory(const std::string& host_path) {
+    if (::mkdir(host_path.c_str(), 0755) != 0) {
+        return errno_dir_result("mkdir", errno);
+    }
+    return Result<void>::ok_result();
+}
+
+Result<void> remove_host_directory(const std::string& host_path) {
+    if (::rmdir(host_path.c_str()) != 0) {
+        return errno_dir_result("rmdir", errno);
+    }
+    return Result<void>::ok_result();
+}
+
+Result<void> remove_host_file(const std::string& host_path) {
+    if (::unlink(host_path.c_str()) != 0) {
+        return errno_dir_result("unlink", errno);
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::vector<PalDirEntry>> list_host_directory(const std::string& host_path) {
+    DIR* dir = ::opendir(host_path.c_str());
+    if (dir == nullptr) {
+        const int en = errno;
+        auto r = errno_dir_result("opendir", en);
+        return Result<std::vector<PalDirEntry>>(r.errc(), r.context());
+    }
+    std::vector<PalDirEntry> out;
+    errno = 0;
+    while (struct dirent* de = ::readdir(dir)) {
+        const std::string name = de->d_name;
+        if (name == "." || name == "..") continue;
+        PalDirEntry e;
+        e.name = name;
+        // d_type is a hint on some filesystems; fall back to stat.
+        if (de->d_type == DT_DIR) {
+            e.is_directory = true;
+        } else if (de->d_type == DT_UNKNOWN || de->d_type == DT_REG) {
+            struct stat st {};
+            const std::string full = host_path + "/" + name;
+            if (::stat(full.c_str(), &st) == 0) {
+                e.is_directory = S_ISDIR(st.st_mode);
+            } else {
+                e.is_directory = false;  // unstatable entry: report as file
+            }
+        } else {
+            e.is_directory = false;
+        }
+        out.push_back(std::move(e));
+        errno = 0;
+    }
+    const int read_en = errno;
+    ::closedir(dir);
+    if (read_en != 0) {
+        return Result<std::vector<PalDirEntry>>(
+            RuntimeErrc::IoError,
+            std::string("readdir: ") + std::strerror(read_en));
+    }
+    return Result<std::vector<PalDirEntry>>(std::move(out));
+}
+
+Result<void> remove_host_tree(const std::string& host_path) {
+    auto st = stat_host_path(host_path);
+    if (!st.ok()) {
+        auto r = Result<void>(st.errc(), st.context());
+        return r;
+    }
+    if (!st.value().is_directory) {
+        return remove_host_file(host_path);
+    }
+    auto listing = list_host_directory(host_path);
+    if (!listing.ok()) {
+        return Result<void>(listing.errc(), listing.context());
+    }
+    for (const auto& e : listing.value()) {
+        const std::string child = host_path + "/" + e.name;
+        if (e.is_directory) {
+            auto sub = remove_host_tree(child);
+            if (!sub.ok()) return sub;
+        } else {
+            auto del = remove_host_file(child);
+            if (!del.ok()) return del;
+        }
+    }
+    return remove_host_directory(host_path);
 }
 
 }  // namespace xbox2pc::pal
