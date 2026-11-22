@@ -121,6 +121,29 @@ public:
         return HostThread{static_cast<std::uint64_t>(thread_)};
     }
 
+    // M4: pthread_setname_np truncates to 16 bytes INCLUDING the NUL —
+    // documented host limit (Linux), not an Xbox behavior.
+    Result<void> set_name(const std::string& name) override {
+        if (!started_) {
+            return Result<void>(RuntimeErrc::InvalidState,
+                                "thread not started");
+        }
+        char buf[16];
+        const std::size_t n = name.size() < sizeof(buf) - 1
+                                  ? name.size()
+                                  : sizeof(buf) - 1;
+        std::memcpy(buf, name.c_str(), n);
+        buf[n] = '\0';
+        const int rc = pthread_setname_np(thread_, buf);
+        if (rc != 0) {
+            errno = rc;
+            return Result<void>(RuntimeErrc::PlatformError,
+                                "pthread_setname_np: " +
+                                    std::string(std::strerror(rc)));
+        }
+        return Result<void>::ok_result();
+    }
+
     std::uint64_t exit_code() const { return exit_code_; }
 
 private:
@@ -147,6 +170,10 @@ void* gated_trampoline(void* p) {
 }
 
 }  // namespace
+
+HostThread current_thread() {
+    return HostThread{static_cast<std::uint64_t>(pthread_self())};
+}
 
 std::unique_ptr<PalThread> make_host_thread() {
     return std::make_unique<LinuxThreadGated>();
@@ -567,6 +594,44 @@ public:
         if (exec) prot |= PROT_EXEC;
         if (mprotect(base_, static_cast<std::size_t>(size_), prot) != 0) {
             return errno_result("mprotect");
+        }
+        return Result<void>::ok_result();
+    }
+
+    Result<void> protect_subrange(std::uint64_t offset, std::uint64_t size,
+                                   bool read, bool write, bool exec) override {
+        if (base_ == nullptr) {
+            return Result<void>(RuntimeErrc::InvalidState, "region unmapped");
+        }
+        if (offset >= size_ || size == 0 || offset + size > size_) {
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "subrange out of bounds");
+        }
+        int prot = PROT_NONE;
+        if (read) prot |= PROT_READ;
+        if (write) prot |= PROT_WRITE;
+        if (exec) prot |= PROT_EXEC;
+        auto* addr = static_cast<std::uint8_t*>(base_) + offset;
+        if (mprotect(addr, static_cast<std::size_t>(size), prot) != 0) {
+            return errno_result("mprotect(subrange)");
+        }
+        return Result<void>::ok_result();
+    }
+
+    Result<void> commit_subrange(std::uint64_t offset,
+                                 std::uint64_t size) override {
+        if (base_ == nullptr) {
+            return Result<void>(RuntimeErrc::InvalidState, "region unmapped");
+        }
+        if (offset >= size_ || size == 0 || offset + size > size_) {
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "subrange out of bounds");
+        }
+        // Linux: reserved (PROT_NONE) -> committed is an mprotect to RW.
+        auto* addr = static_cast<std::uint8_t*>(base_) + offset;
+        if (mprotect(addr, static_cast<std::size_t>(size),
+                     PROT_READ | PROT_WRITE) != 0) {
+            return errno_result("mprotect(commit)");
         }
         return Result<void>::ok_result();
     }
