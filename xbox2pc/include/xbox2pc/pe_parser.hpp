@@ -117,6 +117,31 @@ struct ImportEntry {
     std::vector<std::string> functions;      // by-name imports in order
     std::vector<std::uint32_t> ordinal_only; // ordinal imports (in order)
     std::vector<std::uint32_t> by_name_ordinals; // hint/ord for by-name entries
+
+    // ── M2: preserved import metadata ────────────────────────────────────
+    std::uint32_t int_rva = 0;           // OriginalFirstThunk RVA (0 when absent)
+    std::uint32_t iat_rva = 0;           // FirstThunk (IAT) RVA
+    std::uint32_t name_rva = 0;          // DLL name string RVA
+    std::uint32_t timestamp = 0;         // TimeDateStamp (bound import info)
+    std::uint32_t forwarder_chain = 0;  // ForwarderChain field
+    bool bound = false;                  // TimeDateStamp != 0 (bound import)
+};
+
+// One delay-imported DLL (directory 13, ImgDelayDescr in delayimp fashion).
+// All RVAs are stored as 32-bit in the on-disk structure regardless of
+// architecture when grAttrs bit 0 is 0; with bit 0 set they are VAs. The
+// parser records which addressing was used.
+struct DelayImportEntry {
+    std::string dll_name;
+    std::vector<std::string> functions;
+    std::vector<std::uint32_t> ordinal_only;
+    std::uint32_t int_rva = 0;         // pointer to thunk array (names)
+    std::uint32_t iat_rva = 0;         // address of thunk array (bound IAT)
+    std::uint32_t name_rva = 0;
+    std::uint32_t bind_rva = 0;        // RVA of bound IAT copy
+    std::uint32_t unload_rva = 0;      // RVA of unload thunk table
+    std::uint32_t timestamp = 0;
+    bool va_addressed = false;          // grAttrs bit 0: entries are VAs not RVAs
 };
 
 struct ExportedFunction {
@@ -139,6 +164,12 @@ struct ExportTable {
 struct ImportTable {
     bool present = false;
     std::vector<ImportEntry> entries;
+};
+
+// M2: delay-load import table (data directory 13).
+struct DelayImportTable {
+    bool present = false;
+    std::vector<DelayImportEntry> entries;
 };
 
 // Optional header — both magic flavours are accepted for structure parsing,
@@ -203,6 +234,7 @@ struct PeImage {
     // tables
     ImportTable imports;
     ExportTable exports;
+    DelayImportTable delay_imports;  // M2: directory 13 (delayimp)
 
     // classification helpers
     bool is_x86_64() const { return coff.machine == kMachineAmd64; }

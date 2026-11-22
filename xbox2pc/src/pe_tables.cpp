@@ -105,6 +105,13 @@ void parse_imports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
         const std::uint32_t int_rva = rd.u32(off + 0);
         if (name_rva == 0 && first_thunk == 0 && int_rva == 0) break;  // terminator
         ImportEntry entry;
+        // ── preserved import metadata (M2) ──
+        entry.int_rva = int_rva;
+        entry.iat_rva = first_thunk;
+        entry.name_rva = name_rva;
+        entry.timestamp = rd.u32(off + 4);
+        entry.forwarder_chain = rd.u32(off + 8);
+        entry.bound = entry.timestamp != 0;
 
         const auto name_off = rva_to_offset(img, name_rva);
         if (!name_off.has_value()) {
@@ -287,6 +294,138 @@ void parse_exports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
             if (fwd_off.has_value()) f.forwarder = rd.cstr(*fwd_off, 256);
         }
         et.functions.push_back(std::move(f));
+    }
+}
+
+// ── Delay-load import table (M2) ─────────────────────────────────────────
+//
+// Data directory 13 points at an array of ImgDelayDescr (32 bytes each,
+// zero-terminated like import descriptors):
+//   [0]  grAttributes — bit 0 set: the other address fields are VAs
+//        (base-relocated at bind time); bit 0 clear: they are RVAs.
+//   [4]  szName (RVA/VA of the DLL name string),
+//   [8]  phmod (RVA/VA of the HMODULE slot),
+//   [12] pIAT (RVA/VA of the delay IAT),
+//   [16] pINT (RVA/VA of the delay INT),
+//   [20] pBoundIAT (RVA/VA of the bound IAT copy),
+//   [24] pUnloadIAT (RVA/VA of the unload thunk table),
+//   [28] dwTimeStamp (bound timestamp).
+// Thunk arrays use the exact same encoding as the regular import INT
+// (8-byte PE32+ thunks, ordinal flag bit 63), so resolution is shared.
+void parse_delay_imports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
+                         diag::Diagnostics& diags) {
+    if (img.directories.size() <= kDirDelayImport) return;
+    const auto& dir = img.directories[kDirDelayImport];
+    if (dir.rva == 0 && dir.size == 0) {
+        img.delay_imports.present = false;
+        return;
+    }
+    img.delay_imports.present = true;
+    TableReader rd{base, size};
+
+    const auto desc_off = rva_to_offset(img, dir.rva);
+    if (!desc_off.has_value()) {
+        diags.warning("delay-import directory RVA " + std::to_string(dir.rva) +
+                      " does not map to any section; delay imports unavailable");
+        return;
+    }
+
+    constexpr std::uint32_t kMaxDelayDesc = 4096;
+    std::uint32_t n_desc = 0;
+    std::uint64_t off = *desc_off;
+    for (; n_desc < kMaxDelayDesc; ++n_desc) {
+        if (!in_range(off, 32, size)) {
+            diags.warning("delay-import descriptor array truncated; read " +
+                          std::to_string(n_desc) + " entries", off);
+            break;
+        }
+        const std::uint32_t gr_attrs = rd.u32(off + 0);
+        const std::uint32_t name_field = rd.u32(off + 4);
+        const std::uint32_t iat_field = rd.u32(off + 12);
+        const std::uint32_t int_field = rd.u32(off + 16);
+        const std::uint32_t bind_field = rd.u32(off + 20);
+        const std::uint32_t unload_field = rd.u32(off + 24);
+        const std::uint32_t stamp = rd.u32(off + 28);
+        if (name_field == 0 && iat_field == 0 && int_field == 0) break;  // terminator
+
+        // With grAttrs bit 0 set the fields are VAs: subtract ImageBase to
+        // get RVAs. A malformed base produces unmappable RVAs -> warnings.
+        const bool va_mode = (gr_attrs & 0x1) != 0;
+        const std::uint64_t image_base = img.opt.image_base;
+        auto to_rva = [va_mode, image_base](std::uint32_t field) -> std::uint32_t {
+            if (!va_mode || field == 0) return field;
+            if (field < image_base) return field;  // already RVA-ish
+            return static_cast<std::uint32_t>(field - image_base);
+        };
+
+        DelayImportEntry entry;
+        entry.va_addressed = va_mode;
+        entry.timestamp = stamp;
+        entry.name_rva = to_rva(name_field);
+        entry.iat_rva = to_rva(iat_field);
+        entry.int_rva = to_rva(int_field);
+        entry.bind_rva = to_rva(bind_field);
+        entry.unload_rva = to_rva(unload_field);
+
+        // DLL name.
+        const auto name_off = rva_to_offset(img, entry.name_rva);
+        if (!name_off.has_value()) {
+            diags.warning("delay-import DLL name RVA " + std::to_string(entry.name_rva) +
+                          " unmappable; entry recorded without a name");
+            entry.dll_name = "<unresolved RVA " + std::to_string(entry.name_rva) + ">";
+        } else {
+            entry.dll_name = rd.cstr(*name_off, 256);
+            if (entry.dll_name.empty()) {
+                entry.dll_name = "<empty name>";
+                diags.warning("delay-import descriptor has empty DLL name", *name_off);
+            }
+        }
+
+        // Resolve function names from the INT (names intact; IAT is bound).
+        std::uint32_t thunk_rva = entry.int_rva != 0 ? entry.int_rva : entry.iat_rva;
+        if (thunk_rva != 0) {
+            const auto thunk_off = rva_to_offset(img, thunk_rva);
+            if (!thunk_off.has_value()) {
+                diags.warning("delay-import thunk array for '" + entry.dll_name + "' unmappable");
+            } else {
+                std::uint64_t t = *thunk_off;
+                constexpr std::uint32_t kMaxThunks = 1u << 16;
+                for (std::uint32_t n = 0; n < kMaxThunks; ++n) {
+                    if (!in_range(t, 8, size)) {
+                        diags.warning("delay-import thunk array for '" + entry.dll_name +
+                                      "' truncated; read " + std::to_string(n) + " entries", t);
+                        break;
+                    }
+                    const std::uint64_t th = rd.u64(t);
+                    if (th == 0) break;  // terminator
+                    if ((th >> 63) & 1) {
+                        entry.ordinal_only.push_back(static_cast<std::uint32_t>(th & 0xFFFF));
+                    } else {
+                        const std::uint32_t hint_rva = static_cast<std::uint32_t>(th & 0xFFFFFFFF);
+                        const auto fn_off = rva_to_offset(img, hint_rva);
+                        if (!fn_off.has_value()) {
+                            diags.warning("delay-import name RVA " + std::to_string(hint_rva) +
+                                          " unmappable; recorded as ordinal-less entry");
+                            entry.functions.push_back("<unresolved RVA " +
+                                                      std::to_string(hint_rva) + ">");
+                        } else {
+                            entry.functions.push_back(rd.cstr(*fn_off + 2, 512));
+                        }
+                    }
+                    t += 8;
+                }
+            }
+        } else {
+            diags.warning("delay-import descriptor for '" + entry.dll_name +
+                          "' has no thunk arrays");
+        }
+
+        img.delay_imports.entries.push_back(std::move(entry));
+        off += 32;
+        if (n_desc + 1 == kMaxDelayDesc) {
+            diags.warning("delay-import descriptor count exceeded " +
+                          std::to_string(kMaxDelayDesc) + "; truncating");
+        }
     }
 }
 

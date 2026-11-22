@@ -275,6 +275,77 @@ std::vector<std::uint8_t> PeBuilder::build() const {
         export_dir_size = static_cast<std::uint32_t>(text.size() - ed);
     }
 
+    // ── M2: delay-load import machinery (ImgDelayDescr array) ──
+    std::uint32_t delay_dir_rva = 0;
+    std::uint32_t delay_dir_size = 0;
+    if (!spec.delay_imports.empty()) {
+        // Materialization per DLL: name string, INT slots, IAT slots,
+        // hint/name strings; descriptors written last (same pattern as the
+        // regular import table).
+        struct DelayLayout {
+            std::uint32_t name_rva = 0;
+            std::uint32_t int_rva = 0;
+            std::uint32_t iat_rva = 0;
+            std::vector<std::uint32_t> hint_name_rvas;
+        };
+        std::vector<DelayLayout> lays(spec.delay_imports.size());
+        for (std::size_t d = 0; d < spec.delay_imports.size(); ++d) {
+            const auto& dll = spec.delay_imports[d];
+            auto& lay = lays[d];
+            lay.name_rva = text_rva + static_cast<std::uint32_t>(text.cstr(dll.name));
+            lay.int_rva = text_rva + static_cast<std::uint32_t>(text.size());
+            for (std::size_t i = 0; i < dll.funcs.size() + 1; ++i) text.resize(text.size() + 8);
+            lay.iat_rva = text_rva + static_cast<std::uint32_t>(text.size());
+            for (std::size_t i = 0; i < dll.funcs.size() + 1; ++i) text.resize(text.size() + 8);
+            for (const auto& f : dll.funcs) {
+                if (f.name.empty()) continue;
+                const std::uint64_t hn_rel = text.size();
+                text.u16(hn_rel, f.ordinal);
+                for (std::size_t i = 0; i < f.name.size(); ++i) {
+                    text.u8(hn_rel + 2 + i, static_cast<std::uint8_t>(f.name[i]));
+                }
+                text.resize(hn_rel + 2 + f.name.size() + 1);
+                lay.hint_name_rvas.push_back(text_rva + static_cast<std::uint32_t>(hn_rel));
+            }
+            // Fill INT entries.
+            std::uint64_t t = lay.int_rva - text_rva;
+            std::size_t by_name = 0;
+            for (const auto& f : dll.funcs) {
+                if (f.name.empty()) {
+                    text.u64(t, (1ull << 63) | f.ordinal);
+                } else {
+                    text.u64(t, lays[d].hint_name_rvas[by_name]);
+                    ++by_name;
+                }
+                t += 8;
+            }
+        }
+        // Descriptors (32 bytes each + terminator), written last.
+        delay_dir_rva = text_rva + static_cast<std::uint32_t>(text.size());
+        const std::uint64_t desc_start = text.size();
+        const std::uint64_t desc_count = spec.delay_imports.size() + 1;
+        text.resize(desc_start + desc_count * 32);
+        for (std::size_t d = 0; d < spec.delay_imports.size(); ++d) {
+            const auto& lay = lays[d];
+            const std::uint64_t desc = desc_start + d * 32;
+            const bool va_mode = (spec.delay_imports[d].attributes & 0x1) != 0;
+            // Field addressing: RVA mode stores plain RVAs; VA mode adds base.
+            const std::uint64_t base = spec.image_base;
+            auto addr = [va_mode, base](std::uint32_t rva) -> std::uint32_t {
+                return va_mode ? static_cast<std::uint32_t>(base + rva) : rva;
+            };
+            text.u32(desc + 0, spec.delay_imports[d].attributes);
+            text.u32(desc + 4, addr(lay.name_rva));
+            text.u32(desc + 8, 0);                      // phmod slot
+            text.u32(desc + 12, addr(lay.iat_rva));
+            text.u32(desc + 16, addr(lay.int_rva));
+            text.u32(desc + 20, 0);                     // pBoundIAT
+            text.u32(desc + 24, 0);                     // pUnloadIAT
+            text.u32(desc + 28, 0x68743230);            // dwTimeStamp (bound)
+        }
+        delay_dir_size = static_cast<std::uint32_t>(desc_count * 32);
+    }
+
     // ── Pass 2: assemble the whole file ──
     const std::uint32_t text_file_size = align_up(static_cast<std::uint32_t>(text.size()), kFileAlignment);
     const std::uint32_t rdata_rva = align_up(text_rva + text_file_size, kSectionAlignment);
@@ -349,6 +420,10 @@ std::vector<std::uint8_t> PeBuilder::build() const {
     if (!spec.exports.empty()) {
         out.u32(dirs + 8 * 0, export_dir_rva);
         out.u32(dirs + 8 * 0 + 4, export_dir_size);
+    }
+    if (delay_dir_rva != 0) {
+        out.u32(dirs + 8 * 13, delay_dir_rva);   // DelayImport directory
+        out.u32(dirs + 8 * 13 + 4, delay_dir_size);
     }
 
     // Section table at pe + 24 + opt_size.

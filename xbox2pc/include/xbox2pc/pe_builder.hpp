@@ -27,6 +27,13 @@ struct ImportDll {
     std::vector<ImportFunc> funcs;
 };
 
+// M2: delay-load import descriptor to embed in the image (directory 13).
+struct DelayImportDll {
+    std::string name;
+    std::vector<ImportFunc> funcs;
+    std::uint32_t attributes = 0;   // grAttributes; bit 0 set -> VA addressing
+};
+
 struct ExportFunc {
     std::string name;    // may be empty -> unnamed export
     std::uint32_t rva = 0;
@@ -41,6 +48,8 @@ struct PeBuildSpec {
     std::vector<std::string> section_names = {".text", ".rdata", ".data"};
     std::vector<ImportDll> imports;
     std::vector<ExportFunc> exports;
+    std::vector<DelayImportDll> delay_imports;  // M2: directory 13 content
+    bool export_with_forwarder_chain = false;   // M2: ForwarderChain != 0 metadata
     std::uint16_t number_of_sections_override = 0;   // 0 = actual count
     std::uint32_t size_of_optional_override = 0;     // 0 = real size
     std::uint32_t number_of_rva_override = 0;        // 0 = 16

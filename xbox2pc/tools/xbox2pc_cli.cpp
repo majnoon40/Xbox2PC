@@ -1,19 +1,37 @@
-// xbox2pc CLI — M1: `xbox2pc inspect <file>`
+// xbox2pc CLI — M1 inspect + M2 dependencies/graph/classify.
 //
-// Prints a structured inspection report of a PE32+ binary:
-//   architecture, PE format, entry point, image base, sections,
-//   imports (DLLs + functions), exports, warnings and errors.
+// Commands:
+//   xbox2pc inspect <file> [--quiet]
+//   xbox2pc dependencies <file> [--json <out>]   (default prints text)
+//   xbox2pc graph <file> [--json <out>]
+//   xbox2pc classify <file>
 //
-// Exit codes: 0 = parsed (warnings allowed), 1 = hard parse error,
-// 2 = usage error. Output goes to stdout; diagnostics to stderr.
+// Exit codes: 0 success (warnings allowed), 1 parse error, 2 usage error.
+// Structured output on stdout; diagnostics to stderr.
 
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "xbox2pc/api_registry.hpp"
+#include "xbox2pc/compat_db.hpp"
+#include "xbox2pc/dep_analyzer.hpp"
+#include "xbox2pc/dep_graph.hpp"
 #include "xbox2pc/diagnostics.hpp"
+#include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
+
+using xbox2pc::compat::CompatibilityDb;
+using xbox2pc::deps::DependencyReport;
+using xbox2pc::graph::DependencyGraph;
+using xbox2pc::json::Json;
+using xbox2pc::pe::PeImage;
+using xbox2pc::registry::ApiRegistry;
+using Diagnostics = xbox2pc::diag::Diagnostics;
 
 namespace {
 
@@ -35,10 +53,44 @@ std::string human_size(std::uint64_t bytes) {
     return b;
 }
 
-void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnostics& diags) {
+void usage() {
+    std::fprintf(stderr,
+                 "usage: xbox2pc inspect <pe-file> [--quiet]\n"
+                 "       xbox2pc dependencies <pe-file> [--json <out>]\n"
+                 "       xbox2pc graph <pe-file> [--json <out>]\n"
+                 "       xbox2pc classify <pe-file>\n"
+                 "       xbox2pc --version\n");
+}
+
+bool write_file(const std::string& path, const std::string& content) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+    return out.good();
+}
+
+int load_and_run(const std::string& path,
+                 const std::function<int(const PeImage&, const Diagnostics&)>& run) {
+    Diagnostics diags;
+    try {
+        const PeImage img = xbox2pc::pe::parse_file(path, diags);
+        return run(img, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s", e.what());
+        if (e.has_offset()) std::fprintf(stderr, " at offset %s", hex(e.offset()).c_str());
+        std::fprintf(stderr, "\n");
+        return 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
+// ── M1: inspect report (unchanged output) ─────────────────────────────────
+
+void print_report(const PeImage& img, const Diagnostics& diags) {
     using namespace xbox2pc::pe;
 
-    // header block
     std::printf("%s\n", std::string(64, '=').c_str());
     std::printf("xbox2pc PE inspection report\n");
     std::printf("source: %s\n", img.source_name.c_str());
@@ -64,7 +116,6 @@ void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnost
     else if (img.coff.characteristics & 0x0001) std::printf("image_type:    object\n");
     else std::printf("image_type:    executable\n");
 
-    // sections
     std::printf("\nsections (%u):\n", static_cast<unsigned>(img.sections.size()));
     std::printf("  %-8s %-10s %-10s %-10s %-10s\n", "name", "vsize", "vaddr", "rawsz", "raw@");
     for (const auto& s : img.sections) {
@@ -82,7 +133,6 @@ void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnost
                     s.has_raw_data ? "" : " [no raw data]");
     }
 
-    // directories (non-empty only)
     std::printf("\ndata_directories:\n");
     bool any_dir = false;
     for (std::uint16_t i = 0; i < img.directories.size(); ++i) {
@@ -94,7 +144,6 @@ void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnost
     }
     if (!any_dir) std::printf("  (none)\n");
 
-    // imports
     std::printf("\nimports:\n");
     if (!img.imports.present || img.imports.entries.empty()) {
         std::printf("  (none)\n");
@@ -113,7 +162,6 @@ void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnost
         }
     }
 
-    // exports
     std::printf("\nexports:\n");
     if (!img.exports.present || img.exports.functions.empty()) {
         std::printf("  (none)\n");
@@ -130,7 +178,6 @@ void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnost
         }
     }
 
-    // warnings / errors
     std::printf("\ndiagnostics:\n");
     const auto& es = diags.entries();
     if (es.empty()) {
@@ -141,48 +188,340 @@ void print_report(const xbox2pc::pe::PeImage& img, const xbox2pc::diag::Diagnost
     std::printf("%s\n", std::string(64, '=').c_str());
 }
 
+// ── M2: JSON dependency report ────────────────────────────────────────────
+
+Json report_to_json(const DependencyReport& rep) {
+    Json root = Json::object();
+    root.set("tool", "xbox2pc");
+    root.set("version", "0.2.0");
+    root.set("source", rep.source);
+
+    Json dlls = Json::array();
+    for (const auto& d : rep.dependencies) {
+        Json j = Json::object();
+        j.set("dll", d.dll_name);
+        j.set("category", d.category_name);
+        j.set("classified", d.classified);
+        j.set("regular_import", d.regular_import);
+        j.set("delay_import", d.delay_import);
+        j.set("duplicate", d.duplicate);
+        j.set("function_count", static_cast<std::uint64_t>(d.function_count));
+        Json sources = Json::array();
+        for (const auto& s : d.import_sources) sources.push_back(s);
+        j.set("import_sources", std::move(sources));
+        if (d.timestamp != 0) j.set("bound_timestamp", d.timestamp);
+        if (d.iat_rva != 0) j.set("iat_rva", d.iat_rva);
+        if (d.int_rva != 0) j.set("int_rva", d.int_rva);
+        Json fns = Json::array();
+        for (const auto& f : d.functions) {
+            Json fj = Json::object();
+            fj.set("name", f.name);
+            if (f.by_ordinal) {
+                fj.set("ordinal", f.ordinal);
+                fj.set("by_ordinal", true);
+            } else if (f.ordinal != 0) {
+                fj.set("hint_ordinal", f.ordinal);
+            }
+            fj.set("delay_load", f.delay_load);
+            fj.set("unresolved", f.unresolved);
+            fns.push_back(std::move(fj));
+        }
+        j.set("functions", std::move(fns));
+        Json comp = Json::object();
+        comp.set("status", xbox2pc::compat::status_to_name(d.compat_status));
+        comp.set("known", d.compat_known);
+        if (!d.compat_note.empty()) comp.set("windows_equivalent", d.compat_note);
+        j.set("compatibility", std::move(comp));
+        dlls.push_back(std::move(j));
+    }
+    root.set("dependencies", std::move(dlls));
+
+    Json fwd = Json::array();
+    for (const auto& f : rep.forwarded_exports) {
+        Json fj = Json::object();
+        fj.set("export", f.export_name);
+        fj.set("forwarder", f.forwarder);
+        fj.set("target_dll", f.target_dll);
+        fj.set("target_api", f.target_api);
+        fwd.push_back(std::move(fj));
+    }
+    root.set("forwarded_exports", std::move(fwd));
+
+    root.set("distinct_dll_count", static_cast<std::uint64_t>(rep.distinct_dll_count()));
+    root.set("total_function_imports", static_cast<std::uint64_t>(rep.total_function_imports()));
+    root.set("duplicate_dependencies", static_cast<std::uint64_t>(rep.duplicate_count));
+    root.set("unresolved_functions", static_cast<std::uint64_t>(rep.unresolved_function_count));
+    root.set("unresolved_dlls", static_cast<std::uint64_t>(rep.unresolved_dll_count));
+    root.set("has_delay_imports", rep.has_delay_imports);
+    return root;
+}
+
+// ── M2: text dependency report ────────────────────────────────────────────
+
+void print_dependencies(const DependencyReport& rep, const Diagnostics& diags) {
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc dependency analysis\n");
+    std::printf("source: %s\n", rep.source.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+
+    std::printf("\nimported DLLs (%zu distinct, %zu function imports):\n",
+                rep.distinct_dll_count(), rep.total_function_imports());
+    if (rep.dependencies.empty()) std::printf("  (none)\n");
+    for (const auto& d : rep.dependencies) {
+        std::printf("  %s  [%s]\n", d.dll_name.c_str(), d.category_name.c_str());
+        if (d.regular_import && d.delay_import) {
+            std::printf("      imported via: regular + delay-load\n");
+        } else if (d.delay_import) {
+            std::printf("      imported via: delay-load\n");
+        }
+        if (d.duplicate) std::printf("      duplicate dependency\n");
+        if (d.compat_known) {
+            std::printf("      compatibility: %s\n",
+                        xbox2pc::compat::status_to_name(d.compat_status));
+            if (!d.compat_note.empty()) {
+                std::printf("        windows equivalent: %s\n", d.compat_note.c_str());
+            }
+        }
+        for (const auto& f : d.functions) {
+            if (f.by_ordinal) {
+                std::printf("      #%u (ordinal%s)\n", f.ordinal,
+                            f.delay_load ? ", delay" : "");
+            } else {
+                std::printf("      %s%s%s\n", f.name.c_str(), f.delay_load ? " (delay)" : "",
+                            f.unresolved ? " [unresolved]" : "");
+            }
+        }
+    }
+
+    if (!rep.forwarded_exports.empty()) {
+        std::printf("\nforwarded exports (%zu):\n", rep.forwarded_exports.size());
+        for (const auto& f : rep.forwarded_exports) {
+            std::printf("  %s -> %s (target %s!%s)\n", f.export_name.c_str(),
+                        f.forwarder.c_str(), f.target_dll.c_str(), f.target_api.c_str());
+        }
+    }
+
+    std::printf("\nsummary:\n");
+    std::printf("  distinct DLLs:          %zu\n", rep.distinct_dll_count());
+    std::printf("  function imports:      %zu\n", rep.total_function_imports());
+    std::printf("  duplicates:            %zu\n", rep.duplicate_count);
+    std::printf("  unresolved functions:  %zu\n", rep.unresolved_function_count);
+    std::printf("  unresolved DLLs:       %zu\n", rep.unresolved_dll_count);
+    std::printf("  delay-load DLLs:       %s\n", rep.has_delay_imports ? "yes" : "no");
+
+    std::printf("\ndiagnostics:\n");
+    if (diags.entries().empty()) {
+        std::printf("  (no warnings or errors)\n");
+    } else {
+        for (const auto& l : diags.lines()) std::printf("  %s\n", l.c_str());
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+}
+
+// ── M2: graph command ─────────────────────────────────────────────────────
+
+void print_graph(const DependencyGraph& g) {
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc dependency graph\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("\nnodes (%zu):\n", g.node_count());
+    for (const auto& kv : g.nodes()) {
+        std::printf("  %-34s %-22s%s%s\n", kv.second.id.c_str(), kv.second.category_name.c_str(),
+                    kv.second.is_root ? " [root]" : "",
+                    kv.second.missing ? " [missing]" : "");
+    }
+    std::printf("\nedges (%zu):\n", g.edge_count());
+    for (const auto& e : g.edges()) {
+        std::printf("  %s -> %s  (%zu function(s)%s)\n", e.from.c_str(), e.to.c_str(),
+                    e.functions.size(), e.delay_load ? ", delay-load" : "");
+    }
+    const auto cycles = g.detect_cycles();
+    std::printf("\ncircular dependencies: %zu\n", cycles.size());
+    for (const auto& c : cycles) {
+        std::string path;
+        for (std::size_t i = 0; i < c.nodes.size(); ++i) {
+            path += c.nodes[i];
+            if (i + 1 < c.nodes.size()) path += " -> ";
+        }
+        std::printf("  %s\n", path.c_str());
+    }
+    const auto missing = g.missing_dependencies();
+    std::printf("\nmissing dependencies: %zu\n", missing.size());
+    for (const auto& m : missing) {
+        std::printf("  %s -> %s\n", m.from.c_str(), m.to.c_str());
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+}
+
+// ── M2: classify command ──────────────────────────────────────────────────
+
+void print_classify(const DependencyReport& rep, const PeImage& img) {
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc API classification\n");
+    std::printf("source: %s\n", rep.source.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+
+    const ApiRegistry reg;
+    const CompatibilityDb db;
+    std::size_t known = 0, unknown = 0;
+
+    for (const auto& d : rep.dependencies) {
+        const bool cls = d.classified;
+        if (cls) ++known; else ++unknown;
+        std::printf("\n%s [%s]\n", d.dll_name.c_str(), d.category_name.c_str());
+        if (!cls) {
+            std::printf("  classification: Unknown (no evidence-based record)\n");
+            continue;
+        }
+        if (const auto rec = reg.classify_library(d.dll_name)) {
+            std::printf("  evidence: %s\n", rec->source.c_str());
+            std::printf("  note:     %s\n", rec->note.c_str());
+        }
+        if (const auto cr = db.lookup(d.dll_name, "")) {
+            std::printf("  compatibility: %s\n", xbox2pc::compat::status_to_name(cr->status));
+            if (!cr->windows_equivalent.empty()) {
+                std::printf("    windows equivalent: %s\n", cr->windows_equivalent.c_str());
+            }
+        }
+        for (const auto& f : d.functions) {
+            if (f.name.empty()) continue;
+            const auto frec = reg.classify_api(d.dll_name, f.name);
+            const auto fdb = db.lookup(d.dll_name, f.name);
+            if (!frec.has_value() && !fdb.has_value()) continue;
+            std::printf("    %s: %s", f.name.c_str(),
+                        frec.has_value()
+                            ? xbox2pc::registry::category_to_name(frec->category)
+                            : "Unknown");
+            if (fdb.has_value()) {
+                std::printf(" | %s", xbox2pc::compat::status_to_name(fdb->status));
+            }
+            std::printf("\n");
+        }
+    }
+
+    std::printf("\nsummary: %zu classified, %zu unknown DLL(s)\n", known, unknown);
+    std::printf("export name: %s (%zu exported function(s))\n",
+                img.exports.dll_name.empty() ? "(none)" : img.exports.dll_name.c_str(),
+                img.exports.functions.size());
+    std::printf("%s\n", std::string(64, '=').c_str());
+}
+
+// ── command entry points ──────────────────────────────────────────────────
+
 int cmd_inspect(const std::string& path, bool quiet) {
-    xbox2pc::diag::Diagnostics diags;
-    try {
-        const xbox2pc::pe::PeImage img = xbox2pc::pe::parse_file(path, diags);
+    return load_and_run(path, [quiet](const PeImage& img, const Diagnostics& diags) {
         print_report(img, diags);
         if (!quiet && diags.has_warnings()) {
             std::fprintf(stderr, "note: %zu warning(s) during parse\n",
-                         static_cast<std::size_t>(diags.count(xbox2pc::diag::Severity::Warning)));
+                         static_cast<std::size_t>(
+                             diags.count(xbox2pc::diag::Severity::Warning)));
         }
         return 0;
-    } catch (const xbox2pc::pe::ParseError& e) {
-        std::fprintf(stderr, "error: %s", e.what());
-        if (e.has_offset()) std::fprintf(stderr, " at offset %s", hex(e.offset()).c_str());
-        std::fprintf(stderr, "\n");
-        for (const auto& l : diags.lines()) std::fprintf(stderr, "  %s\n", l.c_str());
-        return 1;
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "error: %s\n", e.what());
-        return 1;
-    }
+    });
+}
+
+int cmd_dependencies(const std::string& path, const std::optional<std::string>& json_out) {
+    return load_and_run(path, [json_out](const PeImage& img, const Diagnostics&) {
+        Diagnostics diags;
+        const DependencyReport rep = xbox2pc::deps::analyze(img, diags);
+        if (json_out.has_value()) {
+            const std::string out = report_to_json(rep).serialize();
+            if (!write_file(*json_out, out + "\n")) {
+                std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+                return 1;
+            }
+            std::printf("wrote %s\n", json_out->c_str());
+            return 0;
+        }
+        print_dependencies(rep, diags);
+        return 0;
+    });
+}
+
+int cmd_graph(const std::string& path, const std::optional<std::string>& json_out) {
+    return load_and_run(path, [json_out](const PeImage& img, const Diagnostics&) {
+        Diagnostics diags;
+        const DependencyReport rep = xbox2pc::deps::analyze(img, diags);
+        DependencyGraph g;
+        g.build_from_report(rep, img, diags);
+        // Single-file mode: every import is a "missing" dependency (the DLL
+        // files themselves are not provided to the tool).
+        for (const auto& d : rep.dependencies) {
+            g.mark_missing(d.dll_name);
+        }
+        if (json_out.has_value()) {
+            const std::string out = g.to_json().serialize();
+            if (!write_file(*json_out, out + "\n")) {
+                std::fprintf(stderr, "error: cannot write JSON to %s\n", json_out->c_str());
+                return 1;
+            }
+            std::printf("wrote %s\n", json_out->c_str());
+            return 0;
+        }
+        print_graph(g);
+        return 0;
+    });
+}
+
+int cmd_classify(const std::string& path) {
+    return load_and_run(path, [](const PeImage& img, const Diagnostics&) {
+        Diagnostics diags;
+        const DependencyReport rep = xbox2pc::deps::analyze(img, diags);
+        print_classify(rep, img);
+        return 0;
+    });
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0)) {
-        std::printf("xbox2pc 0.1.0 (M1: PE32+ inspection)\n");
+        std::printf("xbox2pc 0.2.0 (M1: PE32+ inspection; M2: dependency intelligence)\n");
         return 0;
     }
-    if (argc < 3 || std::strcmp(argv[1], "inspect") != 0) {
-        std::fprintf(stderr,
-                      "usage: xbox2pc inspect <pe-file> [--quiet]\n"
-                      "       xbox2pc --version\n");
+    if (argc < 3) {
+        usage();
         return 2;
     }
-    bool quiet = false;
-    for (int i = 3; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--quiet") == 0) quiet = true;
-        else {
+    const std::string cmd = argv[1];
+    const std::string path = argv[2];
+
+    if (cmd == "inspect") {
+        bool quiet = false;
+        for (int i = 3; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--quiet") == 0) quiet = true;
+            else {
+                std::fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+                return 2;
+            }
+        }
+        return cmd_inspect(path, quiet);
+    }
+    if (cmd == "dependencies" || cmd == "graph") {
+        std::optional<std::string> json_out;
+        for (int i = 3; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--json") == 0) {
+                if (i + 1 >= argc) {
+                    std::fprintf(stderr, "error: --json requires an output path\n");
+                    return 2;
+                }
+                json_out = argv[i + 1];
+                ++i;
+            } else {
+                std::fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
+                return 2;
+            }
+        }
+        return cmd == "dependencies" ? cmd_dependencies(path, json_out)
+                                     : cmd_graph(path, json_out);
+    }
+    if (cmd == "classify") {
+        for (int i = 3; i < argc; ++i) {
             std::fprintf(stderr, "error: unknown option '%s'\n", argv[i]);
             return 2;
         }
+        return cmd_classify(path);
     }
-    return cmd_inspect(argv[2], quiet);
+    usage();
+    return 2;
 }
