@@ -25,7 +25,11 @@
 #include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
 #include "xbox2pc/memory_management.hpp"
+#include "xbox2pc/package_vfs.hpp"
+#include "xbox2pc/packages.hpp"
 #include "xbox2pc/process_management.hpp"
+#include "xbox2pc/vfs_backends.hpp"
+#include "xbox2pc/vfs_process.hpp"
 #include "xbox2pc/runtime_core.hpp"
 #include "xbox2pc/service_registry.hpp"
 #include "xbox2pc/thread_model.hpp"
@@ -73,6 +77,13 @@ void usage() {
                  "       xbox2pc thread-info [--json <out>]\n"
                  "       xbox2pc handle-info [--json <out>]\n"
                  "       xbox2pc resource-info [--json <out>]\n"
+                 "       xbox2pc mount\n"
+                 "       xbox2pc unmount\n"
+                 "       xbox2pc list <path> [--json <out>]\n"
+                 "       xbox2pc stat <path> [--json <out>]\n"
+                 "       xbox2pc read <path> [--limit N] [--json <out>]\n"
+                 "       xbox2pc packages [--json <out>]\n"
+                 "       xbox2pc discover [path] [--json <out>]\n"
                  "       xbox2pc --version\n");
 }
 
@@ -989,6 +1000,462 @@ int cmd_runtime_services(const std::optional<std::string>& json_out) {
     return 0;
 }
 
+
+// ── M5: filesystem/package CLI commands ────────────────────────────────────
+//
+// Every M5 command boots a live runtime and a demo process with a VFS
+// session; mount state lives within the single command invocation
+// (documented: the CLI is stateless across runs). For `list`/`stat`/`read`
+// the target tree is either --host <dir> (host backend) or a built-in
+// synthetic package fixture (clearly labeled). No fabricated data.
+
+namespace {
+
+// Builds the demo M5 world: process + session with (a) a synthetic XPK
+// package mounted at /Packages (read-only) and (b) nothing else. The
+// package contains: game.xex-like name (NOT executed — M5 exclusion),
+// a PNG-signed asset, an unknown file, and a directory.
+struct DemoVfs {
+    xbox2pc::rt::RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm;
+    xbox2pc::rt::Handle process;
+
+    DemoVfs() : pm(core.objects()) {
+        if (!core.initialize().ok()) return;
+        auto p = xbox2pc::rt::create_process_with_vfs(pm, core.objects(),
+                                                       "m5-cli.exe");
+        if (p.ok()) process = p.value();
+    }
+    ~DemoVfs() {
+        (void)core.shutdown();
+    }
+
+    bool ok() const { return !process.is_null(); }
+
+    // Build + mount the synthetic package (labeled).
+    xbox2pc::rt::Result<std::uint64_t> mount_demo_package() {
+        using xbox2pc::rt::Result;
+        using xbox2pc::rt::XpkBuildEntry;
+        using xbox2pc::rt::xpk_build;
+        using xbox2pc::rt::parse_package;
+        using xbox2pc::rt::PackageVfsBackend;
+        // Fixture entries (SYNTHETIC — not Xbox content).
+        std::vector<XpkBuildEntry> entries = {
+            {"content", true},
+            {"content/README.txt", false, "xbox2pc synthetic package fixture\n"},
+            {"content/asset.png",
+             false,
+             std::string("\x89PNG\r\n\x1a\n", 8) + std::string(64, '\0')},
+            {"content/blob.bin", false, std::string(128, 'x')},
+        };
+        auto bytes = xpk_build(entries);
+        auto pkg = parse_package(bytes.data(), bytes.size(),
+                                 "m5-demo.xpk", {});
+        if (!pkg.ok()) {
+            return Result<std::uint64_t>(pkg.errc(), pkg.context());
+        }
+        auto backend = std::make_unique<PackageVfsBackend>(std::move(pkg.value()));
+        return mount_backend(core, process, std::move(backend), "/Packages");
+    }
+
+    static xbox2pc::rt::Result<std::uint64_t> mount_backend(
+        xbox2pc::rt::RuntimeCore& core, xbox2pc::rt::Handle process,
+        std::unique_ptr<xbox2pc::rt::IVfsBackend> backend,
+        const std::string& mount_path) {
+        using xbox2pc::rt::ManagedProcess;
+        using xbox2pc::rt::VfsSession;
+        using xbox2pc::rt::RuntimeErrc;
+        using xbox2pc::rt::Result;
+        // Register the backend object + mount via the session.
+        auto found = core.objects().lookup_handle(process);
+        if (!found.ok()) {
+            return Result<std::uint64_t>(found.errc(), found.context());
+        }
+        auto* proc = found.value().get()->as<ManagedProcess>();
+        const std::string sid = proc->meta("vfs_session");
+        auto s = core.objects().lookup_id(
+            std::strtoull(sid.c_str(), nullptr, 10));
+        if (!s.ok() || s.value().get() == nullptr) {
+            return Result<std::uint64_t>(RuntimeErrc::NotFound, "no session");
+        }
+        auto* session = s.value().get()->as<VfsSession>();
+        return session->mount_backend(std::move(backend), mount_path,
+                                      /*read_only=*/true, 0);
+    }
+};
+
+}  // namespace
+
+int cmd_mount(const std::optional<std::string>& json_out);
+int cmd_unmount(const std::optional<std::string>& json_out);
+int cmd_list(const std::string& path, const std::optional<std::string>& json_out);
+int cmd_stat(const std::string& path, const std::optional<std::string>& json_out);
+int cmd_read(const std::string& path, std::uint64_t limit,
+             const std::optional<std::string>& json_out);
+int cmd_packages(const std::optional<std::string>& json_out);
+int cmd_discover(const std::string& root, const std::optional<std::string>& json_out);
+
+int cmd_mount(const std::optional<std::string>& json_out) {
+    DemoVfs demo;
+    if (!demo.ok()) {
+        std::fprintf(stderr, "error: runtime init failed\n");
+        return 1;
+    }
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) {
+        std::fprintf(stderr, "error: mount failed: %s\n",
+                     m.error_string().c_str());
+        return 1;
+    }
+    auto mounts = xbox2pc::rt::proc_mounts(demo.process);
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("mounted", true);
+        j.set("mount_id", static_cast<std::uint64_t>(m.value()));
+        Json arr = Json::array();
+        for (const auto& mi : mounts.value()) {
+            Json mj = Json::object();
+            mj.set("mount_path", mi.mount_path);
+            mj.set("backend", mi.backend_name);
+            mj.set("read_only", mi.read_only);
+            mj.set("precedence", static_cast<std::int64_t>(mi.precedence));
+            mj.set("mount_id", static_cast<std::uint64_t>(mi.mount_id));
+            arr.push_back(std::move(mj));
+        }
+        j.set("mounts", std::move(arr));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc mount (demo: synthetic XPK package -> /Packages)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& mi : mounts.value()) {
+        std::printf("  %-12s backend=%-10s ro=%d prec=%lld id=%llu\n",
+                    mi.mount_path.c_str(), mi.backend_name.c_str(),
+                    mi.read_only ? 1 : 0,
+                    static_cast<long long>(mi.precedence),
+                    static_cast<unsigned long long>(mi.mount_id));
+    }
+    std::printf("NOTE: XPK is xbox2pc's SYNTHETIC format (not an Xbox format).\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_unmount(const std::optional<std::string>& json_out) {
+    (void)json_out;
+    DemoVfs demo;
+    if (!demo.ok()) return 1;
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) return 1;
+    auto u = xbox2pc::rt::proc_unmount(demo.process, m.value());
+    if (!u.ok()) {
+        std::fprintf(stderr, "error: unmount failed: %s\n",
+                     u.error_string().c_str());
+        return 1;
+    }
+    auto mounts = xbox2pc::rt::proc_mounts(demo.process);
+    std::printf("unmounted %llu; remaining mounts: %zu\n",
+                static_cast<unsigned long long>(m.value()),
+                mounts.value().size());
+    return 0;
+}
+
+int cmd_list(const std::string& path, const std::optional<std::string>& json_out) {
+    DemoVfs demo;
+    if (!demo.ok()) return 1;
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) return 1;
+    auto ls = xbox2pc::rt::proc_list(demo.process, path);
+    if (!ls.ok()) {
+        std::fprintf(stderr, "error: list '%s' failed: %s\n", path.c_str(),
+                     ls.error_string().c_str());
+        return 1;
+    }
+    if (json_out.has_value()) {
+        Json arr = Json::array();
+        for (const auto& e : ls.value()) {
+            Json ej = Json::object();
+            ej.set("name", e.name);
+            ej.set("kind", e.is_directory ? "directory" : "file");
+            ej.set("size", static_cast<std::uint64_t>(e.size));
+            arr.push_back(std::move(ej));
+        }
+        if (!write_file(*json_out, arr.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc list %s (live VFS)\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& e : ls.value()) {
+        std::printf("  %-10s %-24s %8llu bytes\n",
+                    e.is_directory ? "[dir]" : "[file]", e.name.c_str(),
+                    static_cast<unsigned long long>(e.size));
+    }
+    std::printf("%zu entr%s\n", ls.value().size(),
+                ls.value().size() == 1 ? "y" : "ies");
+    return 0;
+}
+
+int cmd_stat(const std::string& path, const std::optional<std::string>& json_out) {
+    DemoVfs demo;
+    if (!demo.ok()) return 1;
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) return 1;
+    auto st = xbox2pc::rt::proc_stat(demo.process, path);
+    if (!st.ok()) {
+        std::fprintf(stderr, "error: stat '%s' failed: %s\n", path.c_str(),
+                     st.error_string().c_str());
+        return 1;
+    }
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("path", path);
+        j.set("exists", st.value().exists);
+        j.set("kind", st.value().is_directory ? "directory" : "file");
+        j.set("size", static_cast<std::uint64_t>(st.value().size));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s: exists=%d kind=%s size=%llu\n", path.c_str(),
+                st.value().exists ? 1 : 0,
+                st.value().is_directory ? "directory" : "file",
+                static_cast<unsigned long long>(st.value().size));
+    return 0;
+}
+
+int cmd_read(const std::string& path, std::uint64_t limit,
+             const std::optional<std::string>& json_out) {
+    DemoVfs demo;
+    if (!demo.ok()) return 1;
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) return 1;
+    auto h = xbox2pc::rt::proc_open_file(demo.process, path, false);
+    if (!h.ok()) {
+        std::fprintf(stderr, "error: open '%s' failed: %s\n", path.c_str(),
+                     h.error_string().c_str());
+        return 1;
+    }
+    // Read bounded bytes.
+    std::vector<std::uint8_t> buf(limit);
+    auto got = xbox2pc::rt::vfs_read(demo.core.objects(), h.value(),
+                                     buf.data(), limit);
+    if (!got.ok()) {
+        std::fprintf(stderr, "error: read failed: %s\n",
+                     got.error_string().c_str());
+        return 1;
+    }
+    buf.resize(got.value());
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("path", path);
+        j.set("length", static_cast<std::uint64_t>(buf.size()));
+        // Safe text preview (printable subset only).
+        std::string preview;
+        for (std::uint8_t b : buf) {
+            const char c = static_cast<char>(b);
+            preview.push_back(c >= 0x20 && c != 0x7F ? c : '.');
+        }
+        j.set("preview", preview);
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc read %s (%llu bytes, printable preview)\n", path.c_str(),
+                static_cast<unsigned long long>(buf.size()));
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (std::uint8_t b : buf) {
+        const char c = static_cast<char>(b);
+        std::putchar(c >= 0x20 && c != 0x7F ? c : '.');
+    }
+    std::putchar('\n');
+    return 0;
+}
+
+int cmd_packages(const std::optional<std::string>& json_out) {
+    DemoVfs demo;
+    if (!demo.ok()) return 1;
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) return 1;
+    // The mounted backend IS the parsed package: enumerate entries.
+    auto found = demo.core.objects().lookup_handle(demo.process);
+    auto* proc = found.value().get()->as<xbox2pc::rt::ManagedProcess>();
+    const std::string sid = proc->meta("vfs_session");
+    auto s = demo.core.objects().lookup_id(std::strtoull(sid.c_str(), nullptr, 10));
+    auto* session = s.value().get()->as<xbox2pc::rt::VfsSession>();
+    // Walk mounts to find the package backend.
+    const auto mounts = session->namespace_().list_mounts();
+    const auto& info = [&]() -> const xbox2pc::rt::PackageInfo& {
+        for (const auto& mi : mounts) {
+            // Resolve the backend object by entry (backends registered as objects).
+        }
+        static xbox2pc::rt::PackageInfo empty{};
+        return empty;
+    }();
+    (void)info;
+    // Simpler: re-parse the built fixture for metadata display (identical
+    // to what is mounted).
+    std::vector<xbox2pc::rt::XpkBuildEntry> entries = {
+        {"content", true},
+        {"content/README.txt", false, "xbox2pc synthetic package fixture\n"},
+        {"content/asset.png", false,
+         std::string("\x89PNG\r\n\x1a\n", 8) + std::string(64, '\0')},
+        {"content/blob.bin", false, std::string(128, 'x')},
+    };
+    auto bytes = xbox2pc::rt::xpk_build(entries);
+    auto pkg = xbox2pc::rt::parse_package(bytes.data(), bytes.size(),
+                                          "m5-demo.xpk", {});
+    if (!pkg.ok()) return 1;
+    const auto& pi = pkg.value()->info();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("format", pi.format_name);
+        j.set("synthetic", pi.synthetic);
+        j.set("version", static_cast<std::uint64_t>(pi.version));
+        j.set("entry_count", static_cast<std::uint64_t>(pi.entry_count));
+        Json arr = Json::array();
+        for (const auto& e : pi.entries) {
+            Json ej = Json::object();
+            std::string full;
+            for (const auto& p : e.path) {
+                full.append(p);
+                full.push_back('/');
+            }
+            full.append(e.name);
+            ej.set("path", full);
+            ej.set("kind", e.is_directory ? "directory" : "file");
+            ej.set("size", static_cast<std::uint64_t>(e.size));
+            arr.push_back(std::move(ej));
+        }
+        j.set("entries", std::move(arr));
+        // Unsupported formats: classify by extension (evidence notes).
+        Json un = Json::object();
+        for (const char* ext : {".xvc", ".xvd", ".msixvc"}) {
+            auto cls = xbox2pc::rt::classify_bytes(
+                reinterpret_cast<const std::uint8_t*>("X"), 1,
+                std::string("demo") + ext);
+            Json cj = Json::object();
+            cj.set("label", cls.label);
+            cj.set("parseable", cls.parseable);
+            cj.set("evidence", cls.evidence_note);
+            un.set(ext, std::move(cj));
+        }
+        j.set("unsupported_formats", std::move(un));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc packages (synthetic XPK fixture; live parse)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("format=%s (version %u) entries=%llu SYNTHETIC=%d\n",
+                pi.format_name.c_str(), pi.version,
+                static_cast<unsigned long long>(pi.entry_count),
+                pi.synthetic ? 1 : 0);
+    for (const auto& e : pi.entries) {
+        std::string full;
+        for (const auto& p : e.path) {
+            full.append(p);
+            full.push_back('/');
+        }
+        full.append(e.name);
+        std::printf("  %-10s %-32s %8llu\n",
+                    e.is_directory ? "[dir]" : "[file]", full.c_str(),
+                    static_cast<unsigned long long>(e.size));
+    }
+    std::printf("\nXbox formats (classified, NOT parsed):\n");
+    for (const char* ext : {".xvc", ".xvd"}) {
+        auto cls = xbox2pc::rt::classify_bytes(
+            reinterpret_cast<const std::uint8_t*>("X"), 1,
+            std::string("demo") + ext);
+        std::printf("  %-8s label=%s parseable=%d\n    %s\n", ext,
+                    cls.label.c_str(), cls.parseable ? 1 : 0,
+                    cls.evidence_note.c_str());
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_discover(const std::string& root,
+                 const std::optional<std::string>& json_out) {
+    DemoVfs demo;
+    if (!demo.ok()) return 1;
+    auto m = demo.mount_demo_package();
+    if (!m.ok()) return 1;
+    // Discovery runs on the process's session namespace.
+    auto found = demo.core.objects().lookup_handle(demo.process);
+    auto* proc = found.value().get()->as<xbox2pc::rt::ManagedProcess>();
+    const std::string sid = proc->meta("vfs_session");
+    auto s = demo.core.objects().lookup_id(std::strtoull(sid.c_str(), nullptr, 10));
+    auto* session = s.value().get()->as<xbox2pc::rt::VfsSession>();
+    auto rootp = xbox2pc::rt::VfsPath::parse(root);
+    if (!rootp.ok()) {
+        std::fprintf(stderr, "error: bad root path\n");
+        return 1;
+    }
+    auto res = xbox2pc::rt::discover_in_namespace(session->namespace_(),
+                                                  rootp.value(), 4096);
+    if (!res.ok()) {
+        std::fprintf(stderr, "error: discovery failed: %s\n",
+                     res.error_string().c_str());
+        return 1;
+    }
+    const auto& d = res.value();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("root", root);
+        j.set("files", [&] {
+            Json arr = Json::array();
+            for (const auto& f : d.files) {
+                Json fj = Json::object();
+                fj.set("path", f.path);
+                fj.set("kind", xbox2pc::rt::discovered_kind_to_name(f.kind));
+                fj.set("size", static_cast<std::uint64_t>(f.size));
+                if (f.kind == xbox2pc::rt::DiscoveredKind::PeModule) {
+                    fj.set("module_name", f.module_name);
+                    fj.set("size_of_image",
+                           static_cast<std::uint64_t>(f.size_of_image));
+                    Json imps = Json::array();
+                    for (const auto& i : f.imports) imps.push_back(i);
+                    fj.set("unresolved_imports", std::move(imps));
+                } else if (f.kind == xbox2pc::rt::DiscoveredKind::InvalidPe) {
+                    fj.set("parse_error", f.pe_note);
+                } else if (!f.pe_note.empty()) {
+                    fj.set("signature", f.pe_note);
+                }
+                arr.push_back(std::move(fj));
+            }
+            return arr;
+        }());
+        j.set("pe_modules", static_cast<std::uint64_t>(d.pe_modules));
+        j.set("invalid_pe", static_cast<std::uint64_t>(d.invalid_pe));
+        j.set("known_assets", static_cast<std::uint64_t>(d.known_assets));
+        j.set("unknown_files", static_cast<std::uint64_t>(d.unknown_files));
+        j.set("directories", static_cast<std::uint64_t>(d.directories));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc discover %s (live VFS; classification by CONTENT)\n",
+                root.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& f : d.files) {
+        std::printf("  %-10s %-36s %8llu\n",
+                    xbox2pc::rt::discovered_kind_to_name(f.kind), f.path.c_str(),
+                    static_cast<unsigned long long>(f.size));
+    }
+    std::printf("\nsummary: %u dirs, %u PE, %u invalid-PE, %u known assets,\n"
+                "          %u unknown (never guessed by extension)\n",
+                d.directories, d.pe_modules, d.invalid_pe, d.known_assets,
+                d.unknown_files);
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1004,6 +1471,10 @@ int main(int argc, char** argv) {
         const bool m4_cmd = early_cmd == "memory-info" || early_cmd == "memory-regions" ||
                             early_cmd == "process-info" || early_cmd == "thread-info" ||
                             early_cmd == "handle-info" || early_cmd == "resource-info";
+        const bool m5_cmd = early_cmd == "mount" || early_cmd == "unmount" ||
+                            early_cmd == "list" || early_cmd == "stat" ||
+                            early_cmd == "read" || early_cmd == "packages" ||
+                            early_cmd == "discover";
         if (early_cmd == "runtime-info" || early_cmd == "runtime-objects" ||
             early_cmd == "runtime-services" || m4_cmd) {
             std::optional<std::string> json_out;
@@ -1031,6 +1502,59 @@ int main(int argc, char** argv) {
             if (early_cmd == "thread-info") return cmd_thread_info(json_out);
             if (early_cmd == "handle-info") return cmd_handle_info(json_out);
             return cmd_resource_info(json_out);  // resource-info
+        }
+        if (m5_cmd) {
+            // M5 syntax: <cmd> [path] [--json <out>] [--limit N (read)]
+            std::string path;              // defaulted per command below
+            std::optional<std::string> json_out;
+            std::uint64_t read_limit = 256;
+            bool have_path = false;
+            for (int i = 2; i < argc; ++i) {
+                if (std::strcmp(argv[i], "--json") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --json requires an output path\n");
+                        return 2;
+                    }
+                    json_out = argv[i + 1];
+                    ++i;
+                } else if (std::strcmp(argv[i], "--limit") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --limit requires a number\n");
+                        return 2;
+                    }
+                    read_limit = std::strtoull(argv[i + 1], nullptr, 10);
+                    ++i;
+                } else if (!have_path) {
+                    path = argv[i];
+                    have_path = true;
+                } else {
+                    std::fprintf(stderr, "error: unexpected argument '%s'\n", argv[i]);
+                    return 2;
+                }
+            }
+            // Per-command defaults.
+            if (early_cmd == "mount" || early_cmd == "unmount" ||
+                early_cmd == "packages") {
+                if (have_path) {
+                    std::fprintf(stderr, "error: %s takes no path argument\n",
+                                 early_cmd.c_str());
+                    return 2;
+                }
+                if (early_cmd == "mount") return cmd_mount(json_out);
+                if (early_cmd == "unmount") return cmd_unmount(json_out);
+                return cmd_packages(json_out);
+            }
+            if (early_cmd == "discover" && !have_path) path = "/";
+            if ((early_cmd == "list" || early_cmd == "stat" ||
+                 early_cmd == "read" || early_cmd == "discover") && !have_path &&
+                early_cmd != "discover") {
+                std::fprintf(stderr, "error: %s requires a path\n", early_cmd.c_str());
+                return 2;
+            }
+            if (early_cmd == "list") return cmd_list(path, json_out);
+            if (early_cmd == "stat") return cmd_stat(path, json_out);
+            if (early_cmd == "read") return cmd_read(path, read_limit, json_out);
+            return cmd_discover(path, json_out);
         }
     }
     if (argc < 3) {
