@@ -1,7 +1,7 @@
 # M3 Architecture — Xbox Runtime Architecture & Object Model
 
-**Status: M1–M4 complete.** 157 tests pass (32 M1 + 45 M2 + 52 M3 +
-28 M4). Clean builds verified under the normal toolchain,
+**Status: M1–M5 complete.** 180 tests pass (32 M1 + 45 M2 + 52 M3 +
+28 M4 + 20 M5 + 3 fuzz). Clean builds verified under the normal toolchain,
 AddressSanitizer+UBSan and ThreadSanitizer (0 findings). M4 additions:
 `rt_memory` (virtual memory model) and `rt_procman` (process manager +
 resource accounting) sit between the domain models and the facade; the
@@ -165,6 +165,11 @@ Toolchain: C++20, CMake ≥ 3.20, g++ 14.2 (Linux host backend).
 | 5 | `xbox2pc_rt_process` | process_model.cpp |
 | 5.5 | `xbox2pc_rt_memory` | memory_management.cpp (M4: virtual memory, address spaces) |
 | 5.6 | `xbox2pc_rt_procman` | process_management.cpp (M4: process manager, accounting) |
+| 5.7 | `xbox2pc_rt_vfs` | vfs.cpp (M5: virtual filesystem, mounts, namespaces) |
+| 5.7 | `xbox2pc_rt_vfs_backends` | vfs_backends.cpp (M5: host-dir + memory backends) |
+| 5.8 | `xbox2pc_rt_package` | packages.cpp (M5: bounded reader, XPK synthetic format, classification) |
+| 5.8 | `xbox2pc_rt_package_vfs` | package_vfs.cpp (M5: package mounting + discovery) |
+| 5.9 | `xbox2pc_rt_vfs_process` | vfs_process.cpp (M5: process namespaces, M4 bridges) |
 | 6 | `xbox2pc_rt_services` | service_registry.cpp |
 | 7 | `xbox2pc_rt_core` | runtime_core.cpp |
 
