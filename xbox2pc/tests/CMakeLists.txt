@@ -46,3 +46,24 @@ target_link_libraries(runtime_m4_test PRIVATE
 target_compile_features(runtime_m4_test PRIVATE cxx_std_20)
 
 add_test(NAME runtime_m4_test COMMAND runtime_m4_test)
+
+# M5: filesystem + packages suite.
+add_executable(vfs_packages_test vfs_packages_test.cpp)
+target_link_libraries(vfs_packages_test PRIVATE
+    xbox2pc_core
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(vfs_packages_test PRIVATE cxx_std_20)
+
+add_test(NAME vfs_packages_test COMMAND vfs_packages_test)
+
+# M5: deterministic fuzz harnesses (no libFuzzer; seeded mutation fuzz).
+add_executable(vfs_fuzz_test vfs_fuzz.cpp)
+target_link_libraries(vfs_fuzz_test PRIVATE
+    xbox2pc_rt_package
+    xbox2pc_rt_vfs
+    xbox2pc_rt_error
+    gtest)
+target_compile_features(vfs_fuzz_test PRIVATE cxx_std_20)
+
+add_test(NAME vfs_fuzz_test COMMAND vfs_fuzz_test)
