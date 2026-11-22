@@ -1,8 +1,11 @@
 # M3 Architecture — Xbox Runtime Architecture & Object Model
 
-**Status: Complete.** All 129 tests pass (32 M1 + 45 M2 + 52 M3). Clean
-builds verified under the normal toolchain, AddressSanitizer+UBSan and
-ThreadSanitizer (0 findings).
+**Status: M1–M4 complete.** 157 tests pass (32 M1 + 45 M2 + 52 M3 +
+28 M4). Clean builds verified under the normal toolchain,
+AddressSanitizer+UBSan and ThreadSanitizer (0 findings). M4 additions:
+`rt_memory` (virtual memory model) and `rt_procman` (process manager +
+resource accounting) sit between the domain models and the facade; the
+handle layer gained table-scoped isolation + rights (M4 hardening).
 
 ## Scope and framing
 
@@ -160,6 +163,8 @@ Toolchain: C++20, CMake ≥ 3.20, g++ 14.2 (Linux host backend).
 | 5 | `xbox2pc_rt_thread` | thread_model.cpp |
 | 5 | `xbox2pc_rt_io` | io_objects.cpp |
 | 5 | `xbox2pc_rt_process` | process_model.cpp |
+| 5.5 | `xbox2pc_rt_memory` | memory_management.cpp (M4: virtual memory, address spaces) |
+| 5.6 | `xbox2pc_rt_procman` | process_management.cpp (M4: process manager, accounting) |
 | 6 | `xbox2pc_rt_services` | service_registry.cpp |
 | 7 | `xbox2pc_rt_core` | runtime_core.cpp |
 

@@ -114,3 +114,34 @@ Inferred (architectural, chosen for xbox2pc):
 - pin-based access guards instead of shared_ptr graphs,
 - the bounded non-blocking destroy,
 - user-type id allocation scheme.
+
+
+---
+
+## M4 appendix — pin-drain refinement & race fixes
+
+M4 replaced the bounded-spin pin drain with a **condvar drain** and fixed
+two real races found by TSan (documented for posterity):
+
+1. **Release-path use-after-free**: `RefGuard::release()` read the object
+   state after unpinning — if that unpin dropped the last pin, a
+   concurrent destroy could free the object between the decrement and the
+   read. Fix: read state BEFORE unpin.
+2. **Wake-path use-after-free**: `unpin()` read the drain-decision state
+   and called back into the manager AFTER the pin decrement — same
+   window. Fix: `unpin` snapshots (state, notify fn, drain context) BEFORE
+   the decrement; the callback receives the snapshot (never `this`), so
+   the wake path touches only the manager.
+
+The drain itself: `ObjectManager::destroy` drops its ownership pin and
+waits on a dedicated drain mutex+condvar (`unpin` of a destroying
+object's last pin notifies the OWNING manager — context installed at
+registration, not the global manager, so local managers in tests drain
+correctly). 50 ms fallback ticks keep the drain robust against a missed
+wake; a caller holding a guard across destroy can no longer deadlock the
+manager (M3's hazard).
+
+The W^X discipline, address-space model, rights metadata and the rest of
+the M4 memory/handle extensions are documented in
+[memory-management.md](memory-management.md) and
+[handle-security.md](handle-security.md).
