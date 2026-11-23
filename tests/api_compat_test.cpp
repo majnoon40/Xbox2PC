@@ -166,6 +166,10 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     const auto* semaphore = reg.find("kernel32", "ReleaseSemaphore");
     ASSERT_NE(semaphore, nullptr);
     EXPECT_NE(semaphore->notes.find("optional lpPreviousCount output"), std::string::npos);
+    const auto* close = reg.find("kernel32", "CloseHandle");
+    ASSERT_NE(close, nullptr);
+    EXPECT_NE(close->notes.find("guest mutex"), std::string::npos);
+    EXPECT_NE(close->notes.find("guest semaphore"), std::string::npos);
 }
  
 TEST(ApiRegistryTest, LookupCaseFoldingMatchesTheOsLoader) {
