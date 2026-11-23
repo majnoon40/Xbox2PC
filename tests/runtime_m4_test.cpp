@@ -892,6 +892,88 @@ TEST(ProcessMgmtTest, ProcessSuspendResumeDoesNotCancelOwnedThreads) {
     ASSERT_TRUE(core.shutdown().ok());
 }
 
+TEST(ProcessMgmtTest, ProcessResumePreservesPreexistingManualSuspension) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    ProcessManager pm(core.objects());
+    auto process = pm.create_process("preserve-manual-suspend.exe");
+    ASSERT_TRUE(process.ok());
+    rt::ModuleDescriptor module;
+    ASSERT_TRUE(pm.initialize_process(process.value(), module,
+                                      rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(pm.start_process(process.value()).ok());
+
+    std::atomic<std::uint64_t> progress_a{0};
+    std::atomic<std::uint64_t> progress_b{0};
+    const auto worker = [](rt::RtThread& self, void* raw) -> void* {
+        auto* count = static_cast<std::atomic<std::uint64_t>*>(raw);
+        while (self.suspension_point()) {
+            count->fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return nullptr;
+    };
+    ASSERT_TRUE(pm.spawn_thread(process.value(), worker, &progress_a, "manual-paused").ok());
+    ASSERT_TRUE(pm.spawn_thread(process.value(), worker, &progress_b, "process-paused").ok());
+
+    auto process_ref = pm.find_process(process.value());
+    ASSERT_TRUE(process_ref.ok());
+    auto* managed = process_ref.value().get()->as<ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const auto ids = managed->thread_ids();
+    ASSERT_EQ(ids.size(), 2u);
+    auto first_ref = core.objects().lookup_id(ids[0]);
+    auto second_ref = core.objects().lookup_id(ids[1]);
+    ASSERT_TRUE(first_ref.ok());
+    ASSERT_TRUE(second_ref.ok());
+    auto* first = first_ref.value().get()->as<RtThread>();
+    auto* second = second_ref.value().get()->as<RtThread>();
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while ((progress_a.load(std::memory_order_relaxed) == 0 ||
+            progress_b.load(std::memory_order_relaxed) == 0) &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(progress_a.load(std::memory_order_relaxed), 0u);
+    ASSERT_GT(progress_b.load(std::memory_order_relaxed), 0u);
+
+    ASSERT_TRUE(first->suspend().ok());
+    const auto first_park_deadline = std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(2);
+    while (!first->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < first_park_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(first->execution_control()->is_parked());
+
+    ASSERT_TRUE(pm.suspend_process(process.value()).ok());
+    const auto second_park_deadline = std::chrono::steady_clock::now() +
+                                      std::chrono::seconds(2);
+    while (!second->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < second_park_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(second->execution_control()->is_parked());
+    ASSERT_TRUE(pm.resume_process(process.value()).ok());
+    EXPECT_TRUE(first->execution_control()->is_parked());
+    EXPECT_FALSE(second->execution_control()->is_parked());
+
+    ASSERT_TRUE(first->resume().ok());
+    const auto resumed_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(2);
+    while ((progress_a.load(std::memory_order_relaxed) == 0 ||
+            progress_b.load(std::memory_order_relaxed) == 0) &&
+           std::chrono::steady_clock::now() < resumed_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(pm.terminate_process(process.value(), 0).ok());
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
 TEST(ProcessMgmtTest, MultipleProcessesIsolation) {
     rt::RuntimeCore core;
     ASSERT_TRUE(core.initialize().ok());
