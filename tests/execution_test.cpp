@@ -639,11 +639,11 @@ TEST(BridgeTest, PlanForDescriptorsAndErrors) {
     auto delayed_plan = plan_for_descriptor(*delayed);
     ASSERT_TRUE(delayed_plan.ok()) << delayed_plan.error_string();
     ASSERT_EQ(delayed_plan.value().call.args.size(), 5u);
-    EXPECT_EQ(delayed_plan.value().call.args[0].kind, abi::ArgKind::Int);
-    EXPECT_EQ(delayed_plan.value().call.args[1].kind, abi::ArgKind::Int);
-    EXPECT_EQ(delayed_plan.value().call.args[2].kind, abi::ArgKind::Int);
-    EXPECT_EQ(delayed_plan.value().call.args[3].kind, abi::ArgKind::Ptr);
-    EXPECT_EQ(delayed_plan.value().call.args[4].kind, abi::ArgKind::Ptr);
+    EXPECT_EQ(delayed_plan.value().call.args[0].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[1].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[2].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[3].kind, rt::abi::ArgKind::Ptr);
+    EXPECT_EQ(delayed_plan.value().call.args[4].kind, rt::abi::ArgKind::Ptr);
     // An unknown descriptor is refused.
     api::ApiDescriptor fake;
     fake.library = "fakelib";
