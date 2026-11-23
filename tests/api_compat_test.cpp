@@ -874,10 +874,10 @@ TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
     auto win32_multi = w.reg.dispatch("kernel32", "WaitForMultipleObjects", multi_ctx);
     ASSERT_TRUE(win32_multi.ok);
     EXPECT_EQ(win32_multi.return_value, 1u);
-    multi_ctx.args[2] = 1; // wait-all is explicitly unsupported
+    multi_ctx.args[2] = 1; // wait-all requires every handle to be signaled
     auto wait_all = w.reg.dispatch("kernel32", "WaitForMultipleObjects", multi_ctx);
     ASSERT_TRUE(wait_all.ok);
-    EXPECT_EQ(wait_all.return_value, 0xFFFFFFFFu);
+    EXPECT_EQ(wait_all.return_value, 0x102u); // WAIT_TIMEOUT, not WAIT_FAILED
 
     const std::vector<std::uint64_t> only_unsignaled{first.value()};
     auto timed_out = w.grt->wait_objects_any(pid.value(), 0, only_unsignaled, 0);
@@ -921,6 +921,96 @@ TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
     EXPECT_FALSE(w.grt->wait_objects_any(pid.value(), 0, too_many, 0).ok());
 }
  
+TEST(GdkServiceTest, GuestWaitAllAcquiresAtomicallyAndRollsBackOnTimeout) {
+    ApiWorld w;
+    (void)w.new_process("wait-all.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "wait-all.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    auto auto_event = w.grt->create_event(pid.value(), false, true);
+    auto semaphore = w.grt->create_semaphore(pid.value(), 0, 1);
+    ASSERT_TRUE(auto_event.ok());
+    ASSERT_TRUE(semaphore.ok());
+    const std::vector<std::uint64_t> mixed{auto_event.value(), semaphore.value()};
+
+    auto timed_out = w.grt->wait_objects_all(pid.value(), 0, mixed, 0);
+    ASSERT_TRUE(timed_out.ok());
+    EXPECT_EQ(timed_out.value(), 0x102u);
+
+    // The auto-reset event was consumed during the failed probe, then restored.
+    const std::vector<std::uint64_t> event_only{auto_event.value()};
+    auto restored = w.grt->wait_objects_any(pid.value(), 0, event_only, 0);
+    ASSERT_TRUE(restored.ok());
+    EXPECT_EQ(restored.value(), 0u);
+
+    ASSERT_TRUE(w.grt->set_event(pid.value(), auto_event.value()).ok());
+    ASSERT_TRUE(w.grt->release_semaphore(pid.value(), semaphore.value(), 1).ok());
+    auto acquired = w.grt->wait_objects_all(pid.value(), 0, mixed, 0);
+    ASSERT_TRUE(acquired.ok());
+    EXPECT_EQ(acquired.value(), 0u); // WAIT_OBJECT_0
+    EXPECT_EQ(w.grt->wait_object(pid.value(), 0, auto_event.value(), 0).value(),
+              0x102u);
+    EXPECT_EQ(w.grt->wait_object(pid.value(), 0, semaphore.value(), 0).value(),
+              0x102u);
+
+    // A successful wait-all owns every acquired mutex until the guest releases it.
+    auto manual_event = w.grt->create_event(pid.value(), true, true);
+    auto mutex = w.grt->create_mutex(pid.value(), 0, false);
+    ASSERT_TRUE(manual_event.ok());
+    ASSERT_TRUE(mutex.ok());
+    const std::vector<std::uint64_t> event_and_mutex{
+        manual_event.value(), mutex.value()};
+    auto mutex_all = w.grt->wait_objects_all(pid.value(), 700, event_and_mutex, 0);
+    ASSERT_TRUE(mutex_all.ok());
+    EXPECT_EQ(mutex_all.value(), 0u);
+    ASSERT_TRUE(w.grt->release_mutex(pid.value(), mutex.value(), 700).ok());
+
+    // Failed wait-all must not consume an abandoned-mutex notification.
+    auto abandoned_mutex = w.grt->create_mutex(pid.value(), 701, false);
+    auto unavailable = w.grt->create_semaphore(pid.value(), 0, 1);
+    ASSERT_TRUE(abandoned_mutex.ok());
+    ASSERT_TRUE(unavailable.ok());
+    ASSERT_TRUE(w.grt->wait_object(pid.value(), 701, abandoned_mutex.value(), 0).ok());
+    xbox2pc::rt::abandon_guest_mutexes_for_thread(701);
+    const std::vector<std::uint64_t> abandoned_and_unavailable{
+        abandoned_mutex.value(), unavailable.value()};
+    auto abandoned_timeout = w.grt->wait_objects_all(
+        pid.value(), 702, abandoned_and_unavailable, 0);
+    ASSERT_TRUE(abandoned_timeout.ok());
+    EXPECT_EQ(abandoned_timeout.value(), 0x102u);
+    auto still_abandoned = w.grt->wait_object(pid.value(), 702,
+                                               abandoned_mutex.value(), 0);
+    ASSERT_TRUE(still_abandoned.ok());
+    EXPECT_EQ(still_abandoned.value(), 0x80u);
+    ASSERT_TRUE(w.grt->release_mutex(pid.value(), abandoned_mutex.value(), 702).ok());
+
+    // Guest ABI dispatch reaches the wait-all path as well.
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.thread_id = 703;
+    ctx.arg_count = 4;
+    ctx.args[0] = 2;
+    ctx.args[1] = 0x1000;
+    ctx.args[2] = 1;
+    ctx.args[3] = 0;
+    ctx.pointer_arrays[1] = event_and_mutex;
+    auto api_wait_all = w.reg.dispatch("kernel32", "WaitForMultipleObjects", ctx);
+    ASSERT_TRUE(api_wait_all.ok);
+    EXPECT_EQ(api_wait_all.return_value, 0u);
+    ASSERT_TRUE(w.grt->release_mutex(pid.value(), mutex.value(), 703).ok());
+
+    for (const auto handle : {auto_event.value(), semaphore.value(),
+                              manual_event.value(), mutex.value(),
+                              abandoned_mutex.value(), unavailable.value()})
+        EXPECT_TRUE(w.grt->close_sync_handle(pid.value(), handle).ok());
+}
+
 TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
     ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
