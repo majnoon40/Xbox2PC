@@ -65,8 +65,8 @@ const char* region_state_to_name(RegionState s);
 
 // ── region descriptor ────────────────────────────────────────────────────
 //
-// One descriptor per allocation. xbox_va is the address IN THE SPACE's
-// virtual model; the space translates it to the host subrange.
+// One descriptor per contiguous state/protection segment. Split segments
+// retain allocation_base so the original reservation remains identifiable.
 struct VmRegion {
     std::uint64_t xbox_va = 0;       // virtual address within the space
     std::uint64_t size = 0;         // bytes (page-aligned on allocation)
