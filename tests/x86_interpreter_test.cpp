@@ -129,6 +129,63 @@ TEST_F(X86SemanticsTest, SubRegisterMergeRules) {
 
 // ── ADD / ADC / SUB / SBB / CMP flags ───────────────────────────────────────
 
+TEST_F(X86SemanticsTest, ShlOverflowIncludesCarryOut) {
+    cpu().set_reg(Gpr::Rax, 0x80);
+    cpu().rip = code_at(0, {0xD0, 0xE0}); // shl al, 1
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFu, 0u);
+    EXPECT_TRUE(cf());
+    EXPECT_TRUE(of());
+}
+
+TEST_F(X86SemanticsTest, RclOverflowUsesCarryFlag) {
+    cpu().set_reg(Gpr::Rax, 0x80);
+    cpu().set_flag(rt::cpu::kFlagCF, false);
+    cpu().rip = code_at(0, {0xD0, 0xD0}); // rcl al, 1
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFu, 0u);
+    EXPECT_TRUE(cf());
+    EXPECT_TRUE(of());
+}
+
+TEST_F(X86SemanticsTest, MemoryXchgIsRejectedAsImplicitlyAtomic) {
+    const std::uint64_t slot = kDataBase + 0x40;
+    ASSERT_TRUE(mem().write_u64(slot, 0x1122334455667788ull).ok());
+    cpu().set_reg(Gpr::Rax, 0xAABBCCDD);
+    cpu().set_reg(Gpr::Rbx, slot);
+    cpu().rip = code_at(0, {0x48, 0x87, 0x03}); // xchg [rbx], rax
+    auto r = interp().step_at_rip();
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(r.fault().fault, rt::exec::GuestFault::UnsupportedInstruction);
+    EXPECT_EQ(mem().read_u64(slot).value(), 0x1122334455667788ull);
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0xAABBCCDDu);
+}
+
+TEST_F(X86SemanticsTest, MemoryBitStringRegisterOffsetIsRejected) {
+    const std::uint64_t slot = kDataBase + 0x40;
+    ASSERT_TRUE(mem().write_u64(slot, 0).ok());
+    cpu().set_reg(Gpr::Rax, 64);
+    cpu().set_reg(Gpr::Rbx, slot);
+    cpu().rip = code_at(0, {0x48, 0x0F, 0xAB, 0x03}); // bts [rbx], rax
+    auto r = interp().step_at_rip();
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(r.fault().fault, rt::exec::GuestFault::UnsupportedInstruction);
+    EXPECT_EQ(mem().read_u64(slot).value(), 0u);
+}
+
+TEST_F(X86SemanticsTest, PopMemoryFaultRestoresRsp) {
+    const std::uint64_t stack = kDataBase + 0x100;
+    ASSERT_TRUE(mem().write_u64(stack, 0x12345678).ok());
+    cpu().set_reg(Gpr::Sp, stack);
+    cpu().set_reg(Gpr::Rax, 0x99990000);
+    cpu().rip = code_at(0, {0x8F, 0x00}); // pop qword ptr [rax]
+    const auto before = cpu();
+    auto r = interp().step_at_rip();
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(cpu().reg(Gpr::Sp), before.reg(Gpr::Sp));
+    EXPECT_EQ(cpu().rip, before.rip);
+}
+
 TEST_F(X86SemanticsTest, Add64CarryAndAdcCarryIn) {
     cpu().set_reg(Gpr::Rax, ~0ull);
     cpu().rip = code_at(0, {0x48, 0x05, 0x01, 0x00, 0x00, 0x00});
