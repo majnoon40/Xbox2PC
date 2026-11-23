@@ -189,6 +189,31 @@ TEST(MemoryTest, LimitEnforcement) {
     EXPECT_EQ(over2.errc(), RuntimeErrc::OutOfResources);
 }
 
+TEST(MemoryTest, CommittedRegionsStillConsumeReservationQuota) {
+    AddressSpace space(16 * 4096, 0x18000000, "committed-reservation-quota");
+    const auto page = space.page_size();
+    MemoryLimits limits;
+    limits.max_reserved_bytes = page;
+    space.set_limits(limits);
+
+    ASSERT_TRUE(space.reserve_region(0x18000000, page, "first").ok());
+    ASSERT_TRUE(space.commit_region(0x18000000).ok());
+
+    // Commit changes page state, not the size of the reserved VA range.
+    auto second = space.reserve_region(0x18000000 + page, page, "second");
+    ASSERT_FALSE(second.ok());
+    EXPECT_EQ(second.errc(), RuntimeErrc::OutOfResources);
+
+    // Growing a committed region consumes reservation quota as well as
+    // committed-byte quota; it cannot bypass the reservation ceiling.
+    auto grown = space.resize_region(0x18000000, 2 * page);
+    ASSERT_FALSE(grown.ok());
+    EXPECT_EQ(grown.errc(), RuntimeErrc::OutOfResources);
+    const auto region = space.find_region(0x18000000);
+    ASSERT_TRUE(region.ok());
+    EXPECT_EQ(region.value().size, page);
+}
+
 TEST(MemoryTest, RejectsAddressAndSizeArithmeticOverflow) {
     AddressSpace space(16 * 4096, 0x10000000, "overflow");
     auto wrapped_va = space.reserve_region(~0ull - 4095, 4096, "wrapped");
