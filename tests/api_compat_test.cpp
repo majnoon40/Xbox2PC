@@ -107,6 +107,29 @@ private:
     std::uint64_t v_;
 };
 
+
+struct GuestWaitThreadArgs {
+    ApiRegistry* registry = nullptr;
+    std::uint64_t process_id = 0;
+    std::uint64_t handle = 0;
+    std::atomic<bool> entered{false};
+    std::atomic<std::uint64_t> wait_result{0};
+};
+void* guest_wait_thread_main(RtThread& self, void* raw) {
+    auto* args = static_cast<GuestWaitThreadArgs*>(raw);
+    ApiContext ctx;
+    ctx.process_id = args->process_id;
+    ctx.thread_id = self.thread_id();
+    ctx.arg_count = 2;
+    ctx.args[0] = args->handle;
+    ctx.args[1] = 0xFFFFFFFFu;
+    args->entered.store(true, std::memory_order_release);
+    const auto result = args->registry->dispatch("kernel32", "WaitForSingleObject", ctx);
+    args->wait_result.store(result.ok ? result.return_value : 0xDEADu,
+                            std::memory_order_release);
+    return nullptr;
+}
+
 }  // namespace
 
 // ── 12.1 registry ─────────────────────────────────────────────────────────
@@ -534,6 +557,43 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     ASSERT_TRUE(stale.ok); EXPECT_EQ(stale.return_value,0u);
 }
 
+
+
+TEST(GdkServiceTest, ProcessTerminationCancelsBlockedGuestSyncWait) {
+    ApiWorld w;
+    (void)w.new_process("cancel-wait.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "cancel-wait.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext create;
+    create.process_id = pid.value();
+    create.arg_count = 4;
+    create.args[0] = 0; create.args[1] = 1;
+    create.args[2] = 0; create.args[3] = 0;
+    const auto event = w.reg.dispatch("kernel32", "CreateEventW", create);
+    ASSERT_TRUE(event.ok); ASSERT_NE(event.return_value, 0u);
+
+    GuestWaitThreadArgs args;
+    args.registry = &w.reg;
+    args.process_id = pid.value();
+    args.handle = event.return_value;
+    auto thread = w.pm.spawn_thread(w.last_handle, guest_wait_thread_main,
+                                    &args, "blocked-sync-wait");
+    ASSERT_TRUE(thread.ok());
+    while (!args.entered.load(std::memory_order_acquire))
+        std::this_thread::yield();
+
+    // Process teardown requests cooperative stop; the wait must observe it
+    // and return instead of holding termination until its infinite timeout.
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+    EXPECT_EQ(args.wait_result.load(std::memory_order_acquire), 0xFFFFFFFFu);
+}
 
 TEST(GdkServiceTest, Win32GuestMutexAndSemaphoreLifecycle) {
     ApiWorld w;
