@@ -211,6 +211,31 @@ TEST_F(X86ControlFlowTest, RetPopsReturnAddress) {
     EXPECT_EQ(cpu_.gprs[static_cast<std::size_t>(Gpr::Sp)], kStackTop + 0x10);
 }
 
+TEST_F(X86ControlFlowTest, LoopTargetFaultDoesNotDecrementCounter) {
+    cpu_.reset();
+    cpu_.set_reg(Gpr::Sp, kStackTop);
+    cpu_.set_reg(Gpr::Rcx, 2);
+    cpu_.rip = code_at(0xFFF0, {0xE2, 0x7F});
+    const auto before = cpu_;
+    const auto r = interp_->step_at_rip();
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(cpu_.reg(Gpr::Rcx), before.reg(Gpr::Rcx));
+    EXPECT_EQ(cpu_.rip, before.rip);
+}
+
+TEST_F(X86ControlFlowTest, LeaveReadFaultDoesNotReplaceRspOrRbp) {
+    cpu_.reset();
+    cpu_.set_reg(Gpr::Sp, kStackTop);
+    cpu_.set_reg(Gpr::Bp, 0x99990000);
+    cpu_.rip = code_at(0, {0xC9});
+    const auto before = cpu_;
+    const auto r = interp_->step_at_rip();
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(cpu_.reg(Gpr::Sp), before.reg(Gpr::Sp));
+    EXPECT_EQ(cpu_.reg(Gpr::Bp), before.reg(Gpr::Bp));
+    EXPECT_EQ(cpu_.rip, before.rip);
+}
+
 TEST_F(X86ControlFlowTest, CallRetRoundTrip) {
     // CALL + RET: the stack pointer returns to its start.
     // Layout: call at 0 pushes ret; the callee is a single RET at 0x40.
@@ -229,8 +254,7 @@ TEST_F(X86ControlFlowTest, CallRetRoundTrip) {
 
 TEST_F(X86ControlFlowTest, RetToUnmappedFaults) {
     // Return address on the stack points at unmapped memory: typed fault,
-    // stack already popped (RIP was going to change — the SDM order is
-    // pop-then-check; the state shows the pop happened).
+    // with no partially committed stack adjustment.
     ASSERT_TRUE(mem_->write_u64(kStackTop - 8, 0x99990000).ok());
     cpu_.reset();
     cpu_.set_reg(Gpr::Sp, kStackTop - 8);
@@ -239,6 +263,7 @@ TEST_F(X86ControlFlowTest, RetToUnmappedFaults) {
     ASSERT_FALSE(r.ok());
     EXPECT_EQ(r.fault().fault, rt::exec::GuestFault::InvalidAccess);
     EXPECT_EQ(r.fault().fault_address, 0x99990000u);
+    EXPECT_EQ(cpu_.reg(Gpr::Sp), kStackTop - 8);
 }
 
 TEST_F(X86ControlFlowTest, PushBelowStackFaults) {
