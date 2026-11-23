@@ -651,7 +651,9 @@ TEST(BridgeTest, ThreadIdentityReachesGdkService) {
 TEST(BridgeTest, MarshalWaitForMultipleObjectsReadsGuestHandleArray) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("wait-multiple.exe");
-    const auto pid = proc->pid();
+    const auto resolved_pid = w.pm.resolve_pid(ph);
+    ASSERT_TRUE(resolved_pid.ok());
+    const auto pid = resolved_pid.value();
     ModuleDescriptor module;
     module.module_name = "wait-multiple.exe";
     module.is_valid_pe = true;
