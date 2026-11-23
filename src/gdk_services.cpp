@@ -1511,12 +1511,32 @@ Result<std::uint64_t> TaskQueueService::create_queue(
                                      "task queue handle space exhausted");
     }
     const std::uint64_t queue_id = next_id_++;
-    Queue q;
-    q.owner_process_id = process_id;
-    q.work_mode = work_mode;
-    q.completion_mode = completion_mode;
-    queues_.emplace(queue_id, q);
+    auto queue = std::make_shared<Queue>();
+    queue->owner_process_id = process_id;
+    queue->work_mode = work_mode;
+    queue->completion_mode = completion_mode;
+    queues_.emplace(queue_id, std::move(queue));
     return Result<std::uint64_t>(queue_id);
+}
+
+Result<std::uint64_t> TaskQueueService::duplicate_queue(
+    std::uint64_t process_id, std::uint64_t queue_id) {
+    std::lock_guard lock(lock_);
+    const auto it = queues_.find(queue_id);
+    if (it == queues_.end()) {
+        return Result<std::uint64_t>(RuntimeErrc::NotFound, "unknown queue handle");
+    }
+    if (it->second->owner_process_id != process_id) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidHandle,
+                                     "task queue handle belongs to another process");
+    }
+    if (next_id_ == 0 || next_id_ == UINT64_MAX) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "task queue handle space exhausted");
+    }
+    const std::uint64_t duplicate_id = next_id_++;
+    queues_.emplace(duplicate_id, it->second);
+    return Result<std::uint64_t>(duplicate_id);
 }
 
 Result<bool> TaskQueueService::dispatch(
@@ -1527,7 +1547,8 @@ Result<bool> TaskQueueService::dispatch(
     if (it == queues_.end()) {
         return Result<bool>(RuntimeErrc::NotFound, "unknown queue handle");
     }
-    if (it->second.owner_process_id != process_id) {
+    const auto queue = it->second;
+    if (queue->owner_process_id != process_id) {
         return Result<bool>(RuntimeErrc::InvalidHandle,
                             "task queue handle belongs to another process");
     }
@@ -1535,15 +1556,15 @@ Result<bool> TaskQueueService::dispatch(
         return Result<bool>(RuntimeErrc::InvalidArgument,
                             "unknown XTaskQueuePort value");
     }
-    if (it->second.terminated) return Result<bool>(false);
+    if (queue->terminated) return Result<bool>(false);
 
     // No callback submissions exist yet. Preserve the documented blocking
     // contract: finite timeouts elapse; INFINITE waits for termination/close.
     const auto stopped = [&] {
         const auto current = queues_.find(queue_id);
-        return current == queues_.end() ||
-               current->second.owner_process_id != process_id ||
-               current->second.terminated;
+        return current == queues_.end() || current->second != queue ||
+               current->second->owner_process_id != process_id ||
+               queue->terminated;
     };
     if (timeout_ms == 0xFFFFFFFFu) {
         queue_cv_.wait(lock, stopped);
@@ -1560,7 +1581,7 @@ Result<void> TaskQueueService::close_queue(
     if (it == queues_.end()) {
         return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
     }
-    if (it->second.owner_process_id != process_id) {
+    if (it->second->owner_process_id != process_id) {
         return Result<void>(RuntimeErrc::InvalidHandle,
                             "task queue handle belongs to another process");
     }
@@ -1576,11 +1597,11 @@ Result<void> TaskQueueService::terminate_queue(
     if (it == queues_.end()) {
         return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
     }
-    if (it->second.owner_process_id != process_id) {
+    if (it->second->owner_process_id != process_id) {
         return Result<void>(RuntimeErrc::InvalidHandle,
                             "task queue handle belongs to another process");
     }
-    it->second.terminated = true;
+    it->second->terminated = true;
     (void)wait;  // no callback work exists to drain in this partial model
     queue_cv_.notify_all();
     return Result<void>::ok_result();
@@ -1589,7 +1610,7 @@ Result<void> TaskQueueService::terminate_queue(
 void TaskQueueService::release_process(std::uint64_t process_id) {
     std::lock_guard lock(lock_);
     for (auto it = queues_.begin(); it != queues_.end();) {
-        if (it->second.owner_process_id == process_id) it = queues_.erase(it);
+        if (it->second->owner_process_id == process_id) it = queues_.erase(it);
         else ++it;
     }
     queue_cv_.notify_all();
@@ -1597,7 +1618,10 @@ void TaskQueueService::release_process(std::uint64_t process_id) {
 
 std::size_t TaskQueueService::live_queues() const {
     std::lock_guard lock(lock_);
-    return queues_.size();
+    std::unordered_set<const Queue*> unique;
+    unique.reserve(queues_.size());
+    for (const auto& entry : queues_) unique.insert(entry.second.get());
+    return unique.size();
 }
 
 // ── TimingService ────────────────────────────────────────────────────────
