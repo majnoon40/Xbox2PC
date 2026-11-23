@@ -24,8 +24,10 @@
 // for the documented subset — no claim of general emulation).
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -136,6 +138,60 @@ std::vector<std::uint8_t> mov_rax_imm(std::uint64_t v) {
 }
 
 }  // namespace
+
+// ── M10 cooperative execution control ────────────────────────────────────
+
+TEST(ExecutionControlTest, SuspendResumeAndCancellationAreDistinct) {
+    ExecutionControl control;
+    std::atomic<bool> interrupted{false};
+    std::atomic<bool> completed{false};
+    std::atomic<bool> checkpoint_result{false};
+
+    control.request_suspend();
+    std::thread worker([&] {
+        checkpoint_result.store(control.checkpoint(interrupted),
+                                std::memory_order_release);
+        completed.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (!control.is_parked() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool parked = control.is_parked();
+    EXPECT_TRUE(parked) << "suspend request did not park at checkpoint";
+    EXPECT_FALSE(completed.load(std::memory_order_acquire));
+    control.resume();
+    worker.join();
+    EXPECT_TRUE(checkpoint_result.load(std::memory_order_acquire));
+    EXPECT_TRUE(completed.load(std::memory_order_acquire));
+    EXPECT_FALSE(control.is_parked());
+
+    // A terminal interrupt must also release a parked checkpoint without
+    // being mistaken for a resume request.
+    completed.store(false, std::memory_order_release);
+    checkpoint_result.store(true, std::memory_order_release);
+    control.request_suspend();
+    std::thread cancelled_worker([&] {
+        checkpoint_result.store(control.checkpoint(interrupted),
+                                std::memory_order_release);
+        completed.store(true, std::memory_order_release);
+    });
+    const auto cancel_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (!control.is_parked() &&
+           std::chrono::steady_clock::now() < cancel_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool cancellation_parked = control.is_parked();
+    EXPECT_TRUE(cancellation_parked);
+    interrupted.store(true, std::memory_order_release);
+    cancelled_worker.join();
+    EXPECT_FALSE(checkpoint_result.load(std::memory_order_acquire));
+    EXPECT_TRUE(completed.load(std::memory_order_acquire));
+    EXPECT_FALSE(control.is_parked());
+}
 
 // ── CPU state ─────────────────────────────────────────────────────────────
 
