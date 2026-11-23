@@ -34,6 +34,7 @@
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/service_registry.hpp"
 #include "xbox2pc/thread_model.hpp"
+#include "xbox2pc/m9_cli.hpp"
 
 using xbox2pc::compat::CompatibilityDb;
 using xbox2pc::deps::DependencyReport;
@@ -102,6 +103,17 @@ void usage() {
                  "       xbox2pc api-status [--json <out>]\n"
                  "       xbox2pc dispatch-test <library!name> [--json <out>]\n"
                  "       xbox2pc compat-report <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-analyze <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-info <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-sections <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-imports <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-relocations <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-tls <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-instructions <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-compat <pe-file> [--json <out>]\n"
+                 "       xbox2pc binary-report <pe-file> [--json <out>]\n"
+                 "       xbox2pc interpreter-info [--json <out>]\n"
+                 "       xbox2pc interpreter-test [--json <out>]\n"
                  "       xbox2pc gdk-services [--json <out>]\n"
                  "       xbox2pc gameos-services [--json <out>]\n"
                  "       xbox2pc --version\n");
@@ -2768,6 +2780,20 @@ int main(int argc, char** argv) {
         std::printf("xbox2pc 0.3.0 (M1: PE32+ inspection; M2: dependency "
                     "intelligence; M3: runtime architecture)\n");
         return 0;
+    }
+    const int m9_binary_result = xbox2pc::cli::run_m9_binary_cli(argc, argv);
+    if (m9_binary_result >= 0) return m9_binary_result;
+    if (argc >= 2 && std::strcmp(argv[1], "interpreter-info") == 0) {
+        std::optional<std::string> json_out;
+        if (argc == 4 && std::strcmp(argv[2], "--json") == 0) json_out = argv[3];
+        else if (argc != 2) { std::fprintf(stderr, "error: invalid interpreter-info arguments\\n"); return 2; }
+        return cmd_execution_info(json_out);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "interpreter-test") == 0) {
+        std::optional<std::string> json_out;
+        if (argc == 4 && std::strcmp(argv[2], "--json") == 0) json_out = argv[3];
+        else if (argc != 2) { std::fprintf(stderr, "error: invalid interpreter-test arguments\\n"); return 2; }
+        return cmd_execute_test(json_out);
     }
     // Runtime-architecture commands take NO file argument (unlike the PE
     // analysis commands); they are valid at argc == 2.
