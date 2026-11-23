@@ -929,6 +929,62 @@ struct LoadedGuest {
 };
 }  // namespace
 
+TEST(ExecutionControlTest, DeterministicBackendParksAndCanBeCancelled) {
+    ExecWorld world;
+    const std::vector<std::uint8_t> loop_code{0xE9, 0xFB, 0xFF, 0xFF, 0xFF};
+    LoadedGuest guest(world, loop_code, "suspend-loop.exe");
+    ASSERT_TRUE(guest.load_ok) << guest.load_error;
+
+    const auto pid = world.pm.resolve_pid(guest.ph);
+    ASSERT_TRUE(pid.ok());
+    auto cfg = ExecutionConfig::default_validated();
+    ASSERT_TRUE(cfg.ok());
+    ExecutionContext context(pid.value(), 0xA10, guest.proc->address_space(),
+                             world.reg, cfg.value(), "suspend-loop");
+    ASSERT_TRUE(context.initialize().ok());
+
+    DeterministicBackend backend(world.reg, cfg.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid.value(), 0xA10, guest.proc->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = guest.out.exec.entry_va;
+    request.stack_top_va = context.info().stack_top;
+    request.stack_size = context.info().stack_size;
+    request.control = std::make_shared<ExecutionControl>();
+    request.control->request_suspend();
+
+    cpu::CpuState state;
+    state.reset();
+    state.set_reg(cpu::Gpr::Sp, context.info().stack_top - 0x20);
+    state.rip = request.entry_va;
+    std::atomic<bool> interrupted{false};
+    std::atomic<bool> finished{false};
+    Outcome outcome = Outcome::Faulted;
+    std::thread runner([&] {
+        const auto result = backend.run(request, state, interrupted);
+        outcome = result.outcome;
+        finished.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (!request.control->is_parked() &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool parked = request.control->is_parked();
+    EXPECT_TRUE(parked) << "backend did not park at an instruction boundary";
+    EXPECT_FALSE(finished.load(std::memory_order_acquire));
+
+    // Termination must release the parked backend even without resume().
+    interrupted.store(true, std::memory_order_release);
+    runner.join();
+    EXPECT_TRUE(finished.load(std::memory_order_acquire));
+    EXPECT_EQ(outcome, Outcome::Interrupted);
+    EXPECT_FALSE(request.control->is_parked());
+}
+
 TEST(ContextTest, AutomaticallyBindsProcessThreadAndAddressSpaceToEngine) {
     ExecWorld w;
     auto [handle, process] = w.new_process("context-binding.exe");
