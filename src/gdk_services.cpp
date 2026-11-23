@@ -1058,17 +1058,24 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
                                      "VirtualAlloc size overflows page rounding");
     const auto aligned_size = ((size + page - 1) / page) * page;
     const auto page_address = address == 0 ? 0 : address - (address % page);
+    const auto address_offset = address == 0 ? 0 : address - page_address;
     if (allocation_type == kCommit) {
         if (page_address == 0)
             return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                          "MEM_COMMIT requires an existing guest reservation address");
+        if (size > (~0ull) - address_offset ||
+            address_offset + size > (~0ull) - (page - 1))
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                         "MEM_COMMIT address range overflows page rounding");
+        const auto commit_size =
+            ((address_offset + size + page - 1) / page) * page;
         auto committed = process_manager_.commit_region_by_pid(
-            pid, page_address, aligned_size);
+            pid, page_address, commit_size);
         if (!committed.ok()) return Result<std::uint64_t>(committed.errc(), committed.context());
         auto changed = process_manager_.protect_region_by_pid(
-            pid, page_address, aligned_size, decoded.value());
+            pid, page_address, commit_size, decoded.value());
         if (!changed.ok()) {
-            (void)process_manager_.decommit_region_by_pid(pid, page_address, aligned_size);
+            (void)process_manager_.decommit_region_by_pid(pid, page_address, commit_size);
             return Result<std::uint64_t>(changed.errc(), changed.context());
         }
         return Result<std::uint64_t>(page_address);
@@ -1142,11 +1149,17 @@ Result<MemProtect> GameRuntimeService::virtual_protect(
     const auto snapshot = memory_query_snapshot(pid);
     if (!snapshot.ok()) return Result<MemProtect>(snapshot.errc(), snapshot.context());
     const auto page = snapshot.value().page_size;
-    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+    if (size == 0 || page == 0)
         return Result<MemProtect>(RuntimeErrc::InvalidArgument,
-                                  "VirtualProtect size overflows page rounding");
+                                  "VirtualProtect requires a non-empty range");
     const auto start = address - (address % page);
-    const auto aligned = ((size + page - 1) / page) * page;
+    const auto offset = address - start;
+    if (size > (~0ull) - offset ||
+        offset + size > (~0ull) - (page - 1))
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument,
+                                  "VirtualProtect address range overflows page rounding");
+    const auto span = offset + size;
+    const auto aligned = ((span + page - 1) / page) * page;
     return process_manager_.protect_region_by_pid(pid, start, aligned, decoded.value());
 }
 
