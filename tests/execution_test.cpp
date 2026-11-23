@@ -903,6 +903,63 @@ TEST(ContextTest, AutomaticallyBindsProcessThreadAndAddressSpaceToEngine) {
     EXPECT_TRUE(w.pm.terminate_process(handle, 0).ok());
 }
 
+TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("api-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "api-binding.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok()); // guest RET
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t binding = 0x51000001ull;
+    constexpr std::uint64_t tid = 0x91;
+    const std::uint64_t rsp = stack_va + 0x100;
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(
+        ApiBindingInfo{binding, "xgameruntime", "XGameRuntimeInitialize", false, 0});
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    EXPECT_EQ(result.outcome, Outcome::Returned);
+    EXPECT_EQ(result.api_calls, 1u);
+    EXPECT_EQ(result.return_value, api::kSOk);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), api::kSOk);
+    EXPECT_EQ(cpu_state.rip, code_va + 0x101);
+}
+
 TEST(EngineTest, ExecutesSubsetProgram) {
     ExecWorld w;
     // RAX = 42; RCX = 100; RCX += 8; RAX = RCX; RET -> 108.
