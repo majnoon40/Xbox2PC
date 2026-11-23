@@ -532,6 +532,103 @@ Result<void> ProcessManager::release_region(Handle process, std::uint64_t xbox_v
     return proc->address_space().release_region(xbox_va);
 }
 
+
+Result<std::uint64_t> ProcessManager::reserve_region_by_pid(
+    std::uint64_t pid, std::uint64_t size, const std::string& name) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<std::uint64_t>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "invalid guest reservation size");
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (limits_.max_reserved_bytes_total != 0) {
+        std::uint64_t total = 0;
+        for (const auto& [other_pid, id] : pid_to_object_id_) {
+            (void)other_pid;
+            auto object = objects_.lookup_id(id);
+            if (!object.ok() || object.value().get() == nullptr) continue;
+            auto* managed = object.value().get()->as<ManagedProcess>();
+            if (managed == nullptr) continue;
+            const auto used = managed->address_space().stats().reserved_bytes;
+            total = used > (~0ull) - total ? ~0ull : total + used;
+        }
+        if (total > limits_.max_reserved_bytes_total || aligned > limits_.max_reserved_bytes_total - total)
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "global reserved-bytes limit");
+    }
+    return proc->address_space().reserve_region_auto(size, name);
+}
+
+Result<void> ProcessManager::commit_region_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    auto region = proc->address_space().find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest commit size");
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (aligned != region.value().size || region.value().state != RegionState::Reserved)
+        return Result<void>(RuntimeErrc::InvalidArgument, "commit must cover one complete reserved region");
+    if (limits_.max_committed_bytes_total != 0) {
+        std::uint64_t total = 0;
+        for (const auto& [other_pid, id] : pid_to_object_id_) {
+            (void)other_pid;
+            auto object = objects_.lookup_id(id);
+            if (!object.ok() || object.value().get() == nullptr) continue;
+            auto* managed = object.value().get()->as<ManagedProcess>();
+            if (managed == nullptr) continue;
+            const auto used = managed->address_space().stats().committed_bytes;
+            total = used > (~0ull) - total ? ~0ull : total + used;
+        }
+        if (total > limits_.max_committed_bytes_total || aligned > limits_.max_committed_bytes_total - total)
+            return Result<void>(RuntimeErrc::OutOfResources, "global committed-bytes limit");
+    }
+    return proc->address_space().commit_region(xbox_va);
+}
+
+Result<MemProtect> ProcessManager::protect_region_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, MemProtect prot) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<MemProtect>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<MemProtect>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    if (prot == MemProtect::Full && !limits_.allow_wx_pages)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "RWX protection requires allow_wx_pages");
+    auto region = proc->address_space().find_region(xbox_va);
+    if (!region.ok()) return Result<MemProtect>(region.errc(), region.context());
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "invalid guest protection size");
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (aligned != region.value().size || region.value().state != RegionState::Committed)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "protection must cover one complete committed region");
+    const auto previous = region.value().protection;
+    auto changed = proc->address_space().protect_region(xbox_va, prot);
+    if (!changed.ok()) return Result<MemProtect>(changed.errc(), changed.context());
+    return Result<MemProtect>(previous);
+}
+
+Result<void> ProcessManager::release_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    return proc->address_space().release_region(xbox_va);
+}
+
 std::vector<VmRegion> ProcessManager::list_regions(Handle process) {
     RefGuard guard;
     ManagedProcess* proc = find_locked(process, guard);

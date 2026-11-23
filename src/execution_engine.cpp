@@ -558,6 +558,19 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(ptr_out(48));
         plan.call.args.push_back(int_arg()); plan.out_buffer_args.push_back(1);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualAlloc") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualFree") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualProtect") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(ptr_out(4));
+        plan.out_buffer_args.push_back(3);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else {
         return Ret(RuntimeErrc::NotFound,
                    "no marshalling plan for " + d.library + "!" + id +

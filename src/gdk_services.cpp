@@ -21,6 +21,18 @@ namespace {
 
 using loader::ImportStatus;
 
+Result<MemProtect> decode_win32_page_protection(std::uint32_t value) {
+    switch (value) {
+        case 0x01u: return Result<MemProtect>(MemProtect::NoAccess);
+        case 0x02u: return Result<MemProtect>(MemProtect::ReadOnly);
+        case 0x04u: return Result<MemProtect>(MemProtect::ReadWrite);
+        case 0x20u: return Result<MemProtect>(MemProtect::ReadExecute);
+        case 0x40u: return Result<MemProtect>(MemProtect::Full);
+        default: return Result<MemProtect>(RuntimeErrc::InvalidArgument,
+            "unsupported or unrepresentable Win32 page protection");
+    }
+}
+
 // ── implementation adapters ──────────────────────────────────────────────
 //
 // Each adapter closes over the owning service and translates the
@@ -167,6 +179,67 @@ public:
 
 private:
     GameRuntimeService& svc_;
+};
+
+
+class VirtualAllocImpl : public IApiImplementation {
+public:
+    explicit VirtualAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4) return false;
+        auto r = svc_.virtual_alloc(ctx.process_id, ctx.args[0], ctx.args[1],
+            static_cast<std::uint32_t>(ctx.args[2]), static_cast<std::uint32_t>(ctx.args[3]));
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: VirtualAlloc (automatic placement subset)"; }
+private: GameRuntimeService& svc_;
+};
+class VirtualFreeImpl : public IApiImplementation {
+public:
+    explicit VirtualFreeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        auto r = svc_.virtual_free(ctx.process_id, ctx.args[0], ctx.args[1],
+            static_cast<std::uint32_t>(ctx.args[2]));
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: VirtualFree (MEM_RELEASE subset)"; }
+private: GameRuntimeService& svc_;
+};
+class VirtualProtectImpl : public IApiImplementation {
+public:
+    explicit VirtualProtectImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4 || ctx.args[3] == 0) {
+            out.return_value = 0;
+            out.note = "VirtualProtect requires an old-protection output pointer";
+            return true;
+        }
+        auto r = svc_.virtual_protect(ctx.process_id, ctx.args[0], ctx.args[1],
+            static_cast<std::uint32_t>(ctx.args[2]));
+        if (!r.ok()) {
+            out.return_value = 0;
+            out.note = r.error_string();
+            return true;
+        }
+        const std::uint32_t old = r.value() == MemProtect::NoAccess ? 0x01u :
+            r.value() == MemProtect::ReadOnly ? 0x02u :
+            r.value() == MemProtect::ReadWrite ? 0x04u :
+            r.value() == MemProtect::ReadExecute ? 0x20u : 0x40u;
+        for (unsigned i = 0; i < 4; ++i)
+            out.out_bytes[i] = static_cast<std::uint8_t>(old >> (8 * i));
+        out.return_value = 1;
+        out.has_out = true;
+        out.out_size = 4;
+        out.out_bytes_size = 4;
+        return true;
+    }
+    std::string describe() const override { return "Win32: VirtualProtect (whole-region subset)"; }
+private: GameRuntimeService& svc_;
 };
 
 class VirtualQueryImpl : public IApiImplementation {
@@ -700,7 +773,10 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r18 = api_reg_.register_implementation("kernel32", "ReleaseMutex", keep(std::make_shared<ReleaseMutexImpl>(*this)), owner);
     auto r19 = api_reg_.register_implementation("kernel32", "CreateSemaphoreW", keep(std::make_shared<CreateSemaphoreWImpl>(*this)), owner);
     auto r20 = api_reg_.register_implementation("kernel32", "ReleaseSemaphore", keep(std::make_shared<ReleaseSemaphoreImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20}) {
+    auto r21 = api_reg_.register_implementation("kernel32", "VirtualAlloc", keep(std::make_shared<VirtualAllocImpl>(*this)), owner);
+    auto r22 = api_reg_.register_implementation("kernel32", "VirtualFree", keep(std::make_shared<VirtualFreeImpl>(*this)), owner);
+    auto r23 = api_reg_.register_implementation("kernel32", "VirtualProtect", keep(std::make_shared<VirtualProtectImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -873,6 +949,56 @@ Result<MemoryQuerySnapshot> GameRuntimeService::query_memory_snapshot(
     snapshot.page_size = space.page_size();
     snapshot.regions = space.list_regions();
     return Result<MemoryQuerySnapshot>(std::move(snapshot));
+}
+
+
+Result<std::uint64_t> GameRuntimeService::virtual_alloc(
+    std::uint64_t pid, std::uint64_t address, std::uint64_t size,
+    std::uint32_t allocation_type, std::uint32_t protection) {
+    constexpr std::uint32_t kCommit = 0x1000u, kReserve = 0x2000u;
+    if (pid == 0 || address != 0 || size == 0 ||
+        (allocation_type != kReserve && allocation_type != (kReserve | kCommit)))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+            "VirtualAlloc supports automatic placement with MEM_RESERVE or MEM_RESERVE|MEM_COMMIT");
+    auto decoded = decode_win32_page_protection(protection);
+    if (!decoded.ok()) return Result<std::uint64_t>(decoded.errc(), decoded.context());
+    auto reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
+    if (!reserved.ok()) return reserved;
+    if (allocation_type == kReserve) {
+        if (decoded.value() == MemProtect::Full && !process_manager_.limits().allow_wx_pages) {
+            (void)process_manager_.release_region_by_pid(pid, reserved.value());
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "RWX protection requires allow_wx_pages");
+        }
+        return reserved;
+    }
+    auto committed = process_manager_.commit_region_by_pid(pid, reserved.value(), size);
+    if (!committed.ok()) {
+        (void)process_manager_.release_region_by_pid(pid, reserved.value());
+        return Result<std::uint64_t>(committed.errc(), committed.context());
+    }
+    auto changed = process_manager_.protect_region_by_pid(pid, reserved.value(), size, decoded.value());
+    if (!changed.ok()) {
+        (void)process_manager_.release_region_by_pid(pid, reserved.value());
+        return Result<std::uint64_t>(changed.errc(), changed.context());
+    }
+    return reserved;
+}
+
+Result<void> GameRuntimeService::virtual_free(
+    std::uint64_t pid, std::uint64_t address, std::uint64_t size, std::uint32_t free_type) {
+    if (pid == 0 || address == 0 || size != 0 || free_type != 0x8000u)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+            "VirtualFree supports MEM_RELEASE with dwSize zero only");
+    return process_manager_.release_region_by_pid(pid, address);
+}
+
+Result<MemProtect> GameRuntimeService::virtual_protect(
+    std::uint64_t pid, std::uint64_t address, std::uint64_t size, std::uint32_t protection) {
+    if (pid == 0 || address == 0)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "VirtualProtect requires a non-null guest address");
+    auto decoded = decode_win32_page_protection(protection);
+    if (!decoded.ok()) return decoded;
+    return process_manager_.protect_region_by_pid(pid, address, size, decoded.value());
 }
 
 Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,

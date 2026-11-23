@@ -51,3 +51,12 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 ## Validation boundary
 
 The existing M10 event tests validate the supported event subset. They do not validate mutex/semaphore Win32 behavior, scheduler-aware guest blocking, or full wait-any/all semantics. Those remain M10 work; no unsupported behavior should be marked implemented in the compatibility report.
+
+
+## M10 virtual-memory API slice
+
+- Added VirtualAlloc, VirtualFree, and VirtualProtect descriptors, implementations, and explicit x64 marshalling plans.
+- VirtualAlloc supports automatic placement with MEM_RESERVE and MEM_RESERVE|MEM_COMMIT. VirtualFree supports MEM_RELEASE with size zero. VirtualProtect changes protection across one complete tracked region and returns the previous protection.
+- Supported page protections are PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, and policy-gated PAGE_EXECUTE_READWRITE. Unsupported constants fail closed.
+- Fixed-address allocation, MEM_COMMIT-only, MEM_DECOMMIT, partial-region protection, allocation-granularity placement, and retained allocation-protection metadata remain unsupported.
+- Committed PAGE_NOACCESS is represented as committed but inaccessible memory, distinct from releasing a region.

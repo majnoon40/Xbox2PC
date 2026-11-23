@@ -139,6 +139,12 @@ const char* kCurrentThreadIdUrl =
 const char* kVirtualQueryUrl =
     "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/"
     "nf-memoryapi-virtualquery";
+const char* kVirtualAllocUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc";
+const char* kVirtualFreeUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree";
+const char* kVirtualProtectUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect";
 const char* kCreateEventWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw";
 const char* kSetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setevent";
 const char* kResetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent";
@@ -502,6 +508,36 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-VIRTUAL-QUERY]"; a.evidence_url = kVirtualQueryUrl;
         a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; free gaps and original allocation protection are not modeled";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library = "kernel32"; a.export_name = "VirtualAlloc";
+        a.convention = Convention::X64Microsoft; a.param_count = 4; a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-ALLOC]"; a.evidence_url = kVirtualAllocUrl;
+        a.notes = "automatic placement; supports MEM_RESERVE and MEM_RESERVE|MEM_COMMIT; fixed addresses and MEM_COMMIT-only are unsupported";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library = "kernel32"; a.export_name = "VirtualFree";
+        a.convention = Convention::X64Microsoft; a.param_count = 3; a.ret = ReturnKind::Bool;
+        a.signature = "BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-FREE]"; a.evidence_url = kVirtualFreeUrl;
+        a.notes = "supports MEM_RELEASE with dwSize zero; MEM_DECOMMIT is unsupported";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library = "kernel32"; a.export_name = "VirtualProtect";
+        a.convention = Convention::X64Microsoft; a.param_count = 4; a.ret = ReturnKind::Bool;
+        a.signature = "BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-PROTECT]"; a.evidence_url = kVirtualProtectUrl;
+        a.notes = "whole tracked regions only; returns previous protection; unsupported protection constants fail closed";
         add(a);
     }
     {

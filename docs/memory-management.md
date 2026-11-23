@@ -48,8 +48,8 @@ Rules (all tested):
   `ResourceLimits{allow_wx_pages=true}` (`ProcessManager::protect_region`
   enforces it — `WxProtectionDiscipline` test);
 - reserved regions cannot be re-protected (commit first);
-- `NoAccess` on a committed region is rejected — that is a release
-  (`InvalidArgument` with context);
+- `NoAccess` on a committed region is a valid inaccessible committed
+  state; `release_region` remains the separate deallocation path;
 - `validate_access(va, write, exec)` answers legality from the
   descriptor's protection (`MemoryTest.ReserveCommitProtectRelease`).
 

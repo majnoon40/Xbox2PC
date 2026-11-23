@@ -318,10 +318,8 @@ Result<void> AddressSpace::protect_region(std::uint64_t xbox_va, MemProtect p) {
         return Result<void>(RuntimeErrc::InvalidState,
                             "cannot protect a reserved region (commit first)");
     }
-    if (p == MemProtect::NoAccess) {
-        return Result<void>(RuntimeErrc::InvalidArgument,
-                            "NoAccess on committed region: use release_region");
-    }
+    // PAGE_NOACCESS is a valid protection for committed pages. The region
+    // remains committed; release_region is the separate deallocation path.
     if (impl_->host == nullptr) {
         return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
     }

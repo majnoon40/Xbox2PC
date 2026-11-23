@@ -115,6 +115,9 @@ public:
     void release_process(std::uint64_t process_id);
     Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
     Result<MemoryQuerySnapshot> query_memory_snapshot(std::uint64_t process_id) const;
+    Result<std::uint64_t> virtual_alloc(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t allocation_type, std::uint32_t protection);
+    Result<void> virtual_free(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t free_type);
+    Result<MemProtect> virtual_protect(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t protection);
     Result<std::uint64_t> create_event(std::uint64_t process_id, bool manual_reset, bool initially_set);
     Result<std::uint64_t> create_mutex(std::uint64_t process_id, std::uint64_t thread_id, bool initially_owned);
     Result<void> release_mutex(std::uint64_t process_id, std::uint64_t handle, std::uint64_t thread_id);

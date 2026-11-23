@@ -778,6 +778,53 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     ctx.args[0]=0x7FFFFFFFFFFFFFFFull; const auto bad=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(bad.ok); EXPECT_EQ(bad.return_value,0u);
     ctx.args[2]=47; const auto short_buf=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(short_buf.ok); EXPECT_EQ(short_buf.return_value,0u);
 }
+
+TEST(GdkServiceTest, Win32VirtualMemoryLifecycle) {
+    ApiWorld w;
+    (void)w.new_process("virtual-memory-api.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "virtual-memory-api.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+    ApiContext ctx; ctx.process_id = pid.value(); ctx.arg_count = 4;
+    ctx.args[0] = 0; ctx.args[1] = 0x3000; ctx.args[2] = 0x3000; ctx.args[3] = 0x04;
+    const auto allocated = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(allocated.ok) << allocated.error;
+    ASSERT_NE(allocated.return_value, 0u);
+    const auto base = allocated.return_value;
+    ctx.args[0] = base; ctx.args[1] = 0x3000; ctx.args[2] = 0x02; ctx.args[3] = 0x10000;
+    const auto changed = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(changed.ok); ASSERT_EQ(changed.return_value, 1u);
+    ASSERT_TRUE(changed.has_out); ASSERT_EQ(changed.out_bytes_size, 4u);
+    EXPECT_EQ(changed.out_bytes[0], 0x04u);
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
+    const auto released = w.reg.dispatch("kernel32", "VirtualFree", ctx);
+    ASSERT_TRUE(released.ok); EXPECT_EQ(released.return_value, 1u);
+    const auto stats = w.pm.process_stats(w.last_handle);
+    EXPECT_EQ(stats.reserved_bytes, 0u); EXPECT_EQ(stats.committed_bytes, 0u);
+}
+
+TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
+    ApiWorld w;
+    (void)w.new_process("virtual-memory-reserve.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "virtual-memory-reserve.exe"; module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+    ApiContext ctx; ctx.process_id = pid.value(); ctx.arg_count = 4;
+    ctx.args[0] = 0; ctx.args[1] = 0x2000; ctx.args[2] = 0x2000; ctx.args[3] = 0x04;
+    const auto reserved = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(reserved.ok); ASSERT_NE(reserved.return_value, 0u);
+    ctx.args[2] = 0x800; // MEM_RESET is deliberately unsupported.
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualAlloc", ctx).return_value, 0u);
+    ctx.arg_count = 3; ctx.args[0] = reserved.return_value; ctx.args[1] = 0; ctx.args[2] = 0x8000;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
+}
+
 TEST(GdkServiceTest, TimingNativeEquivalents) {
     ApiWorld w;
     auto v1 = w.tim->qpc_value();
