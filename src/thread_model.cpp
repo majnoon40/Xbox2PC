@@ -31,7 +31,7 @@ constexpr bool kTransitions[7][7] = {
     /* Created */ {false, true, false, false, false, false, true},
     /* Ready */ {false, false, true, false, true, true, true},
     /* Running */ {false, true, false, true, true, true, true},
-    /* Blocked */ {false, false, true, false, false, true, true},
+    /* Blocked */ {false, false, true, false, true, true, true},
     /* Suspended */ {false, true, false, false, false, true, true},
     /* Terminated */ {false, false, false, false, false, true, false},
     /* Failed */ {false, false, false, false, false, false, true},
