@@ -76,6 +76,7 @@ struct VmRegion {
     VmRegionType region_type = VmRegionType::Private;
     std::string name;               // diagnostics
     std::uint64_t alloc_id = 0;     // MemoryAllocator token (0 = not owned)
+    std::uint64_t allocation_base = 0; // original reservation base across split segments
 };
 
 // ── resource limits ───────────────────────────────────────────────────────
