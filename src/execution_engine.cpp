@@ -540,7 +540,8 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "ReleaseSemaphore") {
         plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
-        plan.call.args.push_back(ptr_in(0)); plan.call.ret = abi::CallSpec::ReturnKind::Int;
+        plan.call.args.push_back(ptr_out(4)); plan.out_buffer_args.push_back(2);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "CreateEventW") {
         plan.call.args.push_back(ptr_in(0));
         plan.call.args.push_back(int_arg());
