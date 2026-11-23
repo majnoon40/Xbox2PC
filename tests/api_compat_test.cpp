@@ -379,7 +379,17 @@ TEST(ApiResolverTest, ResolverStates) {
     look.symbol = "XGameRuntimeInitialize";
     auto b = resolver.resolve(look);
     EXPECT_EQ(b.status, ImportStatus::Resolved);
-    EXPECT_NE(b.value, 0u);
+    EXPECT_EQ(b.value, 0x51000001ull);
+    EXPECT_TRUE(xbox2pc::rt::exec::is_api_binding(b.value));
+
+    // Win32 imports use the second reserved binding subrange.
+    look.dll = "kernel32";
+    look.symbol = "CreateEventW";
+    auto win32 = resolver.resolve(look);
+    EXPECT_EQ(win32.status, ImportStatus::Resolved);
+    EXPECT_EQ(win32.value, 0x51010002ull);
+    EXPECT_TRUE(xbox2pc::rt::exec::is_api_binding(win32.value));
+
     // Known module + unimplemented export -> Unresolved (descriptor, no impl
     // cannot happen here: all 16 are implemented; use an unlisted export).
     look.symbol = "XSystemAllowFullDownloadBandwidth";   // documented but NOT in our table
