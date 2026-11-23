@@ -188,7 +188,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
             imported.value == 0) {
             continue;
         }
-        if (!exec::is_api_binding(imported.value)) {
+        if (!is_api_binding(imported.value)) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "resolved import value is outside the API binding range");
         }
