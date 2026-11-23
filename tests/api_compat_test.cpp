@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -112,7 +113,7 @@ private:
 
 TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
     ApiRegistry reg;
-    EXPECT_GE(reg.descriptor_count(), 16u);
+    EXPECT_GE(reg.descriptor_count(), 18u);
     for (const auto* d : reg.all()) {
         EXPECT_TRUE(d->validate().empty())
             << d->library << "!" << d->export_name << ": "
@@ -666,6 +667,35 @@ TEST(GdkServiceTest, ServiceInitializationOrderingAndRollback) {
     EXPECT_TRUE(core.services().shutdown_all().ok());
     r = reg.dispatch("xgameruntime", "XSystemGetDeviceType", ctx);
     EXPECT_FALSE(r.ok);   // revoked at shutdown
+}
+
+TEST(GdkServiceTest, CurrentProcessAndThreadIdentityQueries) {
+    ApiWorld w;
+    ApiContext ctx;
+    ctx.process_id = 0x1234;
+    ctx.thread_id = 0x5678;
+
+    const auto pid = w.reg.dispatch("kernel32", "GetCurrentProcessId", ctx);
+    ASSERT_TRUE(pid.ok) << pid.error;
+    EXPECT_EQ(pid.return_value, 0x1234u);
+
+    const auto tid = w.reg.dispatch("kernel32", "GetCurrentThreadId", ctx);
+    ASSERT_TRUE(tid.ok) << tid.error;
+    EXPECT_EQ(tid.return_value, 0x5678u);
+
+    ctx.process_id = 0;
+    const auto no_process = w.reg.dispatch("kernel32", "GetCurrentProcessId", ctx);
+    EXPECT_FALSE(no_process.ok);
+
+    ctx.process_id = 0x1234;
+    ctx.thread_id = 0;
+    const auto no_thread = w.reg.dispatch("kernel32", "GetCurrentThreadId", ctx);
+    EXPECT_FALSE(no_thread.ok);
+
+    ctx.thread_id = static_cast<std::uint64_t>(
+        std::numeric_limits<std::uint32_t>::max()) + 1;
+    const auto overflow = w.reg.dispatch("kernel32", "GetCurrentThreadId", ctx);
+    EXPECT_FALSE(overflow.ok);
 }
 
 // ── 12.6 TLS ──────────────────────────────────────────────────────────────
