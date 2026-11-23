@@ -253,12 +253,23 @@ Result<std::vector<ArgValue>> extract_args(const CpuState& cpu,
     if (!valid.ok()) {
         return Result<std::vector<ArgValue>>(valid.errc(), valid.context());
     }
+    const auto layout = compute_layout(spec);
+    if (!layout.ok()) {
+        return Result<std::vector<ArgValue>>(layout.errc(), layout.context());
+    }
+    // At a callee entry, [RSP] = return address; shadow at RSP+8..+40;
+    // stack args at RSP+8+32... [MS-X64STACK]. Validate the complete frame
+    // before calculating any stack-argument address, so hostile RSP values
+    // cannot wrap those addresses into a low mapped region.
+    const std::uint64_t rsp = cpu.reg(Gpr::Sp);
+    const std::uint64_t frame_bytes = 8u + layout.value().total_stack_bytes;
+    if (rsp > (~std::uint64_t{0}) - frame_bytes) {
+        return Result<std::vector<ArgValue>>(
+            RuntimeErrc::InvalidArgument, "callee stack frame address overflow");
+    }
     std::vector<ArgValue> out;
     out.reserve(spec.args.size());
     std::uint32_t stack_used = 0;
-    // At a callee entry, [RSP] = return address; shadow at RSP+8..+40;
-    // stack args at RSP+8+32... [MS-X64STACK].
-    const std::uint64_t rsp = cpu.reg(Gpr::Sp);
     const std::uint64_t stack_args_base = rsp + 8 + kShadowSpaceBytes;
     for (std::size_t i = 0; i < spec.args.size(); ++i) {
         const auto& a = spec.args[i];
