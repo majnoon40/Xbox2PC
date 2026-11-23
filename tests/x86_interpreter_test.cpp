@@ -448,6 +448,28 @@ TEST_F(X86SemanticsTest, WriteToReadOnlyFaults) {
 
 // ── MUL/DIV families ────────────────────────────────────────────────────────
 
+TEST_F(X86SemanticsTest, ByteDivWithRexWritesAxNotRsp) {
+    cpu().set_reg(Gpr::Rax, 0x0100); // AX = 256
+    cpu().set_reg(Gpr::Rcx, 2);      // divisor CL = 2
+    cpu().set_reg(Gpr::Sp, 0x1122334455667788ull);
+    const auto rsp = cpu().reg(Gpr::Sp);
+    cpu().rip = code_at(0, {0x40, 0xF6, 0xF1}); // rex; div cl
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFFFu, 0x0080u);
+    EXPECT_EQ(cpu().reg(Gpr::Sp), rsp);
+}
+
+TEST_F(X86SemanticsTest, IdivByteAcceptsNegativeMinimumQuotient) {
+    cpu().set_reg(Gpr::Rax, 0xFF80); // signed AX = -128
+    cpu().set_reg(Gpr::Rcx, 1);     // divisor CL = 1
+    cpu().set_reg(Gpr::Sp, 0x1122334455667788ull);
+    const auto rsp = cpu().reg(Gpr::Sp);
+    cpu().rip = code_at(0, {0x40, 0xF6, 0xF9}); // rex; idiv cl
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFFFu, 0x0080u);
+    EXPECT_EQ(cpu().reg(Gpr::Sp), rsp);
+}
+
 TEST_F(X86SemanticsTest, Div64HandlesRemainderHighBit) {
     // (2^127) / (2^63 + 1) = 2^64 - 2, remainder 2.
     cpu().set_reg(Gpr::Rdx, 0x8000000000000000ull);
