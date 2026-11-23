@@ -68,6 +68,13 @@ enum class XTaskQueueDispatchMode : std::uint32_t {
 // Implements the documented lifecycle/system/thread APIs. Per-process
 // state: the documented init/uninit ref-count pair, options mismatch
 // marker, per-thread time-sensitive bits (M4 thread ids).
+struct MemoryQuerySnapshot {
+    std::uint64_t base = 0;
+    std::uint64_t capacity = 0;
+    std::uint64_t page_size = 0;
+    std::vector<VmRegion> regions;
+};
+
 class GameRuntimeService : public RtService {
 public:
     static const char* service_type_name() { return "gdk_game_runtime"; }
@@ -105,6 +112,7 @@ public:
     // Remove process-owned GDK state during M4 process teardown.
     void release_process(std::uint64_t process_id);
     Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
+    Result<MemoryQuerySnapshot> query_memory_snapshot(std::uint64_t process_id) const;
 
     // Registry back-reference (tests/introspection).
     ApiRegistry& registry() { return api_reg_; }

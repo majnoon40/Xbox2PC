@@ -175,26 +175,110 @@ public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
         constexpr std::uint64_t kSize = 48;
         if (ctx.arg_count != 3) return false;
-        if (ctx.args[2] < kSize || ctx.process_id == 0) { out.return_value = 0; return true; }
-        const auto found = svc_.query_memory_region(ctx.process_id, ctx.args[0]);
-        if (!found.ok()) { out.return_value = 0; out.note = found.error_string(); return true; }
-        const auto& r = found.value();
-        const std::uint64_t page = ctx.args[0] & ~std::uint64_t(4095);
-        if (page < r.xbox_va || page - r.xbox_va >= r.size) { out.return_value = 0; return true; }
-        const auto remaining = r.size - (page - r.xbox_va);
-        const std::uint32_t prot = r.protection == MemProtect::NoAccess ? 1u : r.protection == MemProtect::ReadOnly ? 2u : r.protection == MemProtect::ReadWrite ? 4u : r.protection == MemProtect::ReadExecute ? 0x20u : 0x40u;
-        const std::uint32_t state = r.state == RegionState::Committed ? 0x1000u : 0x2000u;
-        auto p16=[&](std::size_t o,std::uint16_t x){out.out_bytes[o]=static_cast<std::uint8_t>(x);out.out_bytes[o+1]=static_cast<std::uint8_t>(x>>8);};
-        auto p32=[&](std::size_t o,std::uint32_t x){for(unsigned i=0;i<4;++i)out.out_bytes[o+i]=static_cast<std::uint8_t>(x>>(8*i));};
-        auto p64=[&](std::size_t o,std::uint64_t x){for(unsigned i=0;i<8;++i)out.out_bytes[o+i]=static_cast<std::uint8_t>(x>>(8*i));};
-        p64(0,page); p64(8,r.xbox_va); p32(16,prot); p16(20,0); p64(24,remaining);
-        p32(32,state); p32(36,prot); p32(40,0x20000u); p32(44,0);
-        out.return_value=kSize; out.has_out=true; out.out_size=kSize; out.out_bytes_size=kSize;
-        out.note="partial: tracked M4 regions only; free gaps and original allocation protection are not modeled";
+        if (ctx.args[2] < kSize || ctx.process_id == 0) {
+            out.return_value = 0;
+            return true;
+        }
+        const auto snapshot = svc_.query_memory_snapshot(ctx.process_id);
+        if (!snapshot.ok()) {
+            out.return_value = 0;
+            out.note = snapshot.error_string();
+            return true;
+        }
+        const auto& space = snapshot.value();
+        if (space.page_size == 0 || ctx.args[0] < space.base ||
+            ctx.args[0] - space.base >= space.capacity) {
+            out.return_value = 0;
+            return true;
+        }
+        const std::uint64_t page =
+            ctx.args[0] - (ctx.args[0] % space.page_size);
+        const std::uint64_t space_end = space.base + space.capacity;
+        if (space_end < space.base || page < space.base || page >= space_end) {
+            out.return_value = 0;
+            return true;
+        }
+
+        // x64 MEMORY_BASIC_INFORMATION is 48 bytes. Free gaps are valid
+        // MEM_FREE regions within this process's modeled guest address space.
+        std::uint64_t allocation_base = 0;
+        std::uint64_t region_size = 0;
+        std::uint32_t allocation_protect = 0;  // not retained by M4
+        std::uint32_t state = 0x10000u;        // MEM_FREE
+        std::uint32_t protect = 0x01u;         // PAGE_NOACCESS
+        std::uint32_t type = 0;                // free regions have no type
+
+        const VmRegion* containing = nullptr;
+        std::uint64_t next_region = space_end;
+        for (const auto& region : space.regions) {
+            if (region.xbox_va <= page) {
+                const std::uint64_t region_end = region.xbox_va + region.size;
+                if (region_end >= region.xbox_va && page < region_end) {
+                    containing = &region;
+                    break;
+                }
+            } else if (region.xbox_va < next_region) {
+                next_region = region.xbox_va;
+            }
+        }
+
+        if (containing != nullptr) {
+            const auto& region = *containing;
+            const std::uint64_t region_end = region.xbox_va + region.size;
+            if (region_end < region.xbox_va || region_end <= page) {
+                out.return_value = 0;
+                return true;
+            }
+            allocation_base = region.xbox_va;
+            region_size = region_end - page;
+            state = region.state == RegionState::Committed ? 0x1000u : 0x2000u;
+            protect = region.protection == MemProtect::NoAccess ? 0x01u
+                : region.protection == MemProtect::ReadOnly ? 0x02u
+                : region.protection == MemProtect::ReadWrite ? 0x04u
+                : region.protection == MemProtect::ReadExecute ? 0x20u
+                : 0x40u;
+            type = 0x20000u; // MEM_PRIVATE
+        } else {
+            if (next_region <= page) {
+                out.return_value = 0;
+                return true;
+            }
+            region_size = next_region - page;
+        }
+
+        auto p16 = [&](std::size_t o, std::uint16_t x) {
+            out.out_bytes[o] = static_cast<std::uint8_t>(x);
+            out.out_bytes[o + 1] = static_cast<std::uint8_t>(x >> 8);
+        };
+        auto p32 = [&](std::size_t o, std::uint32_t x) {
+            for (unsigned i = 0; i < 4; ++i)
+                out.out_bytes[o + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        };
+        auto p64 = [&](std::size_t o, std::uint64_t x) {
+            for (unsigned i = 0; i < 8; ++i)
+                out.out_bytes[o + i] = static_cast<std::uint8_t>(x >> (8 * i));
+        };
+        p64(0, page);
+        p64(8, allocation_base);
+        p32(16, allocation_protect);
+        p16(20, 0); // PartitionId
+        p64(24, region_size);
+        p32(32, state);
+        p32(36, protect);
+        p32(40, type);
+        p32(44, 0); // x64 structure padding
+        out.return_value = kSize;
+        out.has_out = true;
+        out.out_size = kSize;
+        out.out_bytes_size = kSize;
+        out.note = "partial: free gaps are modeled inside the guest address-space reservation; original allocation protection and non-private memory types are unavailable";
         return true;
     }
-    std::string describe() const override { return "Win32: VirtualQuery (tracked M4 guest regions; partial)"; }
-private: GameRuntimeService& svc_;
+    std::string describe() const override {
+        return "Win32: VirtualQuery (guest address-space regions; partial)";
+    }
+private:
+    GameRuntimeService& svc_;
 };
 class ThreadSetTsImpl : public IApiImplementation {
 public:
@@ -607,6 +691,24 @@ Result<VmRegion> GameRuntimeService::query_memory_region(std::uint64_t process_i
     auto* managed = process.value().get()->as<ManagedProcess>();
     if (managed == nullptr) return Result<VmRegion>(RuntimeErrc::ObjectTypeMismatch, "not a managed process");
     return managed->address_space().find_containing(guest_address);
+}
+
+Result<MemoryQuerySnapshot> GameRuntimeService::query_memory_snapshot(
+    std::uint64_t process_id) const {
+    auto process = process_manager_.find_process_by_pid(process_id);
+    if (!process.ok())
+        return Result<MemoryQuerySnapshot>(process.errc(), process.context());
+    auto* managed = process.value().get()->as<ManagedProcess>();
+    if (managed == nullptr)
+        return Result<MemoryQuerySnapshot>(RuntimeErrc::ObjectTypeMismatch,
+                                           "not a managed process");
+    const auto& space = managed->address_space();
+    MemoryQuerySnapshot snapshot;
+    snapshot.base = space.base();
+    snapshot.capacity = space.capacity();
+    snapshot.page_size = space.page_size();
+    snapshot.regions = space.list_regions();
+    return Result<MemoryQuerySnapshot>::ok_result(std::move(snapshot));
 }
 
 void GameRuntimeService::release_process(std::uint64_t process_id) {

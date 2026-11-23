@@ -568,6 +568,16 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     auto rd64=[&](std::size_t o){std::uint64_t v=0;for(unsigned i=0;i<8;++i)v|=std::uint64_t(result.out_bytes[o+i])<<(8*i);return v;};
     EXPECT_EQ(rd64(0),base.value()); EXPECT_EQ(rd64(8),base.value()); EXPECT_EQ(rd64(24),0x2000u);
     EXPECT_EQ(rd32(32),0x1000u); EXPECT_EQ(rd32(36),0x04u);
+    // The gap immediately following the allocation is a MEM_FREE region.
+    ctx.args[0]=base.value()+0x2123;
+    const auto free_region=w.reg.dispatch("kernel32","VirtualQuery",ctx);
+    ASSERT_TRUE(free_region.ok); EXPECT_EQ(free_region.return_value,48u);
+    EXPECT_EQ(rd64(0),base.value()+0x2000);
+    EXPECT_EQ(rd64(8),0u);
+    EXPECT_EQ(rd64(24),proc->address_space().capacity()-0x2000);
+    EXPECT_EQ(rd32(32),0x10000u); // MEM_FREE
+    EXPECT_EQ(rd32(36),0x01u);    // PAGE_NOACCESS
+    EXPECT_EQ(rd32(40),0u);       // no MEM_PRIVATE type for free memory
     ctx.args[0]=0x7FFFFFFFFFFFFFFFull; const auto bad=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(bad.ok); EXPECT_EQ(bad.return_value,0u);
     ctx.args[2]=47; const auto short_buf=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(short_buf.ok); EXPECT_EQ(short_buf.return_value,0u);
 }

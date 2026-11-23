@@ -139,3 +139,16 @@ Other execution backends retain a default no-op hook for source compatibility;
 a backend that dispatches guest APIs must override it before it can claim
 process/thread-aware API dispatch. This does not itself implement a general
 x86-64 emulator or prove automatic OS thread scheduling.
+
+
+## M10.6 — VirtualQuery free-region enumeration
+
+VirtualQuery now uses a consistent snapshot of the target process's M4
+address-space bounds, page size, and sorted region list. It reports MEM_FREE
+for unallocated gaps within that modeled guest address-space reservation,
+including the next allocation boundary, and derives page alignment from the
+guest address space rather than assuming a 4096-byte host page. The x64
+MEMORY_BASIC_INFORMATION output is populated field-by-field with explicit
+padding. Original allocation protection and non-private mapped memory types
+remain unavailable, and addresses outside the modeled reservation still
+return zero; this is a bounded partial Win32 implementation.
