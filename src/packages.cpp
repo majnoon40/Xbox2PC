@@ -4,6 +4,7 @@
 #include "xbox2pc/packages.hpp"
 
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <set>
 #include <utility>
