@@ -744,6 +744,16 @@ TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
     ASSERT_TRUE(no_longer_signaled.ok());
     EXPECT_EQ(no_longer_signaled.value(), 0x102u); // auto-reset signal consumed exactly once
 
+    auto semaphore = w.grt->create_semaphore(pid.value(), 1, 2);
+    ASSERT_TRUE(semaphore.ok());
+    const std::vector<std::uint64_t> mixed_waitables{first.value(), semaphore.value()};
+    auto semaphore_selected = w.grt->wait_objects_any(pid.value(), 0, mixed_waitables, 0);
+    ASSERT_TRUE(semaphore_selected.ok());
+    EXPECT_EQ(semaphore_selected.value(), 1u); // semaphore is the second ready object
+    auto semaphore_consumed = w.grt->wait_object(pid.value(), 0, semaphore.value(), 0);
+    ASSERT_TRUE(semaphore_consumed.ok());
+    EXPECT_EQ(semaphore_consumed.value(), 0x102u); // wait-any consumes semaphore count
+
     const std::vector<std::uint64_t> duplicate{first.value(), first.value()};
     EXPECT_FALSE(w.grt->wait_objects_any(pid.value(), 0, duplicate, 0).ok());
     const std::vector<std::uint64_t> too_many(65, first.value());
