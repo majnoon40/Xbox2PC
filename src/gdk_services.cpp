@@ -1309,12 +1309,12 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
         auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
         return thread != nullptr && thread->stop_requested();
     };
+    const auto wait_start_ns = pal::now_ns();
+    const auto deadline = timeout_ns < 0 || timeout_ns > INT64_MAX - wait_start_ns
+        ? INT64_MAX : wait_start_ns + timeout_ns;
 
     auto* value = object.value().get();
     if (auto* event = value->as<RtEvent>()) {
-        const auto start_ns = pal::now_ns();
-        const auto deadline = timeout_ns < 0 || timeout_ns > INT64_MAX - start_ns
-            ? INT64_MAX : start_ns + timeout_ns;
         for (;;) {
             if (guest_runtime_thread != nullptr &&
                 !guest_runtime_thread->suspension_point())
