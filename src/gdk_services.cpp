@@ -501,7 +501,8 @@ public:
             static_cast<XTaskQueuePort>(ctx.args[1]),
             static_cast<std::uint32_t>(ctx.args[2]), ctx.invoke_guest_callback);
         out.return_value = r.ok() && r.value() ? 1 : 0;   // documented bool
-        out.note = "false when nothing dispatched (documented)";
+        out.note = "false when no callback was dispatched";
+        if (!r.ok()) out.error = r.error_string();
         return r.ok();
     }
     std::string describe() const override {
