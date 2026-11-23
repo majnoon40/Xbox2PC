@@ -597,11 +597,12 @@ TEST(ThreadExecTest, CooperativeSuspendResumeIsNotCancellation) {
     ASSERT_TRUE(thread->suspend().ok());
     const auto parked_deadline = std::chrono::steady_clock::now() +
                                  std::chrono::seconds(2);
-    while (thread->state() != rt::ThreadState::Suspended &&
+    while (!thread->execution_control()->is_parked() &&
            std::chrono::steady_clock::now() < parked_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_EQ(thread->state(), rt::ThreadState::Suspended);
+    ASSERT_TRUE(thread->execution_control()->is_parked());
     const auto parked_progress = progress.load(std::memory_order_relaxed);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     EXPECT_EQ(progress.load(std::memory_order_relaxed), parked_progress);
