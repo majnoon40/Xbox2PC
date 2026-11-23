@@ -297,6 +297,9 @@ Result<void> RtThread::terminate(std::uint64_t exit_code) {
         // Terminated -> Terminated is legal (idempotent) per the table.
         state_.store(to, std::memory_order_release);
     }
+    stop_flag_.store(true, std::memory_order_release);
+    execution_control_->cancel();
+    if (host_ != nullptr) host_->request_stop();
     exit_code_.store(exit_code, std::memory_order_release);
     exited_.store(true, std::memory_order_release);
     return Result<void>::ok_result();
