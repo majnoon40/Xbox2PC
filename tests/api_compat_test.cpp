@@ -162,6 +162,9 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     EXPECT_NE(free->notes.find("exact-region MEM_DECOMMIT"), std::string::npos);
     EXPECT_NE(wait->notes.find("guest mutex"), std::string::npos);
     EXPECT_NE(wait->notes.find("guest semaphore"), std::string::npos);
+    const auto* semaphore = reg.find("kernel32", "ReleaseSemaphore");
+    ASSERT_NE(semaphore, nullptr);
+    EXPECT_NE(semaphore->notes.find("optional lpPreviousCount output"), std::string::npos);
 }
  
 TEST(ApiRegistryTest, LookupCaseFoldingMatchesTheOsLoader) {
