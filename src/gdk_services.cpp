@@ -1587,9 +1587,13 @@ Result<bool> TaskQueueService::dispatch(
     // No callback submissions exist yet. Preserve the documented blocking
     // contract: finite timeouts elapse; INFINITE waits for termination/close.
     const auto stopped = [&] {
-        const auto current = queues_.find(queue_id);
-        return current == queues_.end() || current->second != queue ||
-               current->second->owner_process_id != process_id ||
+        // A dispatch operation retains the queue object while it is active.
+        // Closing the particular handle used to enter Dispatch must not
+        // cancel the operation if another duplicated handle still owns it.
+        const bool still_referenced = std::any_of(
+            queues_.begin(), queues_.end(),
+            [&](const auto& entry) { return entry.second == queue; });
+        return !still_referenced || queue->owner_process_id != process_id ||
                queue->terminated;
     };
     if (timeout_ms == 0xFFFFFFFFu) {
