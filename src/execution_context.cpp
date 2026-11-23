@@ -91,6 +91,11 @@ Result<void> ExecutionContext::initialize() {
         ContextLimiter::release();   // failed init: give the slot back
         return Result<void>(RuntimeErrc::InvalidState, "context destroyed");
     }
+    if (process_id_ == 0 || thread_id_ == 0) {
+        ContextLimiter::release();
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "execution context requires nonzero process and thread identities");
+    }
     if (state_ != ContextState::Created) {
         ContextLimiter::release();   // failed init: give the slot back
         return Result<void>(RuntimeErrc::InvalidState,
