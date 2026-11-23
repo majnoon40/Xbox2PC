@@ -102,6 +102,7 @@ void RtThread::on_destroy() {
     if (!exited_.load(std::memory_order_acquire)) {
         stop_flag_.store(true, std::memory_order_release);
         host_->request_stop();
+        suspend_cv_.notify_all();
     }
     while (!trampoline_done_.load(std::memory_order_acquire)) {
         std::this_thread::yield();
@@ -178,31 +179,50 @@ void* RtThread::pal_trampoline(void* self_ptr) {
 }
 
 Result<void> RtThread::suspend() {
-    std::lock_guard lock(transition_lock_);
+    std::lock_guard transition_guard(transition_lock_);
     const ThreadState cur = state_.load(std::memory_order_acquire);
     const ThreadState to = ThreadState::Suspended;
     if (!thread_transition_valid(cur, to)) {
         return Result<void>(RuntimeErrc::InvalidTransition,
                             "suspend() from " + std::string(thread_state_to_name(cur)));
     }
-    // Cooperative: set the flag; the thread observes it at safe points.
-    stop_flag_.store(true, std::memory_order_release);
-    if (host_ != nullptr) host_->request_stop();
+    {
+        std::lock_guard suspend_guard(suspend_lock_);
+        suspend_requested_ = true;
+    }
     state_.store(to, std::memory_order_release);
     return Result<void>::ok_result();
 }
 
 Result<void> RtThread::resume() {
-    std::lock_guard lock(transition_lock_);
+    std::lock_guard transition_guard(transition_lock_);
     const ThreadState cur = state_.load(std::memory_order_acquire);
     const ThreadState to = ThreadState::Ready;
     if (!thread_transition_valid(cur, to)) {
         return Result<void>(RuntimeErrc::InvalidTransition,
                             "resume() from " + std::string(thread_state_to_name(cur)));
     }
-    stop_flag_.store(false, std::memory_order_release);
+    {
+        std::lock_guard suspend_guard(suspend_lock_);
+        suspend_requested_ = false;
+    }
     state_.store(to, std::memory_order_release);
+    suspend_cv_.notify_all();
     return Result<void>::ok_result();
+}
+
+bool RtThread::suspension_point() {
+    std::unique_lock lock(suspend_lock_);
+    while (suspend_requested_ &&
+           !stop_flag_.load(std::memory_order_acquire)) {
+        state_.store(ThreadState::Suspended, std::memory_order_release);
+        suspend_cv_.wait(lock);
+    }
+    if (stop_flag_.load(std::memory_order_acquire)) return false;
+    if (state_.load(std::memory_order_acquire) == ThreadState::Suspended) {
+        state_.store(ThreadState::Running, std::memory_order_release);
+    }
+    return true;
 }
 
 Result<void> RtThread::block_note() {
@@ -264,6 +284,7 @@ Result<void> RtThread::fail(std::string reason) {
         stop_flag_.store(true, std::memory_order_release);
         host_->request_stop();
     }
+    suspend_cv_.notify_all();
     return Result<void>::ok_result();
 }
 
@@ -368,6 +389,7 @@ std::string RtThread::fail_reason() const {
 void RtThread::request_stop() {
     stop_flag_.store(true, std::memory_order_release);
     if (host_ != nullptr) host_->request_stop();
+    suspend_cv_.notify_all();
     // M4: wake the thread's cancellation-aware wait (registered waker).
     wake_for_cancellation();
 }
