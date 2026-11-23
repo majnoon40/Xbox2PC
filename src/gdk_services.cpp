@@ -270,8 +270,8 @@ public:
         if (ctx.arg_count != 1) return false;
         const auto r = svc_.close_queue(ctx.process_id, ctx.args[0]);
         out.return_value = kSOk;   // documented: void
-        out.note = r.ok() ? "ref-count decremented"
-                          : "unknown handle (typed error reported)";
+        out.note = r.ok() ? "queue handle closed"
+                          : "unknown or foreign handle (typed error reported)";
         return true;   // void API: dispatch-level success
     }
     std::string describe() const override {

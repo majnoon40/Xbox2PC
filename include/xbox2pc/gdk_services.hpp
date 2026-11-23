@@ -124,10 +124,9 @@ private:
 
 // ── TaskQueueService (XTaskQueue) ─────────────────────────────────────────
 
-// Manual-mode task queues modeled on M4 thread semantics: create (two
-// dispatch modes), dispatch with timeout (bool return: false when empty/
-// terminated — documented), close (ref-count decrement), terminate
-// (cancel + E_ABORT submissions — documented).
+// Process-owned manual-mode task queue handles. Empty dispatch returns
+// false because guest callback submission/execution is not implemented;
+// unsupported dispatch modes are rejected rather than simulated.
 class TaskQueueService : public RtService {
 public:
     static const char* service_type_name() { return "gdk_task_queue"; }

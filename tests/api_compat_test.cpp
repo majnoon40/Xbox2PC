@@ -505,11 +505,11 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     // Terminate: dispatch stays false (documented) — and submissions E_ABORT
     // (modeled: terminated flag).
     EXPECT_TRUE(w.tq->terminate_queue(owner_pid, id, true).ok());
-    d = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
+    d = w.tq->dispatch(owner_pid, id, XTaskQueuePort::Work, 0);
     EXPECT_FALSE(d.value());
     // Close drops the queue.
     EXPECT_TRUE(w.tq->close_queue(owner_pid, id).ok());
-    auto gone = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
+    auto gone = w.tq->dispatch(owner_pid, id, XTaskQueuePort::Work, 0);
     EXPECT_FALSE(gone.ok());   // unknown handle now
     // Unknown mode values rejected.
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
