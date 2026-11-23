@@ -790,8 +790,11 @@ StepResult Interpreter::step(const Decoded& ins) {
                     }
                     const std::uint64_t q = dividend / divisor;
                     const std::uint64_t r = dividend % divisor;
-                    write_gpr(cx.cpu, 0, 8, q, cx.rex);                        // AL
-                    write_gpr(cx.cpu, 4, 8, r, cx.rex);                         // AH
+                    // Byte DIV returns quotient:AL and remainder:AH. Store
+                    // AX as one 16-bit result so a REX prefix cannot turn
+                    // the implicit AH destination into SPL.
+                    write_gpr(cx.cpu, 0, 16,
+                              (q & 0xFFull) | ((r & 0xFFull) << 8), cx.rex);
                 } else if (bits == 16) {
                     if (divisor == 0 || dividend / divisor > kMask16) {
                         return StepResult::failed(StepFault{
@@ -901,16 +904,24 @@ StepResult Interpreter::step(const Decoded& ins) {
             const std::int64_t q = sdividend / sd;
             const std::int64_t r = sdividend % sd;
             const std::uint64_t qlim =
-                (1ull << (bits - 1)) - 1ull;   // |q| <= 2^(bits-1)-1, except -2^(bits-1)
+                (1ull << (bits - 1)) - (q < 0 ? 0ull : 1ull);
             const std::uint64_t mag = q < 0 ? static_cast<std::uint64_t>(-(q + 1)) + 1ull
                                             : static_cast<std::uint64_t>(q);
-            const bool in_range = mag <= qlim || (q == static_cast<std::int64_t>(INT64_MIN) && false);
+            const bool in_range = mag <= qlim;
             if (!in_range) {
                 return StepResult::failed(StepFault{GuestFault::DivideError, cx.start_rip, 0,
                                                     "IDIV quotient overflow"});
             }
-            write_gpr(cx.cpu, 0, bits, static_cast<std::uint64_t>(q) & smask, cx.rex);
-            write_gpr(cx.cpu, 2, bits, static_cast<std::uint64_t>(r) & smask, cx.rex);
+            if (bits == 8) {
+                // IDIV r/m8 writes AL quotient and AH remainder (AX).
+                write_gpr(cx.cpu, 0, 16,
+                          (static_cast<std::uint64_t>(q) & 0xFFull) |
+                              ((static_cast<std::uint64_t>(r) & 0xFFull) << 8),
+                          cx.rex);
+            } else {
+                write_gpr(cx.cpu, 0, bits, static_cast<std::uint64_t>(q) & smask, cx.rex);
+                write_gpr(cx.cpu, 2, bits, static_cast<std::uint64_t>(r) & smask, cx.rex);
+            }
             cx.cpu.rip += ins.length;
             return StepResult::success();
         }
