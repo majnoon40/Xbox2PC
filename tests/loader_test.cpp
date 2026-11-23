@@ -770,7 +770,7 @@ TEST(LoaderTlsTest, RejectsTlsPointersBelowImageBase) {
     Diagnostics diags;
     const auto before = parse_image(image, "tls-bad.exe", diags);
     const auto tls_rva = before.directories[xbox2pc::pe::kDirTls].rva;
-    const auto tls_off = before.rva_to_offset(tls_rva);
+    const auto tls_off = xbox2pc::pe::rva_to_offset(before, tls_rva);
     ASSERT_TRUE(tls_off.has_value());
     // StartAddressOfRawData is the first VA in IMAGE_TLS_DIRECTORY64.
     const std::uint64_t start = *tls_off;
