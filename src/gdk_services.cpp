@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <thread>
 
 namespace xbox2pc::rt::api {
 
