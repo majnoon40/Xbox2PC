@@ -507,7 +507,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.category = registry::ApiCategory::WindowsWin32;
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-VIRTUAL-QUERY]"; a.evidence_url = kVirtualQueryUrl;
-        a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; free gaps and original allocation protection are not modeled";
+        a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; reports free gaps within the modeled reservation, retained allocation protection, and tracked MEM_PRIVATE/MEM_IMAGE types; mapped/shared memory and addresses outside the modeled reservation are unsupported";
         add(a);
     }
     {
@@ -517,7 +517,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.category = registry::ApiCategory::WindowsWin32;
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-VIRTUAL-ALLOC]"; a.evidence_url = kVirtualAllocUrl;
-        a.notes = "automatic MEM_RESERVE and MEM_RESERVE|MEM_COMMIT; exact-region MEM_COMMIT at an existing reservation address; fixed-address MEM_RESERVE and partial commits are unsupported";
+        a.notes = "automatic and fixed-address MEM_RESERVE and MEM_RESERVE|MEM_COMMIT; exact-region MEM_COMMIT at an existing reservation address; partial-range commit is unsupported";
         add(a);
     }
     {
@@ -602,7 +602,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.signature="DWORD WaitForSingleObject(HANDLE, DWORD)";
         a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
         a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kWaitForSingleObjectUrl;
-        a.notes="event handles only; supports WAIT_OBJECT_0, WAIT_TIMEOUT and WAIT_FAILED; blocks host execution thread"; add(a);
+        a.notes="process-scoped event, guest mutex, and guest semaphore handles; supports WAIT_OBJECT_0, WAIT_ABANDONED_0 for mutexes, WAIT_TIMEOUT, cancellation, and finite/infinite waits; blocks host execution thread in short polling intervals"; add(a);
     }
     {
         ApiDescriptor a; a.library="kernel32"; a.export_name="CloseHandle";
