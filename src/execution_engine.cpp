@@ -674,6 +674,15 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(ptr_in(0)); // callback context
         plan.call.args.push_back(ptr_in(0)); // guest callback address
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XTaskQueueSubmitDelayedCallback") {
+        // Delayed callback registration is recognized for safe ABI decoding
+        // only. The service does not schedule or invoke guest callbacks.
+        plan.call.args.push_back(int_arg()); // queue handle
+        plan.call.args.push_back(int_arg()); // port enum
+        plan.call.args.push_back(int_arg()); // delay in milliseconds
+        plan.call.args.push_back(ptr_in(0)); // callback context
+        plan.call.args.push_back(ptr_in(0)); // guest callback address
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "WaitForMultipleObjects") {
         plan.call.args.push_back(int_arg()); // nCount
         plan.call.args.push_back(ptr_in(0)); // lpHandles
