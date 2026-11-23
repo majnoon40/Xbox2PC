@@ -13,6 +13,7 @@
 //   12.6 Integration    — LoaderIntegrationTest (15-step path + concurrency +
 //                         termination cleanup + VFS-sourced image)
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -739,6 +740,45 @@ TEST(LoaderTlsTest, DecodeDirectoryAndCountCallbacksNeverRun) {
     EXPECT_EQ(t.callback_count, 3u);  // counted, NEVER executed
     EXPECT_TRUE(ld.has_tls);
     EXPECT_EQ(ld.tls_callbacks, 3u);
+}
+
+TEST(LoaderTlsTest, AcceptsExactPe32PlusDirectorySize) {
+    PeBuildSpec spec;
+    spec.tls.template_data = {0xAA, 0xBB};
+    const auto original = PeBuilder(spec).build();
+    std::vector<std::uint8_t> image(original);
+    // PE32+ TLS data-directory size is the 40-byte IMAGE_TLS_DIRECTORY64.
+    const std::uint64_t tls_size = 0x98 + 112 + 9 * 8 + 4;
+    image[tls_size] = 40;
+    image[tls_size + 1] = 0;
+    image[tls_size + 2] = 0;
+    image[tls_size + 3] = 0;
+    Diagnostics diags;
+    const auto img = parse_image(image, "tls40.exe", diags);
+    LoadDiagnostics ld;
+    auto tls = decode_tls(img, image.data(), image.size(), ld);
+    ASSERT_TRUE(tls.ok()) << tls.error_string();
+    ASSERT_TRUE(tls.value().has_value());
+    EXPECT_EQ(tls.value()->template_size, 2u);
+}
+
+TEST(LoaderTlsTest, RejectsTlsPointersBelowImageBase) {
+    PeBuildSpec spec;
+    spec.tls.template_data = {0xAA, 0xBB};
+    const auto original = PeBuilder(spec).build();
+    std::vector<std::uint8_t> image(original);
+    Diagnostics diags;
+    const auto before = parse_image(image, "tls-bad.exe", diags);
+    const auto tls_rva = before.directories[xbox2pc::pe::kDirTls].rva;
+    const auto tls_off = before.rva_to_offset(tls_rva);
+    ASSERT_TRUE(tls_off.has_value());
+    // StartAddressOfRawData is the first VA in IMAGE_TLS_DIRECTORY64.
+    const std::uint64_t start = *tls_off;
+    for (int i = 0; i < 8; ++i) image[start + i] = 0;
+    const auto img = parse_image(image, "tls-bad2.exe", diags);
+    LoadDiagnostics ld;
+    auto tls = decode_tls(img, image.data(), image.size(), ld);
+    EXPECT_FALSE(tls.ok());
 }
 
 TEST(LoaderTlsTest, AbsentDirectoryIsNullopt) {
