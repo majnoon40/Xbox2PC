@@ -1165,6 +1165,39 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueCallbackSubmissionReportsCapacityFailureAsOutOfMemory) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-capacity.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    const auto queue = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+
+    ApiContext submit;
+    submit.process_id = pid.value();
+    submit.arg_count = 4;
+    submit.args[0] = queue.value();
+    submit.args[1] = static_cast<std::uint32_t>(XTaskQueuePort::Work);
+    submit.args[2] = 0x1234;
+    submit.args[3] = 0x140001000;
+    for (std::size_t i = 0; i < 4096; ++i) {
+        const auto accepted = w.reg.dispatch(
+            "xgameruntime", "XTaskQueueSubmitCallback", submit);
+        ASSERT_TRUE(accepted.ok) << accepted.error;
+        ASSERT_EQ(accepted.return_value, kSOk);
+    }
+    const auto full = w.reg.dispatch(
+        "xgameruntime", "XTaskQueueSubmitCallback", submit);
+    ASSERT_TRUE(full.ok) << full.error;
+    EXPECT_EQ(full.return_value, kEOutOfMemory);
+
+    ASSERT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+}
+
 TEST(GdkServiceTest, FinalCloseWithoutDispatchReleasesPendingCallbacks) {
     ApiWorld w;
     (void)w.new_process("task-queue-close-pending.exe");
