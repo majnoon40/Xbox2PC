@@ -897,7 +897,10 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
                        "evidence base)");
         return b;
     }
-    // Implementation present?
+    // Implementation check and registry-wide binding allocation are
+    // serialized together so separate resolver instances cannot issue the
+    // same synthetic guest address for different imports.
+    std::uint32_t binding_id = 0;
     {
         std::lock_guard lock(reg_.lock_);
         const auto it = reg_.impls_.find(desc_key(d->library, d->export_name));
@@ -908,20 +911,20 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
                      ") but no implementation is registered: " + d->evidence;
             return b;
         }
+        // The GDK and Win32 subranges each have 65,534 usable IDs. The
+        // completion sentinel 0x5100FFFF is deliberately never allocated.
+        if (reg_.next_binding_id_ > 0xFFFEu) {
+            b.status = loader::ImportStatus::Unsupported;
+            b.note = "registry-wide API binding address space exhausted";
+            return b;
+        }
+        binding_id = reg_.next_binding_id_++;
     }
-    // Two 64-KiB synthetic ranges are reserved for GDK and Win32
-    // imports. Keep the completion sentinel out of the GDK range and
-    // reject exhaustion rather than creating an address collision.
-    if (next_id_ > 0xFFFEull) {
-        b.status = loader::ImportStatus::Unsupported;
-        b.note = "per-image API binding address space exhausted";
-        return b;
-    }
-    // Bind: synthetic dispatch address = implementation ticket.
     b.status = loader::ImportStatus::Resolved;
     b.value = (d->category == registry::ApiCategory::XboxGdk ? 0x51000000ull : 0x51010000ull) +
-              (next_id_++);
-    b.note = "dispatch-table binding (id " + std::to_string(next_id_ - 1) +
+              binding_id;
+    ++next_id_;
+    b.note = "dispatch-table binding (registry id " + std::to_string(binding_id) +
              "); evidence " + d->evidence + " " + d->evidence_url;
     return b;
 }
