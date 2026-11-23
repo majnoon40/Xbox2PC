@@ -194,6 +194,21 @@ TEST(MemoryBackendTest, CrudSeekMetadata) {
     EXPECT_EQ(missing.errc(), RuntimeErrc::NotFound);
 }
 
+TEST(MemoryBackendTest, RejectsNullAndOverflowBuffers) {
+    MemoryBackend mb;
+    auto path = VfsPath::parse("/overflow.bin").value();
+    ASSERT_TRUE(mb.create_file(path).ok());
+    auto h = mb.open(path, true);
+    ASSERT_TRUE(h.ok());
+    const char byte = 'x';
+    EXPECT_FALSE(h.value()->write(nullptr, 1).ok());
+    EXPECT_FALSE(h.value()->read(nullptr, 1).ok());
+    auto huge = h.value()->write(&byte, ~0ull);
+    EXPECT_FALSE(huge.ok());
+    EXPECT_EQ(h.value()->size(), 0u);
+    EXPECT_EQ(h.value()->position(), 0u);
+}
+
 TEST(MemoryBackendTest, ConcurrentHandles) {
     for (int rep = 0; rep < kRepeat; ++rep) {
         MemoryBackend mb;
@@ -339,6 +354,21 @@ TEST(HostBackendTest, RootConfinementAndSymlinkRejection) {
 }
 
 // ── XPK: roundtrip + adversarial ───────────────────────────────────────────
+
+TEST(BoundedReaderTest, NullBuffersAndZeroLengthOperationsAreSafe) {
+    BoundedReader reader(nullptr, 8);
+    char out = 0;
+    EXPECT_FALSE(reader.read_exact(&out, 1).ok());
+    EXPECT_FALSE(reader.read_exact(nullptr, 1).ok());
+    EXPECT_TRUE(reader.read_exact(nullptr, 0).ok());
+    auto zero = reader.read_some(nullptr, 0);
+    ASSERT_TRUE(zero.ok());
+    EXPECT_EQ(zero.value(), 0u);
+    EXPECT_FALSE(reader.peek(0, 1).ok());
+    auto empty = reader.peek(0, 0);
+    ASSERT_TRUE(empty.ok());
+    EXPECT_TRUE(empty.value().empty());
+}
 
 TEST(HostBackendTest, RejectsIntermediateSymlinkComponents) {
     const std::string root = "/tmp/x2pc-m5-root-" + std::to_string(::getpid());
