@@ -162,6 +162,17 @@ TEST(MemoryTest, PartialRangeCommitProtectDecommitAndRelease) {
     EXPECT_EQ(space.find_containing(base + 2 * page).value().state, RegionState::Committed);
     EXPECT_EQ(space.stats().committed_bytes, page);
 
+    // Decommit discards anonymous backing; recommit exposes zero-filled pages.
+    auto second_page = space.translate(base + 2 * page);
+    ASSERT_TRUE(second_page.ok());
+    *static_cast<std::uint8_t*>(second_page.value()) = 0x5A;
+    ASSERT_TRUE(space.decommit_range(base + 2 * page, page).ok());
+    ASSERT_TRUE(space.commit_range(base + 2 * page, page).ok());
+    auto recommitted = space.translate(base + 2 * page);
+    ASSERT_TRUE(recommitted.ok());
+    EXPECT_EQ(*static_cast<std::uint8_t*>(recommitted.value()), 0u);
+    EXPECT_EQ(space.stats().committed_bytes, page);
+
     // The original allocation base still releases every split segment.
     ASSERT_TRUE(space.release_region(base).ok());
     EXPECT_TRUE(space.list_regions().empty());
