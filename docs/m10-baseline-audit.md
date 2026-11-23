@@ -152,3 +152,25 @@ MEMORY_BASIC_INFORMATION output is populated field-by-field with explicit
 padding. Original allocation protection and non-private mapped memory types
 remain unavailable, and addresses outside the modeled reservation still
 return zero; this is a bounded partial Win32 implementation.
+
+
+## M10.6 — Win32 event synchronization vertical slice
+
+Added evidence-backed descriptors and implementations for CreateEventW,
+SetEvent, ResetEvent, WaitForSingleObject, and CloseHandle. The implementation
+uses the existing RtEvent primitive and covers manual/auto reset, initial
+signal state, finite/infinite waits, process-scoped opaque tokens, stale
+handle rejection, and process-exit cleanup.
+
+This remains partial compatibility: only unnamed events with null security
+attributes are accepted; named events, duplicate/cross-process handles,
+other waitable object types, last-error behavior, and scheduler-aware guest
+blocking are not implemented. Waits block the calling host execution thread.
+All five descriptors remain PartiallyImplemented.
+
+Evidence:
+- https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
+- https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setevent
+- https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent
+- https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
+- https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle

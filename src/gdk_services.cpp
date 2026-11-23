@@ -496,6 +496,65 @@ public:
     }
 };
 
+class CreateEventWImpl : public IApiImplementation {
+public:
+    explicit CreateEventWImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4 || ctx.args[0] != 0 || ctx.args[3] != 0) {
+            out.return_value = 0;
+            out.note = "CreateEventW supports unnamed events with null SECURITY_ATTRIBUTES only";
+            return true;
+        }
+        auto r = svc_.create_event(ctx.process_id, ctx.args[1] != 0, ctx.args[2] != 0);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: CreateEventW (unnamed process-scoped event)"; }
+private: GameRuntimeService& svc_;
+};
+class SetEventImpl : public IApiImplementation {
+public:
+    explicit SetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        auto r=svc_.set_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
+        if(!r.ok())out.note=r.error_string(); return true;
+    }
+    std::string describe() const override { return "Win32: SetEvent"; }
+private: GameRuntimeService& svc_;
+};
+class ResetEventImpl : public IApiImplementation {
+public:
+    explicit ResetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        auto r=svc_.reset_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
+        if(!r.ok())out.note=r.error_string(); return true;
+    }
+    std::string describe() const override { return "Win32: ResetEvent"; }
+private: GameRuntimeService& svc_;
+};
+class WaitForSingleObjectImpl : public IApiImplementation {
+public:
+    explicit WaitForSingleObjectImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        auto r=svc_.wait_event(ctx.process_id,ctx.args[0],static_cast<std::uint32_t>(ctx.args[1]));
+        out.return_value=r.ok()?r.value():0xFFFFFFFFu;
+        if(!r.ok())out.note=r.error_string(); return true;
+    }
+    std::string describe() const override { return "Win32: WaitForSingleObject (event handles only)"; }
+private: GameRuntimeService& svc_;
+};
+class CloseEventHandleImpl : public IApiImplementation {
+public:
+    explicit CloseEventHandleImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        auto r=svc_.close_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
+        if(!r.ok())out.note=r.error_string(); return true;
+    }
+    std::string describe() const override { return "Win32: CloseHandle (event handles only)"; }
+private: GameRuntimeService& svc_;
+}
+
 }  // namespace
 
 // ── names ────────────────────────────────────────────────────────────────
@@ -559,7 +618,12 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r10 = reg("XThreadIsTimeSensitive",
                    keep(std::make_shared<ThreadIsTsImpl>(*this)));
     auto r11 = api_reg_.register_implementation("kernel32", "VirtualQuery", keep(std::make_shared<VirtualQueryImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11}) {
+    auto r12 = api_reg_.register_implementation("kernel32", "CreateEventW", keep(std::make_shared<CreateEventWImpl>(*this)), owner);
+    auto r13 = api_reg_.register_implementation("kernel32", "SetEvent", keep(std::make_shared<SetEventImpl>(*this)), owner);
+    auto r14 = api_reg_.register_implementation("kernel32", "ResetEvent", keep(std::make_shared<ResetEventImpl>(*this)), owner);
+    auto r15 = api_reg_.register_implementation("kernel32", "WaitForSingleObject", keep(std::make_shared<WaitForSingleObjectImpl>(*this)), owner);
+    auto r16 = api_reg_.register_implementation("kernel32", "CloseHandle", keep(std::make_shared<CloseEventHandleImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -588,6 +652,7 @@ Result<void> GameRuntimeService::on_shutdown() {
         std::lock_guard lock(state_lock_);
         procs_.clear();
         ts_bits_.clear();
+        events_.clear();
     }
     owned_.clear();
     if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
@@ -711,11 +776,60 @@ Result<MemoryQuerySnapshot> GameRuntimeService::query_memory_snapshot(
     return Result<MemoryQuerySnapshot>(std::move(snapshot));
 }
 
+Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
+                                                        bool manual_reset,
+                                                        bool initially_set) {
+    if (pid == 0) return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "event requires guest process identity");
+    const auto handle = next_event_handle_.fetch_add(1, std::memory_order_relaxed);
+    if (handle == 0 || handle == UINT64_MAX)
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "event handle space exhausted");
+    auto event = std::make_shared<RtEvent>(!manual_reset, initially_set);
+    std::lock_guard lock(state_lock_);
+    events_.emplace(std::make_pair(pid, handle), std::move(event));
+    return Result<std::uint64_t>(handle);
+}
+Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t handle) {
+    std::shared_ptr<RtEvent> event;
+    { std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+      if(it==events_.end())return Result<void>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+      event=it->second; }
+    return event->set();
+}
+Result<void> GameRuntimeService::reset_event(std::uint64_t pid, std::uint64_t handle) {
+    std::shared_ptr<RtEvent> event;
+    { std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+      if(it==events_.end())return Result<void>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+      event=it->second; }
+    return event->reset();
+}
+Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
+                                                      std::uint64_t handle,
+                                                      std::uint32_t timeout_ms) {
+    std::shared_ptr<RtEvent> event;
+    { std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+      if(it==events_.end())return Result<std::uint32_t>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+      event=it->second; }
+    auto waited = timeout_ms == 0xFFFFFFFFu ? event->wait_infinite()
+                                            : event->wait_ms(static_cast<std::int64_t>(timeout_ms));
+    if(waited.ok())return Result<std::uint32_t>(0u);
+    if(waited.errc()==RuntimeErrc::Timeout)return Result<std::uint32_t>(0x102u);
+    return Result<std::uint32_t>(waited.errc(),waited.context());
+}
+Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t handle) {
+    std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+    if(it==events_.end())return Result<void>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+    events_.erase(it); return Result<void>::ok_result();
+}
+
 void GameRuntimeService::release_process(std::uint64_t process_id) {
     std::lock_guard lock(state_lock_);
     procs_.erase(process_id);
     for (auto it = ts_bits_.begin(); it != ts_bits_.end();) {
         if (it->first.first == process_id) it = ts_bits_.erase(it);
+        else ++it;
+    }
+    for (auto it = events_.begin(); it != events_.end();) {
+        if (it->first.first == process_id) it = events_.erase(it);
         else ++it;
     }
 }

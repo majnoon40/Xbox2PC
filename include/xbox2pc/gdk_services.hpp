@@ -15,6 +15,7 @@
 // (host clock), pe_parser (delay-load decode helper types). It creates
 // no managers of its own.
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -25,6 +26,7 @@
 #include "xbox2pc/platform.hpp"
 #include "xbox2pc/process_management.hpp"
 #include "xbox2pc/service_registry.hpp"
+#include "xbox2pc/sync_objects.hpp"
 #include "xbox2pc/thread_model.hpp"
 
 namespace xbox2pc::rt::api {
@@ -113,6 +115,11 @@ public:
     void release_process(std::uint64_t process_id);
     Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
     Result<MemoryQuerySnapshot> query_memory_snapshot(std::uint64_t process_id) const;
+    Result<std::uint64_t> create_event(std::uint64_t process_id, bool manual_reset, bool initially_set);
+    Result<void> set_event(std::uint64_t process_id, std::uint64_t handle);
+    Result<void> reset_event(std::uint64_t process_id, std::uint64_t handle);
+    Result<std::uint32_t> wait_event(std::uint64_t process_id, std::uint64_t handle, std::uint32_t timeout_ms);
+    Result<void> close_event(std::uint64_t process_id, std::uint64_t handle);
 
     // Registry back-reference (tests/introspection).
     ApiRegistry& registry() { return api_reg_; }
@@ -128,6 +135,8 @@ private:
     mutable std::mutex state_lock_;
     std::map<std::uint64_t, ProcState> procs_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<RtEvent>> events_;
+    std::atomic<std::uint64_t> next_event_handle_{1};
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 

@@ -474,6 +474,49 @@ TEST(GdkServiceTest, LifecycleRefCountPerProcess) {
     EXPECT_EQ(r3.value(), 1u);   // restarted at 1, not 2
 }
 
+TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
+    ApiWorld w; auto* p=w.new_process("event-api.exe"); ASSERT_NE(p,nullptr);
+    auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    ApiContext c; c.process_id=pid.value(); c.arg_count=4;
+    c.args[0]=0; c.args[1]=1; c.args[2]=0; c.args[3]=0;
+    auto created=w.reg.dispatch("kernel32","CreateEventW",c);
+    ASSERT_TRUE(created.ok); ASSERT_NE(created.return_value,0u);
+    const auto h=created.return_value;
+    c.arg_count=2; c.args[0]=h; c.args[1]=0;
+    auto timeout=w.reg.dispatch("kernel32","WaitForSingleObject",c);
+    ASSERT_TRUE(timeout.ok); EXPECT_EQ(timeout.return_value,0x102u);
+    c.arg_count=1; c.args[0]=h;
+    auto set=w.reg.dispatch("kernel32","SetEvent",c);
+    ASSERT_TRUE(set.ok); EXPECT_EQ(set.return_value,1u);
+    c.arg_count=2; c.args[0]=h; c.args[1]=0;
+    auto signaled=w.reg.dispatch("kernel32","WaitForSingleObject",c);
+    ASSERT_TRUE(signaled.ok); EXPECT_EQ(signaled.return_value,0u);
+    auto still_signaled=w.reg.dispatch("kernel32","WaitForSingleObject",c);
+    ASSERT_TRUE(still_signaled.ok); EXPECT_EQ(still_signaled.return_value,0u);
+    c.arg_count=1; c.args[0]=h;
+    auto reset=w.reg.dispatch("kernel32","ResetEvent",c);
+    ASSERT_TRUE(reset.ok); EXPECT_EQ(reset.return_value,1u);
+    c.arg_count=2; c.args[0]=h; c.args[1]=0;
+    auto timeout2=w.reg.dispatch("kernel32","WaitForSingleObject",c);
+    ASSERT_TRUE(timeout2.ok); EXPECT_EQ(timeout2.return_value,0x102u);
+    c.process_id=pid.value()+1; c.arg_count=1; c.args[0]=h;
+    auto foreign=w.reg.dispatch("kernel32","SetEvent",c);
+    ASSERT_TRUE(foreign.ok); EXPECT_EQ(foreign.return_value,0u);
+    c.process_id=pid.value();
+    auto closed=w.reg.dispatch("kernel32","CloseHandle",c);
+    ASSERT_TRUE(closed.ok); EXPECT_EQ(closed.return_value,1u);
+    auto stale=w.reg.dispatch("kernel32","SetEvent",c);
+    ASSERT_TRUE(stale.ok); EXPECT_EQ(stale.return_value,0u);
+}
+
+TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
+    ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
+    auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    auto h=w.grt->create_event(pid.value(),false,true); ASSERT_TRUE(h.ok());
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle,0).ok());
+    EXPECT_FALSE(w.grt->set_event(pid.value(),h.value()).ok());
+}
+
 TEST(GdkServiceTest, DocumentedIdFallbacks) {
     ApiWorld w;
     std::uint64_t used = 0;

@@ -139,6 +139,11 @@ const char* kCurrentThreadIdUrl =
 const char* kVirtualQueryUrl =
     "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/"
     "nf-memoryapi-virtualquery";
+const char* kCreateEventWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw";
+const char* kSetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setevent";
+const char* kResetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent";
+const char* kWaitForSingleObjectUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject";
+const char* kCloseHandleUrl = "https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
@@ -495,6 +500,47 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; free gaps and original allocation protection are not modeled";
         add(a);
     }
+    // Partial Win32 event synchronization: no names/security descriptors,
+    // duplicate handles, or non-event waitable objects are modeled.
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CreateEventW";
+        a.convention=Convention::X64Microsoft; a.param_count=4; a.ret=ReturnKind::Pointer;
+        a.signature="HANDLE CreateEventW(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCWSTR)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kCreateEventWUrl;
+        a.notes="unnamed events only; security attributes and name must be null; process-scoped opaque runtime token"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="SetEvent";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL SetEvent(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
+        a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kSetEventUrl; a.notes="event handles created by this process only"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="ResetEvent";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL ResetEvent(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
+        a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kResetEventUrl; a.notes="event handles created by this process only"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="WaitForSingleObject";
+        a.convention=Convention::X64Microsoft; a.param_count=2; a.ret=ReturnKind::Uint32;
+        a.signature="DWORD WaitForSingleObject(HANDLE, DWORD)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kWaitForSingleObjectUrl;
+        a.notes="event handles only; supports WAIT_OBJECT_0, WAIT_TIMEOUT and WAIT_FAILED; blocks host execution thread"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CloseHandle";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL CloseHandle(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
+        a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kCloseHandleUrl;
+        a.notes="closes event handles created by this service only"; add(a);
+    }
+
     return d;
 }
 
