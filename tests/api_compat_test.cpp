@@ -477,6 +477,11 @@ TEST(GdkServiceTest, LifecycleRefCountPerProcess) {
 TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     ApiWorld w; auto* p=w.new_process("event-api.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor event_module;
+    event_module.module_name = "event-test.exe";
+    event_module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, event_module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     ApiContext c; c.process_id=pid.value(); c.arg_count=4;
     c.args[0]=0; c.args[1]=1; c.args[2]=0; c.args[3]=0;
