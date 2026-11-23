@@ -16,7 +16,7 @@ create_process   -> Created   (object registered, AddressSpace allocated;
 initialize_process -> Initializing (M1/M2 ModuleDescriptor + RuntimeConfig fed;
                                 failure rolls back: fail() + space release_all)
 start_process    -> Running   (Created start = typed InvalidTransition)
-suspend_process  -> Suspended (cooperative stop on owned threads)
+suspend_process  -> Suspended (resumable cooperative pause on owned threads)
 resume_process    -> Running
 terminate_process -> Terminated (EXACT cleanup ordering, below)
 ```
@@ -88,8 +88,14 @@ relocate, or execute anything (explicit exclusion).
   metadata exists on handles — see
   [handle-security.md](handle-security.md) — but no spawn-time copying).
 - `suspend_process` is cooperative: it does not freeze threads mid-host-
-  call; the state machine records Suspended immediately and threads
-  observe the stop at their safe points.
+  call. It requests a resumable gate on each live owned thread and records
+  exactly which threads it paused; `resume_process` releases only those
+  gates, preserving threads that were already manually suspended.
+- The execution owner can attach `RtThread::execution_control()` to an
+  `ExecutionRequest`; the deterministic backend then parks at instruction
+  boundaries. Guest synchronization waits also check the same gate between
+  bounded wait slices. This is cooperative safe-point parking, not
+  asynchronous preemption or a guest scheduler.
 
 ## Confirmed vs inferred
 
