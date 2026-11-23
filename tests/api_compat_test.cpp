@@ -185,8 +185,8 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     EXPECT_EQ(delayed->compat, ApiStatus::PartiallyImplemented);
     EXPECT_EQ(delayed->impl, ApiStatus::Unsupported);
     EXPECT_NE(delayed->notes.find("timer scheduling"), std::string::npos);
-    EXPECT_EQ(duplicate_queue->impl, ApiStatus::Unsupported);
-    EXPECT_NE(duplicate_queue->notes.find("reference-counted"), std::string::npos);
+    EXPECT_EQ(duplicate_queue->impl, ApiStatus::PartiallyImplemented);
+    EXPECT_NE(duplicate_queue->notes.find("same-process duplicate handles"), std::string::npos);
     const auto* close = reg.find("kernel32", "CloseHandle");
     ASSERT_NE(close, nullptr);
     EXPECT_NE(close->notes.find("guest mutex"), std::string::npos);
