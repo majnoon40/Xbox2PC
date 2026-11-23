@@ -361,8 +361,10 @@ TEST(HostBackendTest, RejectsIntermediateSymlinkComponents) {
     EXPECT_FALSE(backend.list(VfsPath::parse("/link").value()).ok());
     EXPECT_FALSE(backend.create_file(VfsPath::parse("/link/new.txt").value()).ok());
     EXPECT_FALSE(backend.delete_file(target).ok());
-    (void)pal::remove_host_tree(root);
-    (void)pal::remove_host_tree(outside);
+    (void)pal::remove_host_file(root + "/link");
+    (void)pal::remove_host_file(outside + "/secret.txt");
+    (void)pal::remove_host_directory(outside);
+    (void)pal::remove_host_directory(root);
 }
 
 
