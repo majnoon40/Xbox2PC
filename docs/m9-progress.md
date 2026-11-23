@@ -20,6 +20,10 @@ This file separates source changes from tests that have actually been run.
 - Section bounds/overlap checks, entry-point checks, and W+X warnings.
 - Synthetic-input tests for null/empty, truncated, valid AMD64, and I386 PE
   inputs.
+- A conservative linear instruction scan of file-backed executable sections,
+  with decoder-confirmed records, unsupported encodings, candidate embedded
+  data, uncertain tails, and FS/GS memory-segment reporting.
+- A static-analysis scope document that explicitly disclaims CFG recovery.
 - Scope documentation that distinguishes structural validation from runtime
   compatibility.
 
@@ -27,6 +31,8 @@ This file separates source changes from tests that have actually been run.
 
 - Complete PE semantic validation for imports, relocation blocks, TLS,
   exception metadata, and memory protections.
+- Improve static-analysis heuristics and broaden tests for candidate-data and
+  unsupported-instruction classification.
 - Conservative static instruction analysis with confirmed/candidate/data
   distinctions and explicit uncertainty.
 - `binary-compatibility.json` with the required compatibility statuses.
