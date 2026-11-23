@@ -717,6 +717,34 @@ public:
     std::string describe() const override { return "Win32: WaitForSingleObject (event, mutex, semaphore handles)"; }
 private: GameRuntimeService& svc_;
 };
+class WaitForMultipleObjectsImpl : public IApiImplementation {
+public:
+    explicit WaitForMultipleObjectsImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4 || ctx.args[0] == 0 || ctx.args[0] > 64 ||
+            ctx.args[3] > UINT32_MAX || ctx.pointer_arrays[1].size() != ctx.args[0]) {
+            out.return_value = 0xFFFFFFFFu;
+            out.note = "WaitForMultipleObjects requires 1-64 readable handles and a DWORD timeout";
+            return true;
+        }
+        if (ctx.args[2] != 0) {
+            out.return_value = 0xFFFFFFFFu;
+            out.note = "bWaitAll=TRUE is not implemented; wait-any is supported";
+            return true;
+        }
+        auto waited = svc_.wait_objects_any(ctx.process_id, ctx.thread_id,
+            ctx.pointer_arrays[1], static_cast<std::uint32_t>(ctx.args[3]));
+        out.return_value = waited.ok() ? waited.value() : 0xFFFFFFFFu;
+        if (!waited.ok()) out.note = waited.error_string();
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: WaitForMultipleObjects (wait-any subset; wait-all unsupported)";
+    }
+private:
+    GameRuntimeService& svc_;
+};
+
 class CloseEventHandleImpl : public IApiImplementation {
 public:
     explicit CloseEventHandleImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -803,7 +831,8 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r21 = api_reg_.register_implementation("kernel32", "VirtualAlloc", keep(std::make_shared<VirtualAllocImpl>(*this)), owner);
     auto r22 = api_reg_.register_implementation("kernel32", "VirtualFree", keep(std::make_shared<VirtualFreeImpl>(*this)), owner);
     auto r23 = api_reg_.register_implementation("kernel32", "VirtualProtect", keep(std::make_shared<VirtualProtectImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23}) {
+    auto r24 = api_reg_.register_implementation("kernel32", "WaitForMultipleObjects", keep(std::make_shared<WaitForMultipleObjectsImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
