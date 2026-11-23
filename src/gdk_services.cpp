@@ -274,6 +274,7 @@ public:
 
         // x64 MEMORY_BASIC_INFORMATION is 48 bytes. Free gaps are valid
         // MEM_FREE regions within this process's modeled guest address space.
+        std::uint64_t base_address = space.base;
         std::uint64_t allocation_base = 0;
         std::uint64_t region_size = 0;
         std::uint32_t allocation_protect = 0;  // not retained by M4
@@ -283,27 +284,32 @@ public:
 
         const VmRegion* containing = nullptr;
         std::uint64_t next_region = space_end;
+        // The snapshot is sorted by base address. Track the beginning of a
+        // free gap as well as its end: MEMORY_BASIC_INFORMATION describes
+        // the complete contiguous region, not merely the suffix after page.
         for (const auto& region : space.regions) {
+            const std::uint64_t region_end = region.xbox_va + region.size;
+            if (region_end < region.xbox_va || region_end > space_end) {
+                out.return_value = 0;
+                return true;
+            }
             if (region.xbox_va <= page) {
-                const std::uint64_t region_end = region.xbox_va + region.size;
-                if (region_end >= region.xbox_va && page < region_end) {
+                if (page < region_end) {
                     containing = &region;
                     break;
                 }
-            } else if (region.xbox_va < next_region) {
+                if (region_end > base_address) base_address = region_end;
+            } else {
                 next_region = region.xbox_va;
+                break;
             }
         }
 
         if (containing != nullptr) {
             const auto& region = *containing;
-            const std::uint64_t region_end = region.xbox_va + region.size;
-            if (region_end < region.xbox_va || region_end <= page) {
-                out.return_value = 0;
-                return true;
-            }
+            base_address = region.xbox_va;
             allocation_base = region.xbox_va;
-            region_size = region_end - page;
+            region_size = region.size;
             state = region.state == RegionState::Committed ? 0x1000u : 0x2000u;
             protect = region.protection == MemProtect::NoAccess ? 0x01u
                 : region.protection == MemProtect::ReadOnly ? 0x02u
@@ -312,11 +318,12 @@ public:
                 : 0x40u;
             type = 0x20000u; // MEM_PRIVATE
         } else {
-            if (next_region <= page) {
+            if (base_address > page || next_region <= page ||
+                next_region <= base_address) {
                 out.return_value = 0;
                 return true;
             }
-            region_size = next_region - page;
+            region_size = next_region - base_address;
         }
 
         auto p16 = [&](std::size_t o, std::uint16_t x) {
@@ -331,7 +338,7 @@ public:
             for (unsigned i = 0; i < 8; ++i)
                 out.out_bytes[o + i] = static_cast<std::uint8_t>(x >> (8 * i));
         };
-        p64(0, page);
+        p64(0, base_address);
         p64(8, allocation_base);
         p32(16, allocation_protect);
         p16(20, 0); // PartitionId

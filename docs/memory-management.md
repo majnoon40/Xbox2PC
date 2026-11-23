@@ -126,3 +126,9 @@ explicit allow_wx_pages policy is enabled. In particular, the combined
 reserve-and-commit form must not bypass the same protection gate used by the
 separate reserve/commit paths. Regression coverage verifies that a rejected
 commit leaves the existing reservation intact and uncommitted.
+
+
+VirtualQuery returns the full contiguous tracked region boundaries for an
+address inside a multi-page allocation. Its BaseAddress and RegionSize are not
+truncated to the queried page; free-gap queries similarly return the complete
+gap bounded by the previous and next tracked regions.

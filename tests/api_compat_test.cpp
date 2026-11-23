@@ -797,6 +797,13 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     auto rd64=[&](const ApiCallResult& r,std::size_t o){std::uint64_t v=0;for(unsigned i=0;i<8;++i)v|=std::uint64_t(r.out_bytes[o+i])<<(8*i);return v;};
     EXPECT_EQ(rd64(result,0),base.value()); EXPECT_EQ(rd64(result,8),base.value()); EXPECT_EQ(rd64(result,24),0x2000u);
     EXPECT_EQ(rd32(result,32),0x1000u); EXPECT_EQ(rd32(result,36),0x04u);
+    // Querying the second page still returns the full contiguous region,
+    // rather than a page-relative suffix.
+    ctx.args[0]=base.value()+0x1123;
+    const auto second_page=w.reg.dispatch("kernel32","VirtualQuery",ctx);
+    ASSERT_TRUE(second_page.ok); EXPECT_EQ(second_page.return_value,48u);
+    EXPECT_EQ(rd64(second_page,0),base.value());
+    EXPECT_EQ(rd64(second_page,24),0x2000u);
     // The gap immediately following the allocation is a MEM_FREE region.
     ctx.args[0]=base.value()+0x2123;
     const auto free_region=w.reg.dispatch("kernel32","VirtualQuery",ctx);
