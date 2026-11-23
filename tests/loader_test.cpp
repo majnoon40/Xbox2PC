@@ -13,6 +13,7 @@
 //   12.6 Integration    — LoaderIntegrationTest (15-step path + concurrency +
 //                         termination cleanup + VFS-sourced image)
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -97,6 +98,56 @@ TEST(LoaderValidationTest, ValidImagePassesEveryCheck) {
     EXPECT_EQ(rep.preferred_base, 0x140000000ull);
     EXPECT_TRUE(rep.needs_relocation);
     EXPECT_TRUE(rep.has_tls_directory);
+}
+
+TEST(LoaderValidationTest, ZeroSectionAlignmentIsRejectedWithoutDivisionByZero) {
+    PeBuildSpec spec;
+    const auto image = PeBuilder(spec).build();
+    std::vector<std::uint8_t> bad(image);
+    // Optional header SectionAlignment at PE32+ optional-header offset +32.
+    const std::uint64_t section_alignment = 0x98 + 32;
+    std::fill(bad.begin() + section_alignment,
+              bad.begin() + section_alignment + 4, 0);
+    Diagnostics diags;
+    const auto img = parse_image(bad, "zero-align.exe", diags);
+    const auto report = validate_image(img, bad.data(), bad.size());
+    EXPECT_FALSE(report.valid);
+    EXPECT_TRUE(has_issue(report, vcode::kBadAlignment));
+}
+
+TEST(LoaderValidationTest, SecurityDirectoryUsesFileOffsetNotRva) {
+    PeBuildSpec spec;
+    auto image = PeBuilder(spec).build();
+    image.resize(0x5200, 0);
+    // IMAGE_DIRECTORY_ENTRY_SECURITY at optional header +112 + 4*8.
+    const std::uint64_t security = 0x98 + 112 + 4 * 8;
+    const std::uint32_t file_offset = 0x5000;
+    const std::uint32_t cert_size = 0x100;
+    for (int i = 0; i < 4; ++i) {
+        image[security + i] = static_cast<std::uint8_t>(file_offset >> (8 * i));
+        image[security + 4 + i] = static_cast<std::uint8_t>(cert_size >> (8 * i));
+    }
+    Diagnostics diags;
+    const auto img = parse_image(image, "signed.exe", diags);
+    const auto report = validate_image(img, image.data(), image.size());
+    EXPECT_FALSE(has_issue(report, vcode::kDirectoryRange));
+}
+
+TEST(LoaderValidationTest, SectionsOverlappingHeadersOrEachOtherAreRejected) {
+    PeBuildSpec spec;
+    const auto image = PeBuilder(spec).build();
+    // Second section header begins at 0x1B0; VirtualAddress is +12.
+    std::vector<std::uint8_t> overlap(image);
+    const std::uint64_t data_va = 0x1B0 + 12;
+    overlap[data_va] = 0x00;
+    overlap[data_va + 1] = 0x10;
+    overlap[data_va + 2] = 0x00;
+    overlap[data_va + 3] = 0x00; // same RVA as .text
+    Diagnostics diags;
+    const auto img = parse_image(overlap, "overlap.exe", diags);
+    const auto report = validate_image(img, overlap.data(), overlap.size());
+    EXPECT_FALSE(report.valid);
+    EXPECT_TRUE(has_issue(report, vcode::kSectionOverlap));
 }
 
 TEST(LoaderValidationTest, NonPeBytesRejected) {
@@ -689,6 +740,45 @@ TEST(LoaderTlsTest, DecodeDirectoryAndCountCallbacksNeverRun) {
     EXPECT_EQ(t.callback_count, 3u);  // counted, NEVER executed
     EXPECT_TRUE(ld.has_tls);
     EXPECT_EQ(ld.tls_callbacks, 3u);
+}
+
+TEST(LoaderTlsTest, AcceptsExactPe32PlusDirectorySize) {
+    PeBuildSpec spec;
+    spec.tls.template_data = {0xAA, 0xBB};
+    const auto original = PeBuilder(spec).build();
+    std::vector<std::uint8_t> image(original);
+    // PE32+ TLS data-directory size is the 40-byte IMAGE_TLS_DIRECTORY64.
+    const std::uint64_t tls_size = 0x98 + 112 + 9 * 8 + 4;
+    image[tls_size] = 40;
+    image[tls_size + 1] = 0;
+    image[tls_size + 2] = 0;
+    image[tls_size + 3] = 0;
+    Diagnostics diags;
+    const auto img = parse_image(image, "tls40.exe", diags);
+    LoadDiagnostics ld;
+    auto tls = decode_tls(img, image.data(), image.size(), ld);
+    ASSERT_TRUE(tls.ok()) << tls.error_string();
+    ASSERT_TRUE(tls.value().has_value());
+    EXPECT_EQ(tls.value()->template_size, 2u);
+}
+
+TEST(LoaderTlsTest, RejectsTlsPointersBelowImageBase) {
+    PeBuildSpec spec;
+    spec.tls.template_data = {0xAA, 0xBB};
+    const auto original = PeBuilder(spec).build();
+    std::vector<std::uint8_t> image(original);
+    Diagnostics diags;
+    const auto before = parse_image(image, "tls-bad.exe", diags);
+    const auto tls_rva = before.directories[xbox2pc::pe::kDirTls].rva;
+    const auto tls_off = before.rva_to_offset(tls_rva);
+    ASSERT_TRUE(tls_off.has_value());
+    // StartAddressOfRawData is the first VA in IMAGE_TLS_DIRECTORY64.
+    const std::uint64_t start = *tls_off;
+    for (int i = 0; i < 8; ++i) image[start + i] = 0;
+    const auto img = parse_image(image, "tls-bad2.exe", diags);
+    LoadDiagnostics ld;
+    auto tls = decode_tls(img, image.data(), image.size(), ld);
+    EXPECT_FALSE(tls.ok());
 }
 
 TEST(LoaderTlsTest, AbsentDirectoryIsNullopt) {

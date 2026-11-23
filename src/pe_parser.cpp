@@ -73,8 +73,10 @@ struct Reader {
     std::string read_cstr(std::uint64_t off, std::uint64_t max_len) const {
         std::string out;
         out.reserve(16);
-        for (std::uint64_t i = 0; i < max_len; ++i) {
-            if (off + i >= size) break;  // truncated string: keep what we have
+        if (off >= size) return out;
+        const std::uint64_t available = size - off;
+        const std::uint64_t limit = max_len < available ? max_len : available;
+        for (std::uint64_t i = 0; i < limit; ++i) {
             const std::uint8_t c = base[off + i];
             if (c == 0) break;
             out.push_back(static_cast<char>(c));
@@ -162,6 +164,9 @@ std::string PeImage::subsystem_name() const { return subsystem_to_name(opt.subsy
 
 PeImage parse(const std::uint8_t* data, std::size_t size, std::string source_name,
               diag::Diagnostics& diags) {
+    if (data == nullptr) {
+        throw ParseError("null input buffer", 0);
+    }
     if (size < kDosHeaderSize) {
         throw ParseError("file too small for a DOS header (" + std::to_string(size) + " bytes)", 0);
     }

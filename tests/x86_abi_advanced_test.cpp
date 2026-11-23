@@ -161,19 +161,66 @@ protected:
 
 // ── mixed integer/FP register assignment ─────────────────────────────────
 
+TEST_F(AbiAdvancedTest, F32UsesSinglePrecisionBitsAndPositionalSlots) {
+    CallSpec spec;
+    spec.ret = CallSpec::ReturnKind::F32;
+    spec.args = {{ArgKind::F32}, {}, {ArgKind::F32}, {}, {ArgKind::F32}};
+    GuestStack gs{mem_.get()};
+    CpuState c;
+    c.reset();
+    c.set_reg(Gpr::Sp, stack_top_);
+    std::vector<ArgValue> vals(5);
+    vals[0].kind = ArgKind::F32; vals[0].f64_v = 1.5;
+    vals[1].int_v = 0x1111;
+    vals[2].kind = ArgKind::F32; vals[2].f64_v = -2.25;
+    vals[3].int_v = 0x3333;
+    vals[4].kind = ArgKind::F32; vals[4].f64_v = 4.5;
+    ASSERT_TRUE(rt::abi::prepare_call(c, 0x30001000, spec, vals,
+                                      GuestStack::writer(&gs)).ok());
+    std::uint32_t bits0 = 0, bits2 = 0;
+    std::memcpy(&bits0, c.xmm[0].data(), sizeof(bits0));
+    std::memcpy(&bits2, c.xmm[2].data(), sizeof(bits2));
+    float f0 = 0, f2 = 0;
+    std::memcpy(&f0, &bits0, sizeof(f0));
+    std::memcpy(&f2, &bits2, sizeof(f2));
+    EXPECT_FLOAT_EQ(f0, 1.5f);
+    EXPECT_FLOAT_EQ(f2, -2.25f);
+    EXPECT_EQ(c.reg(Gpr::Rdx), 0x1111u);
+    EXPECT_EQ(c.reg(Gpr::R9), 0x3333u);
+    auto stack_slot = mem_->read_u64(c.reg(Gpr::Sp) + 40);
+    ASSERT_TRUE(stack_slot.ok());
+    const std::uint32_t stack_bits = static_cast<std::uint32_t>(stack_slot.value());
+    float f4 = 0;
+    std::memcpy(&f4, &stack_bits, sizeof(f4));
+    EXPECT_FLOAT_EQ(f4, 4.5f);
+    auto got = rt::abi::extract_args(c, spec, GuestStack::reader(&gs));
+    ASSERT_TRUE(got.ok());
+    EXPECT_DOUBLE_EQ(got.value()[0].f64_v, 1.5);
+    EXPECT_DOUBLE_EQ(got.value()[2].f64_v, -2.25);
+    EXPECT_DOUBLE_EQ(got.value()[4].f64_v, 4.5);
+    rt::abi::ReturnValue rv;
+    rv.kind = CallSpec::ReturnKind::F32;
+    rv.f64_v = 6.25;
+    ASSERT_TRUE(rt::abi::write_return(c, spec, rv).ok());
+    std::uint32_t ret_bits = 0;
+    std::memcpy(&ret_bits, c.xmm[0].data(), sizeof(ret_bits));
+    float ret = 0;
+    std::memcpy(&ret, &ret_bits, sizeof(ret));
+    EXPECT_FLOAT_EQ(ret, 6.25f);
+}
+
 TEST_F(AbiAdvancedTest, MixedRegisterClassesByPosition) {
-    // f(int, double, int, double, int): the GP class fills by non-FP
-    // order (args 0,2,4 -> RCX/RDX/R8); the FP class uses XMM slots BY
-    // POSITION (args 1,3 -> XMM1/XMM3) [MS-X64CC]. Nothing spills.
+    // The first four argument positions use RCX, XMM1, R8, XMM3.
+    // Position five always spills to the stack.
     CallSpec spec;
     spec.ret = CallSpec::ReturnKind::Int;
     spec.args = {{}, {ArgKind::F64}, {}, {ArgKind::F64}, {}};
     auto lay = rt::abi::compute_layout(spec);
     ASSERT_TRUE(lay.ok());
-    EXPECT_EQ(lay.value().gp_reg_args, 3u);   // int args 0,2,4
-    EXPECT_EQ(lay.value().xmm_reg_args, 2u);  // positions 1,3
-    EXPECT_EQ(lay.value().stack_args, 0u);    // only 3 GP + 2 XMM used
-    EXPECT_EQ(lay.value().total_stack_bytes, 32u);   // shadow only
+    EXPECT_EQ(lay.value().gp_reg_args, 2u);
+    EXPECT_EQ(lay.value().xmm_reg_args, 2u);
+    EXPECT_EQ(lay.value().stack_args, 1u);
+    EXPECT_EQ(lay.value().total_stack_bytes, 48u);
 
     GuestStack gs{mem_.get()};
     CpuState c;
@@ -188,10 +235,10 @@ TEST_F(AbiAdvancedTest, MixedRegisterClassesByPosition) {
     auto prep = rt::abi::prepare_call(c, 0x30001000, spec, vals,
                                       GuestStack::writer(&gs));
     ASSERT_TRUE(prep.ok()) << prep.error_string();
-    // GP class by non-FP order: arg0 RCX, arg2 RDX, arg4 R8.
     EXPECT_EQ(c.reg(Gpr::Rcx), 11u);
-    EXPECT_EQ(c.reg(Gpr::Rdx), 22u);
-    EXPECT_EQ(c.reg(Gpr::R8), 33u);
+    EXPECT_EQ(c.reg(Gpr::Rdx), 0u);
+    EXPECT_EQ(c.reg(Gpr::R8), 22u);
+    EXPECT_EQ(mem_->read_u64(c.reg(Gpr::Sp) + 40).value(), 33u);
     // XMM class by position: pos1 -> XMM1, pos3 -> XMM3.
     auto xmm_bits = [&c](int i) {
         std::uint64_t b = 0;
@@ -453,10 +500,8 @@ TEST_F(AbiAdvancedTest, NestedGuestCallThroughEngine) {
     auto res = ctx.invoke(req.value(), engine, stop);
     ASSERT_TRUE(res.ok());
     EXPECT_EQ(res.value().outcome, exec::Outcome::Returned);
-    // NOTE: the deep-call chain exercises CALL/RET nesting; the observed
-    // result is 8 (main's 1 + 4 and one helper add); the second helper's
-    // contribution needs a follow-up (tracked in docs/known-limitations).
-    EXPECT_EQ(res.value().return_value, 8u);
+    // helper2 returns 5; helper1 adds 3; main adds 4.
+    EXPECT_EQ(res.value().return_value, 12u);
     (void)ctx.destroy();
     (void)loader.unload_image(*pm_, core_.objects(), ph_, h.value());
     (void)pm_->terminate_process(ph_, 0);

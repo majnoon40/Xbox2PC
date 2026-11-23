@@ -103,23 +103,19 @@ Result<CallLayout> compute_layout(const CallSpec& spec) {
     if (!valid.ok()) return Result<CallLayout>(valid.errc(), valid.context());
     CallLayout out;
     std::uint32_t gp = 0, xmm = 0, stack = 0;
-    for (const auto& a : spec.args) {
+    for (std::size_t i = 0; i < spec.args.size(); ++i) {
+        const auto& a = spec.args[i];
         const bool fp = a.kind == ArgKind::F32 || a.kind == ArgKind::F64;
-        if (fp) {
-            // FP args occupy XMM slots BY POSITION [MS-X64CC]. The slot
-            // index is the ARGUMENT position (not the count of FP args).
-            const std::size_t pos = gp + xmm + stack;   // argument index
-            if (pos < kMaxRegArgs) {
-                ++xmm;
-            } else {
-                ++stack;   // fifth+ FP args spill to the stack
-            }
+        // The first FOUR argument positions use the corresponding register
+        // slot. The argument's type selects GP[i] or XMM[i]; register
+        // classes do not have independent counters. Position five onward
+        // always spills to the stack, regardless of type.
+        if (i >= kMaxRegArgs) {
+            ++stack;
+        } else if (fp) {
+            ++xmm;
         } else {
-            if (gp < kMaxRegArgs) {
-                ++gp;
-            } else {
-                ++stack;
-            }
+            ++gp;
         }
     }
     out.gp_reg_args = gp;
@@ -153,7 +149,7 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
     // frame size. On return, write_return() restores RSP +8 past the
     // return address slot.
     const std::uint64_t rsp = cpu.reg(Gpr::Sp);
-    if ((rsp % 8) != 0 || rsp < 4096) {
+    if ((rsp % kStackAlignment) != 0 || rsp < 4096) {
         return Result<void>(RuntimeErrc::InvalidArgument,
                             "caller RSP not usable (alignment/floor)");
     }
@@ -177,7 +173,7 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
                             "callee RSP invalid after frame push");
     }
     const std::uint64_t stack_args_base = callee_rsp + 8 + kShadowSpaceBytes;
-    std::uint32_t gp_used = 0, stack_used = 0;
+    std::uint32_t stack_used = 0;
     // Varargs [MS-X64CC]: FP values duplicated into the GP register at
     // the same position.
     std::uint64_t vararg_gp_shadow[kMaxRegArgs] = {0};
@@ -188,19 +184,24 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
         const auto& v = values[i];
         const bool fp = a.kind == ArgKind::F32 || a.kind == ArgKind::F64;
         if (fp) {
-            const std::size_t pos = i;   // position-indexed XMM slot
+            const std::size_t pos = i;
+            std::uint64_t bits = 0;
+            if (a.kind == ArgKind::F32) {
+                const float f = static_cast<float>(v.f64_v);
+                std::uint32_t fbits = 0;
+                std::memcpy(&fbits, &f, sizeof(fbits));
+                bits = fbits;
+            } else {
+                std::memcpy(&bits, &v.f64_v, sizeof(bits));
+            }
             if (pos < kMaxRegArgs) {
-                // 64-bit representation of the double into the XMM slot.
-                std::uint64_t bits = 0;
-                std::memcpy(&bits, &v.f64_v, 8);
-                cpu.xmm[pos][0] = static_cast<std::uint8_t>(bits);
-                cpu.xmm[pos][1] = static_cast<std::uint8_t>(bits >> 8);
-                cpu.xmm[pos][2] = static_cast<std::uint8_t>(bits >> 16);
-                cpu.xmm[pos][3] = static_cast<std::uint8_t>(bits >> 24);
-                cpu.xmm[pos][4] = static_cast<std::uint8_t>(bits >> 32);
-                cpu.xmm[pos][5] = static_cast<std::uint8_t>(bits >> 40);
-                cpu.xmm[pos][6] = static_cast<std::uint8_t>(bits >> 48);
-                cpu.xmm[pos][7] = static_cast<std::uint8_t>(bits >> 56);
+                // XMM argument register is selected by the overall argument
+                // position, not by the count of preceding FP arguments.
+                cpu.xmm[pos].fill(0);
+                const std::size_t n = a.kind == ArgKind::F32 ? 4u : 8u;
+                for (std::size_t b = 0; b < n; ++b) {
+                    cpu.xmm[pos][b] = static_cast<std::uint8_t>(bits >> (8u * b));
+                }
                 if (spec.varargs) {
                     vararg_gp_shadow[pos] = bits;
                     vararg_gp_used[pos] = true;
@@ -208,21 +209,17 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
             } else {
                 const std::uint64_t slot =
                     stack_args_base + (stack_used++) * 8;
-                std::uint64_t bits = 0;
-                std::memcpy(&bits, &v.f64_v, 8);
                 auto w = writer.write(writer.ctx, slot, &bits, 8);
                 if (!w.ok()) return w;
             }
+        } else if (i < kMaxRegArgs) {
+            // GP register index is also the overall argument position.
+            cpu.set_reg(kGpArgRegs[i], v.int_v);
         } else {
-            if (gp_used < kMaxRegArgs) {
-                cpu.set_reg(kGpArgRegs[gp_used], v.int_v);
-                ++gp_used;
-            } else {
-                const std::uint64_t slot =
-                    stack_args_base + (stack_used++) * 8;
-                auto w = writer.write(writer.ctx, slot, &v.int_v, 8);
-                if (!w.ok()) return w;
-            }
+            const std::uint64_t slot =
+                stack_args_base + (stack_used++) * 8;
+            auto w = writer.write(writer.ctx, slot, &v.int_v, 8);
+            if (!w.ok()) return w;
         }
     }
     // Varargs duplication AFTER the loop so position slots are correct.
@@ -258,7 +255,7 @@ Result<std::vector<ArgValue>> extract_args(const CpuState& cpu,
     }
     std::vector<ArgValue> out;
     out.reserve(spec.args.size());
-    std::uint32_t gp_used = 0, stack_used = 0;
+    std::uint32_t stack_used = 0;
     // At a callee entry, [RSP] = return address; shadow at RSP+8..+40;
     // stack args at RSP+8+32... [MS-X64STACK].
     const std::uint64_t rsp = cpu.reg(Gpr::Sp);
@@ -269,13 +266,12 @@ Result<std::vector<ArgValue>> extract_args(const CpuState& cpu,
         v.kind = a.kind;
         const bool fp = a.kind == ArgKind::F32 || a.kind == ArgKind::F64;
         if (fp) {
-            const std::size_t pos = i;
-            if (pos < kMaxRegArgs) {
-                std::uint64_t bits = 0;
-                for (int b = 7; b >= 0; --b) {
-                    bits = (bits << 8) | cpu.xmm[pos][static_cast<std::size_t>(b)];
+            std::uint64_t bits = 0;
+            if (i < kMaxRegArgs) {
+                const std::size_t n = a.kind == ArgKind::F32 ? 4u : 8u;
+                for (std::size_t b = 0; b < n; ++b) {
+                    bits |= static_cast<std::uint64_t>(cpu.xmm[i][b]) << (8u * b);
                 }
-                std::memcpy(&v.f64_v, &bits, 8);
             } else {
                 auto slot = reader.read64(reader.ctx,
                                           stack_args_base + (stack_used++) * 8);
@@ -284,15 +280,21 @@ Result<std::vector<ArgValue>> extract_args(const CpuState& cpu,
                         slot.errc(), "stack arg " + std::to_string(i) +
                                          ": " + slot.error_string());
                 }
-                std::memcpy(&v.f64_v, &slot.value(), 8);
+                bits = slot.value();
+            }
+            if (a.kind == ArgKind::F32) {
+                const std::uint32_t fbits = static_cast<std::uint32_t>(bits);
+                float f = 0.0f;
+                std::memcpy(&f, &fbits, sizeof(f));
+                v.f64_v = static_cast<double>(f);
+            } else {
+                std::memcpy(&v.f64_v, &bits, sizeof(bits));
             }
             out.push_back(v);
             continue;
         }
-        if (gp_used < kMaxRegArgs) {
-            v.int_v = cpu.reg(kGpArgRegs[gp_used]);
-            if (a.kind == ArgKind::Ptr) v.ptr_va = v.int_v;
-            ++gp_used;
+        if (i < kMaxRegArgs) {
+            v.int_v = cpu.reg(kGpArgRegs[i]);
         } else {
             auto slot = reader.read64(reader.ctx,
                                        stack_args_base + (stack_used++) * 8);
@@ -302,8 +304,8 @@ Result<std::vector<ArgValue>> extract_args(const CpuState& cpu,
                                      slot.error_string());
             }
             v.int_v = slot.value();
-            if (a.kind == ArgKind::Ptr) v.ptr_va = v.int_v;
         }
+        if (a.kind == ArgKind::Ptr) v.ptr_va = v.int_v;
         out.push_back(v);
     }
     return Result<std::vector<ArgValue>>(out);
@@ -311,6 +313,17 @@ Result<std::vector<ArgValue>> extract_args(const CpuState& cpu,
 
 Result<void> write_return(CpuState& cpu, const CallSpec& spec,
                           const ReturnValue& value) {
+    // Validate the complete operation before changing any architectural
+    // state. A rejected return must not leave RAX/XMM0 partially updated.
+    if (value.kind != spec.ret) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "return kind mismatch with the call spec");
+    }
+    const std::uint64_t rsp = cpu.reg(Gpr::Sp);
+    if (rsp == 0 || rsp >= ((1ull << 63) - 8)) {
+        return Result<void>(RuntimeErrc::InvalidArgument, "RSP overflow on return");
+    }
+
     // RAX for <= 64-bit scalars, XMM0 for FP [MS-X64CC].
     switch (value.kind) {
         case CallSpec::ReturnKind::Void:
@@ -318,13 +331,22 @@ Result<void> write_return(CpuState& cpu, const CallSpec& spec,
         case CallSpec::ReturnKind::Int:
             cpu.set_reg(Gpr::Rax, value.int_v);
             break;
-        case CallSpec::ReturnKind::F32:
+        case CallSpec::ReturnKind::F32: {
+            const float f = static_cast<float>(value.f64_v);
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &f, sizeof(bits));
+            cpu.xmm[0].fill(0);
+            for (std::size_t b = 0; b < sizeof(bits); ++b) {
+                cpu.xmm[0][b] = static_cast<std::uint8_t>(bits >> (8u * b));
+            }
+            break;
+        }
         case CallSpec::ReturnKind::F64: {
             std::uint64_t bits = 0;
-            std::memcpy(&bits, &value.f64_v, 8);
-            for (int b = 0; b < 8; ++b) {
-                cpu.xmm[0][static_cast<std::size_t>(b)] =
-                    static_cast<std::uint8_t>(bits >> (8 * b));
+            std::memcpy(&bits, &value.f64_v, sizeof(bits));
+            cpu.xmm[0].fill(0);
+            for (std::size_t b = 0; b < sizeof(bits); ++b) {
+                cpu.xmm[0][b] = static_cast<std::uint8_t>(bits >> (8u * b));
             }
             break;
         }
@@ -333,22 +355,8 @@ Result<void> write_return(CpuState& cpu, const CallSpec& spec,
             cpu.set_reg(Gpr::Rax, value.int_v);
             break;
     }
-    if (value.kind != spec.ret) {
-        // A Void spec must not carry a value; any other mismatch is a
-        // marshalling error. (write_return performs its register writes
-        // FIRST so the state stays consistent; the typed error stands.)
-        return Result<void>(RuntimeErrc::InvalidArgument,
-                            "return kind mismatch with the call spec");
-    }
-    // Pop the frame: RSP back to (caller RSP) = callee RSP + frame + 8.
-    // The bridge passes the caller RSP through prepare_call's recorded
-    // layout; here we accept the simple contract: RSP += 8 (return
-    // address popped) and the CALLER restores the frame remainder
-    // (documented: the caller owns its stack frame [MS-X64STACK]).
-    const std::uint64_t rsp = cpu.reg(Gpr::Sp);
-    if (rsp == 0 || rsp + 8 > (1ull << 63)) {
-        return Result<void>(RuntimeErrc::InvalidArgument, "RSP overflow on return");
-    }
+    // Pop the return address. The caller restores the remainder of its
+    // frame (documented: the caller owns its stack frame [MS-X64STACK]).
     cpu.set_reg(Gpr::Sp, rsp + 8);
     return Result<void>::ok_result();
 }

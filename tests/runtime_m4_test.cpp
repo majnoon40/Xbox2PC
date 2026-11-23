@@ -189,6 +189,39 @@ TEST(MemoryTest, LimitEnforcement) {
     EXPECT_EQ(over2.errc(), RuntimeErrc::OutOfResources);
 }
 
+TEST(MemoryTest, RejectsAddressAndSizeArithmeticOverflow) {
+    AddressSpace space(16 * 4096, 0x10000000, "overflow");
+    auto wrapped_va = space.reserve_region(~0ull - 4095, 4096, "wrapped");
+    EXPECT_FALSE(wrapped_va.ok());
+    auto wrapped_size = space.reserve_region(0x10000000, ~0ull, "huge");
+    EXPECT_FALSE(wrapped_size.ok());
+    auto huge_auto = space.reserve_region_auto(~0ull, "huge-auto");
+    EXPECT_FALSE(huge_auto.ok());
+    AddressSpace invalid_bounds(4096, ~0ull - 2047, "bad-bounds");
+    auto invalid_auto = invalid_bounds.reserve_region_auto(4096, "bad");
+    EXPECT_FALSE(invalid_auto.ok());
+}
+
+TEST(MemoryTest, ResizeCannotBypassReservationOrCommitLimits) {
+    AddressSpace space(16 * 4096, 0x10000000, "resize-limit");
+    const auto page = space.page_size();
+    MemoryLimits lim;
+    lim.max_reserved_bytes = 2 * page;
+    space.set_limits(lim);
+    ASSERT_TRUE(space.reserve_region(0x10000000, page, "r").ok());
+    auto reserved_grow = space.resize_region(0x10000000, 3 * page);
+    EXPECT_FALSE(reserved_grow.ok());
+    EXPECT_EQ(reserved_grow.errc(), RuntimeErrc::OutOfResources);
+
+    ASSERT_TRUE(space.commit_region(0x10000000).ok());
+    MemoryLimits committed_lim;
+    committed_lim.max_committed_bytes = page;
+    space.set_limits(committed_lim);
+    auto committed_grow = space.resize_region(0x10000000, 2 * page);
+    EXPECT_FALSE(committed_grow.ok());
+    EXPECT_EQ(committed_grow.errc(), RuntimeErrc::OutOfResources);
+}
+
 TEST(MemoryTest, AddressSpaceIsolation) {
     AddressSpace a(64 * 4096, 0x10000000, "a");
     AddressSpace b(64 * 4096, 0x10000000, "b");
@@ -274,6 +307,10 @@ TEST(AllocatorTest, AlignmentAndLimitFailures) {
     auto too_big = alloc.allocate(8192, 16, "y");  // > capacity
     ASSERT_FALSE(too_big.ok());
     EXPECT_EQ(too_big.errc(), RuntimeErrc::OutOfResources);
+    auto overflow_size = alloc.allocate(~0ull, 16, "overflow");
+    EXPECT_FALSE(overflow_size.ok());
+    MemoryAllocator no_backing(nullptr, 4096);
+    EXPECT_FALSE(no_backing.allocate(8, 8, "null").ok());
 
     // Byte limit.
     MemoryAllocator limited(backing.data(), backing.size(), /*max=*/100);

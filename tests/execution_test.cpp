@@ -408,6 +408,8 @@ TEST(AbiTest, InvalidLayoutsRejected) {
     rt::abi::CallSpec void_spec;
     void_spec.ret = rt::abi::CallSpec::ReturnKind::Void;
     EXPECT_FALSE(rt::abi::write_return(c2, void_spec, mism).ok());
+    EXPECT_EQ(c2.reg(cpu::Gpr::Sp), 0x20040000u);
+    EXPECT_EQ(c2.reg(cpu::Gpr::Rax), 0u);
 }
 
 // ── guest memory ─────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@
 #include "xbox2pc/process_management.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <utility>
 
 namespace xbox2pc::rt {
@@ -22,6 +23,11 @@ ManagedProcess::~ManagedProcess() = default;
 
 Result<void> ManagedProcess::add_module_descriptor(const ModuleDescriptor& mod) {
     std::lock_guard lock(detail_lock_);
+    const ProcessState cur = state();
+    if (cur == ProcessState::Terminating || cur == ProcessState::Terminated ||
+        cur == ProcessState::Failed) {
+        return Result<void>(RuntimeErrc::ProcessTerminated, "process is terminating");
+    }
     modules_.push_back(mod);
     return Result<void>::ok_result();
 }
@@ -31,8 +37,23 @@ std::vector<ModuleDescriptor> ManagedProcess::module_descriptors() const {
     return modules_;
 }
 
+Result<void> ManagedProcess::begin_termination() {
+    std::lock_guard lock(detail_lock_);
+    return RtProcess::begin_termination();
+}
+
+Result<void> ManagedProcess::finish_termination(std::uint64_t exit_code) {
+    std::lock_guard lock(detail_lock_);
+    return RtProcess::finish_termination(exit_code);
+}
+
 Result<void> ManagedProcess::attach_thread(std::uint64_t thread_obj_id) {
     std::lock_guard lock(detail_lock_);
+    const ProcessState cur = state();
+    if (cur == ProcessState::Terminating || cur == ProcessState::Terminated ||
+        cur == ProcessState::Failed) {
+        return Result<void>(RuntimeErrc::ProcessTerminated, "process is terminating");
+    }
     for (std::uint64_t t : threads_) {
         if (t == thread_obj_id) {
             return Result<void>(RuntimeErrc::AlreadyExists, "thread already attached");
@@ -81,19 +102,48 @@ void ManagedProcess::set_memory_limits(const MemoryLimits& limits) {
 ProcessManager::ProcessManager(ObjectManager& objects) : objects_(objects) {}
 
 ProcessManager::~ProcessManager() {
-    // Deterministic manager teardown: terminate every live process using
-    // the exact ordering (never silently leak). Typed errors recorded.
-    std::vector<std::uint64_t> pids;
+    // Snapshot ids under the map lock; never index pid_to_object_id_ after
+    // releasing it. Drain every host thread before releasing its address
+    // space, because a cooperative thread may still be executing guest code.
+    std::vector<std::uint64_t> object_ids;
     {
         std::lock_guard lock(lock_);
-        for (const auto& [pid, id] : pid_to_object_id_) pids.push_back(pid);
+        object_ids.reserve(pid_to_object_id_.size());
+        for (const auto& [pid, id] : pid_to_object_id_) object_ids.push_back(id);
     }
-    for (std::uint64_t pid : pids) {
-        // Resolve by object id directly (handles may already be closed).
-        auto found = objects_.lookup_id(pid_to_object_id_[pid]);
-        if (found.ok() && found.value().get() != nullptr) {
-            (void)found.value().get()->as<ManagedProcess>()->terminate(0);
+    for (const std::uint64_t id : object_ids) {
+        auto found = objects_.lookup_id(id);
+        if (!found.ok() || found.value().get() == nullptr) continue;
+        auto* proc = found.value().get()->as<ManagedProcess>();
+        if (proc == nullptr) continue;
+        const auto tids = proc->thread_ids();
+        for (const auto tid : tids) {
+            auto t = objects_.lookup_id(tid);
+            if (t.ok() && t.value().get() != nullptr) {
+                if (auto* thread = t.value().get()->as<RtThread>()) {
+                    thread->request_stop();
+                }
+            }
         }
+        for (const auto tid : tids) {
+            auto t = objects_.lookup_id(tid);
+            if (t.ok() && t.value().get() != nullptr) {
+                if (auto* thread = t.value().get()->as<RtThread>()) {
+                    auto joined = thread->join_ns(pal::kInfiniteTimeout);
+                    if (!joined.ok() &&
+                        joined.errc() != RuntimeErrc::InvalidState) {
+                        // ProcessManager destruction from one of its own
+                        // managed threads is unsupported: continuing would
+                        // free memory still reachable by that host thread.
+                        std::terminate();
+                    }
+                }
+            }
+        }
+        (void)proc->handle_table().close_all();
+        (void)proc->address_space().release_all();
+        for (const auto tid : tids) (void)proc->detach_thread(tid);
+        (void)proc->terminate(0);
     }
 }
 
@@ -218,40 +268,45 @@ Result<void> ProcessManager::terminate_process(Handle process,
     if (proc == nullptr) {
         return Result<void>(RuntimeErrc::InvalidHandle, "process not found");
     }
-    // EXACT cleanup ordering (documented in the header + docs):
-    //  a. request_stop on every owned thread (cooperative; never kill)
-    //  b. bounded drain: join threads that already exited; poll others
-    //     briefly (host threads are never forcibly stopped — M4 rule)
-    //  c. close the process handle table (handles die together)
-    //  d. release the address space (memory gone)
-    //  e. unregister threads from the process list; thread OBJECTS stay
-    //     in the object manager (callers own their handles)
-    //  f. accounting updates via state; terminate() records exit code
-    for (std::uint64_t tid : proc->thread_ids()) {
+    // Stop all threads first, then join them before touching process-owned
+    // handles or guest memory. A timeout leaves the process resources intact;
+    // callers can retry termination after the cooperative thread exits.
+    auto begun = proc->begin_termination();
+    if (!begun.ok()) return begun;
+    if (proc->state() == ProcessState::Terminated) return Result<void>::ok_result();
+    const auto tids = proc->thread_ids();
+    for (const std::uint64_t tid : tids) {
         auto t = objects_.lookup_id(tid);
         if (t.ok() && t.value().get() != nullptr) {
             if (auto* thread = t.value().get()->as<RtThread>()) {
                 thread->request_stop();
-                // Bounded drain: completed threads join instantly; running
-                // ones get up to 50 ms to observe the stop before we move
-                // on (they remain runnable — the object manager keeps
-                // them; documented never-kill rule).
-                (void)thread->join_ns(50ull * 1000 * 1000);
             }
         }
     }
-    proc->handle_table().close_all();                    // (c)
-    (void)proc->address_space().release_all();           // (d)
-    for (std::uint64_t tid : proc->thread_ids()) {
-        (void)proc->detach_thread(tid);
+    for (const std::uint64_t tid : tids) {
+        auto t = objects_.lookup_id(tid);
+        if (!t.ok() || t.value().get() == nullptr) continue;
+        if (auto* thread = t.value().get()->as<RtThread>()) {
+            auto joined = thread->join_ns(50ull * 1000 * 1000);
+            if (!joined.ok() && joined.errc() != RuntimeErrc::InvalidState) {
+                return Result<void>(joined.errc(),
+                                    "process termination deferred: thread " +
+                                        std::to_string(tid) + " has not exited: " +
+                                        joined.context());
+            }
+        }
     }
-    const auto term = proc->terminate(exit_code);        // (f) records code
-    {
-        std::lock_guard lock(lock_);
-        // committed/reserved totals shrink by this process's (now zero) usage.
-        committed_total_.store(0, std::memory_order_relaxed);  // recomputed lazily
+    auto closed = proc->handle_table().close_all();
+    if (!closed.ok()) return closed;
+    auto released = proc->address_space().release_all();
+    if (!released.ok()) return released;
+    for (const std::uint64_t tid : tids) {
+        auto detached = proc->detach_thread(tid);
+        if (!detached.ok() && detached.errc() != RuntimeErrc::NotFound) {
+            return detached;
+        }
     }
-    return term;
+    return proc->finish_termination(exit_code);
 }
 
 Result<Handle> ProcessManager::spawn_thread(Handle process,
@@ -262,21 +317,44 @@ Result<Handle> ProcessManager::spawn_thread(Handle process,
     if (proc == nullptr) {
         return Result<Handle>(RuntimeErrc::InvalidHandle, "process not found");
     }
-    // Thread limits (global).
-    if (limits_.max_threads_total != 0) {
-        std::uint32_t total = 0;
-        for (const auto& [pid, id] : pid_to_object_id_) {
-            auto p = objects_.lookup_id(id);
-            if (p.ok() && p.value().get() != nullptr) {
-                total += p.value().get()->as<ManagedProcess>()
-                             ->thread_ids()
-                             .size();
+    // Reserve one global thread slot under the manager lock. The reservation
+    // closes the race where concurrent spawns all pass the same count check.
+    {
+        std::lock_guard lock(lock_);
+        if (pending_threads_ == ~0ull) {
+            return Result<Handle>(RuntimeErrc::OutOfResources,
+                                  "pending thread count exhausted");
+        }
+        if (limits_.max_threads_total != 0) {
+            std::uint64_t total = pending_threads_;
+            for (const auto& [pid, id] : pid_to_object_id_) {
+                auto p = objects_.lookup_id(id);
+                if (p.ok() && p.value().get() != nullptr) {
+                    auto* managed = p.value().get()->as<ManagedProcess>();
+                    if (managed != nullptr) {
+                        const auto count = managed->thread_ids().size();
+                        total = count > (~0ull) - total ? ~0ull : total + count;
+                    }
+                }
+            }
+            if (total >= limits_.max_threads_total) {
+                return Result<Handle>(RuntimeErrc::OutOfResources, "thread limit");
             }
         }
-        if (total + 1 > limits_.max_threads_total) {
-            return Result<Handle>(RuntimeErrc::OutOfResources, "thread limit");
-        }
+        ++pending_threads_;
     }
+    bool pending_active = true;
+    auto release_pending = [&]() {
+        if (!pending_active) return;
+        std::lock_guard lock(lock_);
+        if (pending_threads_ != 0) --pending_threads_;
+        pending_active = false;
+    };
+    struct PendingRelease {
+        decltype(release_pending)& release;
+        ~PendingRelease() { release(); }
+    } pending_release{release_pending};
+
     auto thread = std::make_unique<RtThread>(main, arg, name);
     auto reg = objects_.register_object(std::move(thread));
     if (!reg.ok()) {
@@ -287,6 +365,9 @@ Result<Handle> ProcessManager::spawn_thread(Handle process,
         (void)objects_.destroy(reg.value());  // rollback: no partial leaks
         return Result<Handle>(attach.errc(), attach.context());
     }
+    // From this point the thread is visible in the process list, so it is
+    // counted there rather than in pending_threads_.
+    release_pending();
     auto found = objects_.lookup_id(reg.value());
     if (!found.ok()) {
         (void)proc->detach_thread(reg.value());
@@ -319,22 +400,29 @@ Result<std::uint64_t> ProcessManager::reserve_region(Handle process,
     if (proc == nullptr) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidHandle, "process not found");
     }
-    // Global reserved-bytes limit check (sum of live spaces).
+    // Serialize global accounting and the reservation itself; otherwise
+    // parallel processes can both pass the same quota check.
+    std::lock_guard lock(lock_);
+    const std::uint64_t page = pal::host_page_size();
+    if (page == 0 || size > (~0ull) - (page - 1)) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "reservation size alignment overflow");
+    }
+    const std::uint64_t aligned = ((size + page - 1) / page) * page;
     if (limits_.max_reserved_bytes_total != 0) {
         std::uint64_t total = 0;
         for (const auto& [pid, id] : pid_to_object_id_) {
             auto p = objects_.lookup_id(id);
             if (p.ok() && p.value().get() != nullptr) {
-                total += p.value().get()->as<ManagedProcess>()
-                             ->address_space()
-                             .stats()
-                             .reserved_bytes;
+                auto* managed = p.value().get()->as<ManagedProcess>();
+                if (managed != nullptr) {
+                    const auto used = managed->address_space().stats().reserved_bytes;
+                    total = used > (~0ull) - total ? ~0ull : total + used;
+                }
             }
         }
-        const std::uint64_t aligned =
-            (size + pal::host_page_size() - 1) / pal::host_page_size() *
-            pal::host_page_size();
-        if (total + aligned > limits_.max_reserved_bytes_total) {
+        if (total > limits_.max_reserved_bytes_total ||
+            aligned > limits_.max_reserved_bytes_total - total) {
             return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                          "global reserved-bytes limit");
         }
@@ -348,22 +436,26 @@ Result<void> ProcessManager::commit_region(Handle process, std::uint64_t xbox_va
     if (proc == nullptr) {
         return Result<void>(RuntimeErrc::InvalidHandle, "process not found");
     }
+    std::lock_guard lock(lock_);
+    auto region = proc->address_space().find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    if (region.value().state == RegionState::Committed) {
+        return proc->address_space().commit_region(xbox_va);
+    }
     if (limits_.max_committed_bytes_total != 0) {
         std::uint64_t total = 0;
         for (const auto& [pid, id] : pid_to_object_id_) {
             auto p = objects_.lookup_id(id);
             if (p.ok() && p.value().get() != nullptr) {
-                total += p.value().get()->as<ManagedProcess>()
-                             ->address_space()
-                             .stats()
-                             .committed_bytes;
+                auto* managed = p.value().get()->as<ManagedProcess>();
+                if (managed != nullptr) {
+                    const auto used = managed->address_space().stats().committed_bytes;
+                    total = used > (~0ull) - total ? ~0ull : total + used;
+                }
             }
         }
-        auto region = proc->address_space().find_region(xbox_va);
-        if (!region.ok()) {
-            return Result<void>(region.errc(), region.context());
-        }
-        if (total + region.value().size > limits_.max_committed_bytes_total) {
+        if (total > limits_.max_committed_bytes_total ||
+            region.value().size > limits_.max_committed_bytes_total - total) {
             return Result<void>(RuntimeErrc::OutOfResources,
                                 "global committed-bytes limit");
         }
