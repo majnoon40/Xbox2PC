@@ -7,7 +7,9 @@
 
 #include "xbox2pc/platform.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
