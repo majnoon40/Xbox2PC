@@ -40,6 +40,9 @@ namespace xbox2pc::rt::api {
 inline constexpr std::uint64_t kSOk = 0x00000000ull;
 inline constexpr std::uint64_t kEGameruntimeDllNotFound = 0x80073D0Full;
 inline constexpr std::uint64_t kEAbort = 0x80004004ull;  // E_ABORT
+inline constexpr std::uint64_t kEFail = 0x80004005ull;   // E_FAIL
+inline constexpr std::uint64_t kEHandle = 0x80070006ull; // HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE)
+inline constexpr std::uint64_t kEOutOfMemory = 0x8007000Eull; // E_OUTOFMEMORY
 inline constexpr std::uint64_t kEInsufficientBuffer = 0x8007007Aull; // HRESULT_FROM_WIN32(122)
 inline constexpr std::uint64_t kEInvalidArg = 0x80070057ull;
 
