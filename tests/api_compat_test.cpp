@@ -954,7 +954,9 @@ TEST(GdkServiceTest, VirtualQueryPreservesReservedAllocationProtection) {
     const auto before_commit = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
     ASSERT_TRUE(before_commit.ok); ASSERT_EQ(before_commit.return_value, 48u);
     EXPECT_EQ(before_commit.out_bytes[16], 0x02u);
-    EXPECT_EQ(before_commit.out_bytes[32], 0x2000u);
+    EXPECT_EQ(static_cast<std::uint32_t>(before_commit.out_bytes[32]) |
+                  (static_cast<std::uint32_t>(before_commit.out_bytes[33]) << 8),
+              0x2000u); // little-endian MEMORY_BASIC_INFORMATION.State
     ctx.arg_count = 4; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x1000; ctx.args[3] = 0x04;
     const auto committed = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
     ASSERT_TRUE(committed.ok); EXPECT_EQ(committed.return_value, base);
