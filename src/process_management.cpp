@@ -317,21 +317,44 @@ Result<Handle> ProcessManager::spawn_thread(Handle process,
     if (proc == nullptr) {
         return Result<Handle>(RuntimeErrc::InvalidHandle, "process not found");
     }
-    // Thread limits (global).
-    if (limits_.max_threads_total != 0) {
-        std::uint32_t total = 0;
-        for (const auto& [pid, id] : pid_to_object_id_) {
-            auto p = objects_.lookup_id(id);
-            if (p.ok() && p.value().get() != nullptr) {
-                total += p.value().get()->as<ManagedProcess>()
-                             ->thread_ids()
-                             .size();
+    // Reserve one global thread slot under the manager lock. The reservation
+    // closes the race where concurrent spawns all pass the same count check.
+    {
+        std::lock_guard lock(lock_);
+        if (pending_threads_ == ~0ull) {
+            return Result<Handle>(RuntimeErrc::OutOfResources,
+                                  "pending thread count exhausted");
+        }
+        if (limits_.max_threads_total != 0) {
+            std::uint64_t total = pending_threads_;
+            for (const auto& [pid, id] : pid_to_object_id_) {
+                auto p = objects_.lookup_id(id);
+                if (p.ok() && p.value().get() != nullptr) {
+                    auto* managed = p.value().get()->as<ManagedProcess>();
+                    if (managed != nullptr) {
+                        const auto count = managed->thread_ids().size();
+                        total = count > (~0ull) - total ? ~0ull : total + count;
+                    }
+                }
+            }
+            if (total >= limits_.max_threads_total) {
+                return Result<Handle>(RuntimeErrc::OutOfResources, "thread limit");
             }
         }
-        if (total + 1 > limits_.max_threads_total) {
-            return Result<Handle>(RuntimeErrc::OutOfResources, "thread limit");
-        }
+        ++pending_threads_;
     }
+    bool pending_active = true;
+    auto release_pending = [&]() {
+        if (!pending_active) return;
+        std::lock_guard lock(lock_);
+        if (pending_threads_ != 0) --pending_threads_;
+        pending_active = false;
+    };
+    struct PendingRelease {
+        decltype(release_pending)& release;
+        ~PendingRelease() { release(); }
+    } pending_release{release_pending};
+
     auto thread = std::make_unique<RtThread>(main, arg, name);
     auto reg = objects_.register_object(std::move(thread));
     if (!reg.ok()) {
@@ -342,6 +365,9 @@ Result<Handle> ProcessManager::spawn_thread(Handle process,
         (void)objects_.destroy(reg.value());  // rollback: no partial leaks
         return Result<Handle>(attach.errc(), attach.context());
     }
+    // From this point the thread is visible in the process list, so it is
+    // counted there rather than in pending_threads_.
+    release_pending();
     auto found = objects_.lookup_id(reg.value());
     if (!found.ok()) {
         (void)proc->detach_thread(reg.value());
@@ -374,22 +400,29 @@ Result<std::uint64_t> ProcessManager::reserve_region(Handle process,
     if (proc == nullptr) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidHandle, "process not found");
     }
-    // Global reserved-bytes limit check (sum of live spaces).
+    // Serialize global accounting and the reservation itself; otherwise
+    // parallel processes can both pass the same quota check.
+    std::lock_guard lock(lock_);
+    const std::uint64_t page = pal::host_page_size();
+    if (page == 0 || size > (~0ull) - (page - 1)) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "reservation size alignment overflow");
+    }
+    const std::uint64_t aligned = ((size + page - 1) / page) * page;
     if (limits_.max_reserved_bytes_total != 0) {
         std::uint64_t total = 0;
         for (const auto& [pid, id] : pid_to_object_id_) {
             auto p = objects_.lookup_id(id);
             if (p.ok() && p.value().get() != nullptr) {
-                total += p.value().get()->as<ManagedProcess>()
-                             ->address_space()
-                             .stats()
-                             .reserved_bytes;
+                auto* managed = p.value().get()->as<ManagedProcess>();
+                if (managed != nullptr) {
+                    const auto used = managed->address_space().stats().reserved_bytes;
+                    total = used > (~0ull) - total ? ~0ull : total + used;
+                }
             }
         }
-        const std::uint64_t aligned =
-            (size + pal::host_page_size() - 1) / pal::host_page_size() *
-            pal::host_page_size();
-        if (total + aligned > limits_.max_reserved_bytes_total) {
+        if (total > limits_.max_reserved_bytes_total ||
+            aligned > limits_.max_reserved_bytes_total - total) {
             return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                          "global reserved-bytes limit");
         }
@@ -403,22 +436,26 @@ Result<void> ProcessManager::commit_region(Handle process, std::uint64_t xbox_va
     if (proc == nullptr) {
         return Result<void>(RuntimeErrc::InvalidHandle, "process not found");
     }
+    std::lock_guard lock(lock_);
+    auto region = proc->address_space().find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    if (region.value().state == RegionState::Committed) {
+        return proc->address_space().commit_region(xbox_va);
+    }
     if (limits_.max_committed_bytes_total != 0) {
         std::uint64_t total = 0;
         for (const auto& [pid, id] : pid_to_object_id_) {
             auto p = objects_.lookup_id(id);
             if (p.ok() && p.value().get() != nullptr) {
-                total += p.value().get()->as<ManagedProcess>()
-                             ->address_space()
-                             .stats()
-                             .committed_bytes;
+                auto* managed = p.value().get()->as<ManagedProcess>();
+                if (managed != nullptr) {
+                    const auto used = managed->address_space().stats().committed_bytes;
+                    total = used > (~0ull) - total ? ~0ull : total + used;
+                }
             }
         }
-        auto region = proc->address_space().find_region(xbox_va);
-        if (!region.ok()) {
-            return Result<void>(region.errc(), region.context());
-        }
-        if (total + region.value().size > limits_.max_committed_bytes_total) {
+        if (total > limits_.max_committed_bytes_total ||
+            region.value().size > limits_.max_committed_bytes_total - total) {
             return Result<void>(RuntimeErrc::OutOfResources,
                                 "global committed-bytes limit");
         }
