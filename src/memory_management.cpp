@@ -508,9 +508,25 @@ Result<void> AddressSpace::release_region(std::uint64_t xbox_va) {
     if (first == ~0ull || last <= first)
         return Result<void>(RuntimeErrc::NotFound, "allocation metadata is inconsistent");
     if (impl_->host != nullptr) {
-        const auto host_ok = apply_subrange_protect(*impl_->host,
-            first - xbox_base_, last - first, MemProtect::NoAccess);
-        if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
+        struct PreviousProtection {
+            std::uint64_t start;
+            std::uint64_t size;
+            MemProtect protection;
+        };
+        std::vector<PreviousProtection> previous;
+        for (auto segment = impl_->regions.lower_bound(first);
+             segment != impl_->regions.end() && segment->first < last; ++segment)
+            previous.push_back({segment->first, segment->second.size,
+                                segment->second.protection});
+        const auto host_ok = impl_->host->decommit_subrange(
+            first - xbox_base_, last - first);
+        if (!host_ok.ok()) {
+            for (const auto& old : previous)
+                if (old.protection != MemProtect::NoAccess)
+                    (void)apply_subrange_protect(*impl_->host,
+                        old.start - xbox_base_, old.size, old.protection);
+            return Result<void>(host_ok.errc(), host_ok.context());
+        }
     }
     for (auto current = impl_->regions.begin(); current != impl_->regions.end();) {
         const auto base = current->second.allocation_base == 0
