@@ -177,13 +177,18 @@ ExecutionResult DeterministicBackend::run(
         // by ExecutionContext from the loader diagnostics, then marshal
         // through the same GuestMemory + ApiRegistry path used by tests.
         if (is_api_binding(rip)) {
+            const auto matches = static_cast<std::size_t>(std::count_if(
+                req.api_bindings.begin(), req.api_bindings.end(),
+                [rip](const ApiBindingInfo& item) { return item.value == rip; }));
             const auto binding = std::find_if(
                 req.api_bindings.begin(), req.api_bindings.end(),
                 [rip](const ApiBindingInfo& item) { return item.value == rip; });
-            if (binding == req.api_bindings.end()) {
+            if (matches != 1 || binding == req.api_bindings.end()) {
                 fault(GuestFault::InvalidState, io_cpu, AccessType::None, rip,
                       pid_, tid_, Recoverability::Fatal,
-                      "API binding has no matching resolved import identity",
+                      matches == 0
+                          ? "API binding has no matching resolved import identity"
+                          : "API binding has ambiguous duplicate import identities",
                       res.exception);
                 res.outcome = Outcome::Faulted;
                 break;
