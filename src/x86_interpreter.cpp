@@ -953,36 +953,36 @@ StepResult Interpreter::step(const Decoded& ins) {
         case Mnemonic::Loope:
         case Mnemonic::Loopne:
         case Mnemonic::Jrcxz: {
-            // Address-size prefix selects RCX/ECX; the decoder rejects other
-            // widths at decode time (16-bit LOOP is UnsupportedValid).
             const std::uint8_t cbits = ins.addr_size == 32 ? 32 : 64;
             const std::uint64_t rcx = read_gpr(cx.cpu, 1, cbits, cx.rex);
+            const std::uint64_t next_rcx = (rcx - 1) & width_mask(cbits);
+            bool decrement = false;
             bool taken = false;
             switch (ins.mnem) {
                 case Mnemonic::Loop:
-                    taken = (rcx - 1) != 0;
-                    write_gpr(cx.cpu, 1, cbits, rcx - 1, cx.rex);
+                    decrement = true;
+                    taken = next_rcx != 0;
                     break;
                 case Mnemonic::Loope:
-                    taken = (rcx - 1) != 0 && cx.cpu.flag(cpu::kFlagZF);
-                    write_gpr(cx.cpu, 1, cbits, rcx - 1, cx.rex);
+                    decrement = true;
+                    taken = next_rcx != 0 && cx.cpu.flag(cpu::kFlagZF);
                     break;
                 case Mnemonic::Loopne:
-                    taken = (rcx - 1) != 0 && !cx.cpu.flag(cpu::kFlagZF);
-                    write_gpr(cx.cpu, 1, cbits, rcx - 1, cx.rex);
+                    decrement = true;
+                    taken = next_rcx != 0 && !cx.cpu.flag(cpu::kFlagZF);
                     break;
                 case Mnemonic::Jrcxz:
                     taken = rcx == 0;
                     break;
                 default: break;
             }
+            std::uint64_t target = 0;
             if (taken) {
-                const std::uint64_t target = x64::branch_target(ins);
+                target = x64::branch_target(ins);
                 if (!check_exec(cx, target)) return StepResult::failed(cx.fail);
-                cx.cpu.rip = target;
-            } else {
-                cx.cpu.rip += ins.length;
             }
+            if (decrement) write_gpr(cx.cpu, 1, cbits, next_rcx, cx.rex);
+            cx.cpu.rip = taken ? target : cx.cpu.rip + ins.length;
             return StepResult::success();
         }
 
@@ -1005,16 +1005,25 @@ StepResult Interpreter::step(const Decoded& ins) {
         }
 
         case Mnemonic::Ret: {
-            // Optional imm16 stack-pop after the return.
-            std::uint64_t pop_extra = 0;
-            if (ins.op_count > 0 && ins.ops[0].kind == x64::OpKind::Imm) {
-                pop_extra = ins.ops[0].imm & kMask16;
+            const std::uint64_t pop_extra =
+                ins.op_count > 0 && ins.ops[0].kind == x64::OpKind::Imm
+                    ? (ins.ops[0].imm & kMask16)
+                    : 0;
+            const std::uint8_t sp = static_cast<std::uint8_t>(Gpr::Sp);
+            const std::uint64_t old_sp = cx.cpu.gprs[sp];
+            const std::uint64_t adjustment = 8 + pop_extra;
+            if (old_sp > (~0ull) - adjustment) {
+                cx.abort(GuestFault::StackOverflow, "RET stack adjustment overflow", old_sp);
+                return StepResult::failed(cx.fail);
             }
-            Value ra;
-            if (!pop_u64(cx, ra)) return StepResult::failed(cx.fail);
-            if (!check_exec(cx, ra.raw)) return StepResult::failed(cx.fail);
-            cx.cpu.gprs[static_cast<std::size_t>(Gpr::Sp)] += pop_extra;
-            cx.cpu.rip = ra.raw;
+            auto ra = cx.mem.read_u64(old_sp);
+            if (!ra.ok()) {
+                cx.abort(GuestFault::InvalidAccess, "RET stack read", old_sp);
+                return StepResult::failed(cx.fail);
+            }
+            if (!check_exec(cx, ra.value())) return StepResult::failed(cx.fail);
+            cx.cpu.gprs[sp] = old_sp + adjustment;
+            cx.cpu.rip = ra.value();
             return StepResult::success();
         }
 
@@ -1366,13 +1375,20 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Leave: {
-            // RSP = RBP; pop RBP.
             const std::uint8_t sp = static_cast<std::uint8_t>(Gpr::Sp);
             const std::uint8_t bp = static_cast<std::uint8_t>(Gpr::Bp);
-            cx.cpu.gprs[sp] = cx.cpu.gprs[bp];
-            Value v;
-            if (!pop_u64(cx, v)) return StepResult::failed(cx.fail);
-            cx.cpu.gprs[bp] = v.raw;
+            const std::uint64_t frame_sp = cx.cpu.gprs[bp];
+            if (frame_sp > (~0ull) - 8) {
+                cx.abort(GuestFault::StackOverflow, "LEAVE stack adjustment overflow", frame_sp);
+                return StepResult::failed(cx.fail);
+            }
+            auto saved_bp = cx.mem.read_u64(frame_sp);
+            if (!saved_bp.ok()) {
+                cx.abort(GuestFault::InvalidAccess, "LEAVE stack read", frame_sp);
+                return StepResult::failed(cx.fail);
+            }
+            cx.cpu.gprs[sp] = frame_sp + 8;
+            cx.cpu.gprs[bp] = saved_bp.value();
             cx.cpu.rip += ins.length;
             return StepResult::success();
         }
