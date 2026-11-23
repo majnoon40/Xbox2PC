@@ -917,6 +917,31 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
+    ApiWorld w;
+    constexpr std::uint64_t owner_pid = 303;
+    auto created = w.tq->create_queue(
+        owner_pid,
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(created.ok());
+    const auto original = created.value();
+
+    auto duplicated = w.tq->duplicate_queue(owner_pid, original);
+    ASSERT_TRUE(duplicated.ok());
+    EXPECT_NE(duplicated.value(), original);
+    EXPECT_EQ(w.tq->live_queues(), 1u); // one queue object, two handles
+
+    EXPECT_TRUE(w.tq->close_queue(owner_pid, original).ok());
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+    EXPECT_TRUE(w.tq->dispatch(owner_pid, duplicated.value(),
+                               XTaskQueuePort::Work, 0).ok());
+
+    EXPECT_TRUE(w.tq->terminate_queue(owner_pid, duplicated.value(), true).ok());
+    EXPECT_TRUE(w.tq->close_queue(owner_pid, duplicated.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+}
+
 TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ApiWorld w;
     constexpr std::uint64_t owner_pid = 101;
@@ -928,6 +953,7 @@ TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ASSERT_TRUE(q.ok());
     EXPECT_FALSE(w.tq->dispatch(foreign_pid, q.value(),
                                 XTaskQueuePort::Work, 0).ok());
+    EXPECT_FALSE(w.tq->duplicate_queue(foreign_pid, q.value()).ok());
     EXPECT_FALSE(w.tq->terminate_queue(foreign_pid, q.value(), false).ok());
     EXPECT_FALSE(w.tq->close_queue(foreign_pid, q.value()).ok());
     EXPECT_EQ(w.tq->live_queues(), 1u);
