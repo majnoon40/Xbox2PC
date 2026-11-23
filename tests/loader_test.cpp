@@ -99,6 +99,56 @@ TEST(LoaderValidationTest, ValidImagePassesEveryCheck) {
     EXPECT_TRUE(rep.has_tls_directory);
 }
 
+TEST(LoaderValidationTest, ZeroSectionAlignmentIsRejectedWithoutDivisionByZero) {
+    PeBuildSpec spec;
+    const auto image = PeBuilder(spec).build();
+    std::vector<std::uint8_t> bad(image);
+    // Optional header SectionAlignment at PE32+ optional-header offset +32.
+    const std::uint64_t section_alignment = 0x98 + 32;
+    std::fill(bad.begin() + section_alignment,
+              bad.begin() + section_alignment + 4, 0);
+    Diagnostics diags;
+    const auto img = parse_image(bad, "zero-align.exe", diags);
+    const auto report = validate_image(img, bad.data(), bad.size());
+    EXPECT_FALSE(report.valid);
+    EXPECT_TRUE(has_issue(report, vcode::kBadAlignment));
+}
+
+TEST(LoaderValidationTest, SecurityDirectoryUsesFileOffsetNotRva) {
+    PeBuildSpec spec;
+    auto image = PeBuilder(spec).build();
+    image.resize(0x5200, 0);
+    // IMAGE_DIRECTORY_ENTRY_SECURITY at optional header +112 + 4*8.
+    const std::uint64_t security = 0x98 + 112 + 4 * 8;
+    const std::uint32_t file_offset = 0x5000;
+    const std::uint32_t cert_size = 0x100;
+    for (int i = 0; i < 4; ++i) {
+        image[security + i] = static_cast<std::uint8_t>(file_offset >> (8 * i));
+        image[security + 4 + i] = static_cast<std::uint8_t>(cert_size >> (8 * i));
+    }
+    Diagnostics diags;
+    const auto img = parse_image(image, "signed.exe", diags);
+    const auto report = validate_image(img, image.data(), image.size());
+    EXPECT_FALSE(has_issue(report, vcode::kDirectoryRange));
+}
+
+TEST(LoaderValidationTest, SectionsOverlappingHeadersOrEachOtherAreRejected) {
+    PeBuildSpec spec;
+    const auto image = PeBuilder(spec).build();
+    // Second section header begins at 0x1B0; VirtualAddress is +12.
+    std::vector<std::uint8_t> overlap(image);
+    const std::uint64_t data_va = 0x1B0 + 12;
+    overlap[data_va] = 0x00;
+    overlap[data_va + 1] = 0x10;
+    overlap[data_va + 2] = 0x00;
+    overlap[data_va + 3] = 0x00; // same RVA as .text
+    Diagnostics diags;
+    const auto img = parse_image(overlap, "overlap.exe", diags);
+    const auto report = validate_image(img, overlap.data(), overlap.size());
+    EXPECT_FALSE(report.valid);
+    EXPECT_TRUE(has_issue(report, vcode::kSectionOverlap));
+}
+
 TEST(LoaderValidationTest, NonPeBytesRejected) {
     std::vector<std::uint8_t> garbage(1024, 'A');
     garbage[0] = 'X';  // no MZ
