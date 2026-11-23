@@ -197,7 +197,7 @@ public:
     // thread; delayed and automatic dispatch modes remain unsupported.
     Result<bool> dispatch(std::uint64_t process_id, std::uint64_t queue_id,
                           XTaskQueuePort port, std::uint32_t timeout_ms,
-                          const GuestCallbackInvoker& invoke_callback);
+                          const GuestCallbackInvoker& invoke_callback = {});
     Result<void> close_queue(std::uint64_t process_id, std::uint64_t queue_id);
     Result<void> terminate_queue(std::uint64_t process_id,
                                  std::uint64_t queue_id, bool wait);
