@@ -176,10 +176,21 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
     }
     report.stages.push_back(std::move(structure));
 
+    bool import_validation_failed = false;
+    for (const auto& issue : loader_validation.issues) {
+        if (issue.code == xbox2pc::rt::loader::vcode::kImportDirectory) {
+            import_validation_failed = true;
+        }
+    }
     Stage imports = make_stage(
-        "imports", diagnostics.has_warnings() ? StageStatus::Warning : StageStatus::Passed,
+        "imports",
+        import_validation_failed ? StageStatus::Failed :
+            diagnostics.has_warnings() ? StageStatus::Warning : StageStatus::Passed,
         std::to_string(image.imports.entries.size()) +
             " regular import descriptor(s) parsed; symbol resolution not tested");
+    if (import_validation_failed) {
+        imports.findings.push_back("M6 import-directory validation reported a failure");
+    }
     if (image.delay_imports.present) {
         imports.findings.push_back(
             std::to_string(image.delay_imports.entries.size()) +
