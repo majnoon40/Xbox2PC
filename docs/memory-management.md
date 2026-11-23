@@ -140,10 +140,9 @@ The Win32 adapter now supports fixed-address MEM_RESERVE and
 MEM_RESERVE | MEM_COMMIT. A non-null reservation address is rounded down to
 the Windows 64-KiB allocation-granularity boundary; the address-space manager
 then validates bounds, overlap, page alignment, and global reservation limits.
-MEM_COMMIT remains limited to an exact tracked reservation base, and
-partial-range commit/decommit/protection are not claimed. Regression coverage
-checks address rounding, overlap rejection, separate commit, combined
-reserve-and-commit, and release.
+MEM_COMMIT accepts page ranges within one tracked reservation. Regression
+coverage checks address rounding, overlap rejection, separate and partial
+commit, combined reserve-and-commit, and release.
 
 
 ## M10 VirtualQuery allocation protection
