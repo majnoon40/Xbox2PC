@@ -665,6 +665,17 @@ TEST(GdkServiceTest, Win32GuestMutexAndSemaphoreLifecycle) {
     ctx.arg_count = 3; ctx.args[0] = semaphore_handle; ctx.args[1] = 1; ctx.args[2] = 0;
     auto released = w.reg.dispatch("kernel32", "ReleaseSemaphore", ctx);
     ASSERT_TRUE(released.ok); EXPECT_EQ(released.return_value, 1u);
+    // A non-null PreviousCount receives the count before the release.
+    ctx.args[2] = 0x12345000;
+    auto released_with_previous = w.reg.dispatch("kernel32", "ReleaseSemaphore", ctx);
+    ASSERT_TRUE(released_with_previous.ok);
+    EXPECT_EQ(released_with_previous.return_value, 1u);
+    ASSERT_TRUE(released_with_previous.has_out);
+    ASSERT_EQ(released_with_previous.out_bytes_size, sizeof(std::int32_t));
+    std::int32_t previous_count = -1;
+    std::memcpy(&previous_count, released_with_previous.out_bytes.data(),
+                sizeof(previous_count));
+    EXPECT_EQ(previous_count, 1);
     ctx.arg_count = 2; ctx.args[0] = semaphore_handle; ctx.args[1] = 0;
     auto consumed_again = w.reg.dispatch("kernel32", "WaitForSingleObject", ctx);
     ASSERT_TRUE(consumed_again.ok); EXPECT_EQ(consumed_again.return_value, 0u);
