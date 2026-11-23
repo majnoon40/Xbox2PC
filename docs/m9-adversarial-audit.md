@@ -84,3 +84,12 @@ latest branch head before this audit can be marked fully verified.
    invalid import stage as `INVALID`. Directed tests cover regular imports,
    delay imports, relocations, and TLS, including both mismatch directions.
 
+
+
+5. **Medium — ABI argument extraction did not bound the callee stack frame
+   before adding the return-address, shadow-space, and stack-argument offsets
+   to guest RSP.** A hostile near-maximum RSP could wrap a stack-argument
+   address. Extraction now computes the complete frame size and rejects an
+   overflowing range before invoking the stack reader. A regression test
+   verifies that an overflowing frame is rejected without any stack read.
+
