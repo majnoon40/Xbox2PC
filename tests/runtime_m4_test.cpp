@@ -563,6 +563,67 @@ TEST(ThreadExecTest, ExceptionContainment) {
     ASSERT_TRUE(core.shutdown().ok());
 }
 
+TEST(ThreadExecTest, CooperativeSuspendResumeIsNotCancellation) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    std::atomic<std::uint64_t> progress{0};
+    auto th = core.create_thread(
+        [](rt::RtThread& self, void* raw) -> void* {
+            auto* count = static_cast<std::atomic<std::uint64_t>*>(raw);
+            while (self.suspension_point()) {
+                count->fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return nullptr;
+        },
+        &progress, "suspend-resume-worker");
+    ASSERT_TRUE(th.ok());
+    rt::RtThread* thread = nullptr;
+    {
+        auto guard = core.objects().lookup_handle(th.value());
+        ASSERT_TRUE(guard.ok());
+        thread = guard.value().get()->as<rt::RtThread>();
+    }
+    ASSERT_NE(thread, nullptr);
+    ASSERT_TRUE(thread->start().ok());
+
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(progress.load(std::memory_order_relaxed), 0u);
+    ASSERT_TRUE(thread->suspend().ok());
+    const auto parked_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (thread->state() != rt::ThreadState::Suspended &&
+           std::chrono::steady_clock::now() < parked_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(thread->state(), rt::ThreadState::Suspended);
+    const auto parked_progress = progress.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    ASSERT_TRUE(thread->resume().ok());
+    const auto resume_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == parked_progress &&
+           std::chrono::steady_clock::now() < resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    thread->request_stop();
+    auto joined = thread->join_ns(2'000'000'000LL);
+    ASSERT_TRUE(joined.ok());
+    EXPECT_EQ(thread->state(), rt::ThreadState::Terminated);
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
 TEST(ThreadExecTest, CooperativeCancellation) {
     rt::RuntimeCore core;
     ASSERT_TRUE(core.initialize().ok());
