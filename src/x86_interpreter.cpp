@@ -217,9 +217,9 @@ void set_muldiv_flags(CpuState& cpu, bool overflow, std::uint8_t /*bits*/) {
 bool check_exec(Ctx& cx, std::uint64_t va) {
     auto x = cx.mem.validate_exec(va);
     if (!x.ok()) {
-        GuestFault f = x.err == guest::GuestMemErrc::InvalidAddress
-                           ? GuestFault::InvalidAccess
-                           : GuestFault::PermissionExec;
+        GuestFault f = x.err == guest::GuestMemErrc::PermissionDenied
+                           ? GuestFault::PermissionExec
+                           : GuestFault::InvalidAccess;
         cx.abort(f, "branch target", va);
         return false;
     }
