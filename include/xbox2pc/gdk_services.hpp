@@ -219,6 +219,7 @@ private:
         std::deque<Callback> work_callbacks;
         std::deque<Callback> completion_callbacks;
         std::uint32_t active_callbacks = 0;
+        std::uint32_t active_dispatches = 0;
     };
     ApiRegistry& api_reg_;
     ProcessManager& pm_;
