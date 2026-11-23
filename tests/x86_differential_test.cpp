@@ -369,7 +369,8 @@ TEST_F(X86DifferentialTest, NativeHardwareReferenceComparison) {
         // hardware bit-for-bit by definition):
         //   - IMUL/MUL (69/6B/0F AF/F6/F7): SF/ZF/AF/PF undefined ->
         //     compare CF/OF only.
-        //   - SHL/SHR/SAR with count != 1: OF undefined.
+        //   - SHL/SHR/SAR: AF is always undefined (SDM "undefined" flag for
+        //     every shift), OF undefined for count != 1.
         //   - SHL/SHR/SAR with count >= width: CF undefined too.
         //   - rotates with masked count != 1: OF undefined.
         std::uint64_t arch_mask = 0x0FD7ull;
@@ -390,7 +391,7 @@ TEST_F(X86DifferentialTest, NativeHardwareReferenceComparison) {
         if (is_mul) {
             arch_mask = rt::cpu::kFlagCF | rt::cpu::kFlagOF;
         } else if (is_shift) {
-            arch_mask &= ~rt::cpu::kFlagOF;   // count != 1 rows in the corpus
+            arch_mask &= ~(rt::cpu::kFlagOF | rt::cpu::kFlagAF);  // count != 1 rows; AF always undefined
         } else if (is_rotate) {
             // Rotates: CF is defined (and OF only for masked count 1, which
             // the corpus RCL/RCR rows use); SF/ZF/PF/AF unaffected.
