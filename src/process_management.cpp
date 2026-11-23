@@ -3,6 +3,7 @@
 #include "xbox2pc/process_management.hpp"
 
 #include <algorithm>
+#include <exception>
 #include <utility>
 
 namespace xbox2pc::rt {
@@ -111,9 +112,10 @@ ProcessManager::~ProcessManager() {
                     auto joined = thread->join_ns(pal::kInfiniteTimeout);
                     if (!joined.ok() &&
                         joined.errc() != RuntimeErrc::InvalidState) {
-                        // A manager cannot safely free memory while a host
-                        // thread might still touch it; do not force detach.
-                        continue;
+                        // ProcessManager destruction from one of its own
+                        // managed threads is unsupported: continuing would
+                        // free memory still reachable by that host thread.
+                        std::terminate();
                     }
                 }
             }
