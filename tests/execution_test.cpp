@@ -1299,6 +1299,83 @@ TEST(EngineTest, DispatchesTaskQueueDuplicateHandleAndWritesGuestOutput) {
     ASSERT_TRUE(w.pm.terminate_process(process_handle, 0).ok());
 }
 
+TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("task-queue-guest-callback.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+    ModuleDescriptor module;
+    module.module_name = "task-queue-guest-callback.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    const auto queue = w.tq->create_queue(
+        pid, static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0, stack_va = 0, output_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    scratch_region(*process, 0x1000, &output_va);
+    const std::uint64_t callback_va = code_va + 0x100;
+    const std::uint64_t continuation_va = code_va + 0x200;
+    // Callback: RAX=42; *(uint64_t*)RCX=RAX; RET.
+    const std::uint8_t callback_code[] = {
+        0x48, 0xB8, 0x2A, 0, 0, 0, 0, 0, 0, 0,
+        0x48, 0x89, 0x41, 0x00, 0xC3
+    };
+    ASSERT_TRUE(mem.write(callback_va, callback_code, sizeof(callback_code)).ok());
+    ASSERT_TRUE(mem.write_u8(continuation_va, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+    ASSERT_TRUE(mem.write_u64(output_va, 0).ok());
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid, queue.value(), api::XTaskQueuePort::Work, output_va, callback_va).ok());
+
+    constexpr std::uint64_t binding = 0x51000021ull;
+    constexpr std::uint64_t tid = 0xA5;
+    const std::uint64_t rsp = stack_va + 0x808; // x64 function-entry alignment
+    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(ApiBindingInfo{
+        binding, "xgameruntime", "XTaskQueueDispatch", false, 0});
+
+    cpu::CpuState state;
+    state.reset();
+    state.set_reg(cpu::Gpr::Sp, rsp);
+    state.set_reg(cpu::Gpr::Rcx, queue.value());
+    state.set_reg(cpu::Gpr::Rdx,
+                  static_cast<std::uint32_t>(api::XTaskQueuePort::Work));
+    state.set_reg(cpu::Gpr::R8, 0);
+    state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? format_exception(*result.exception) : "");
+    EXPECT_EQ(result.return_value, 1u);
+    const auto callback_value = mem.read_u64(output_va);
+    ASSERT_TRUE(callback_value.ok());
+    EXPECT_EQ(callback_value.value(), 42u);
+    EXPECT_TRUE(w.tq->close_queue(pid, queue.value()).ok());
+    ASSERT_TRUE(w.pm.terminate_process(process_handle, 0).ok());
+}
+
 TEST(EngineTest, RejectsUnmappedSyntheticApiBinding) {
     ExecWorld w;
     auto [process_handle, process] = w.new_process("unmapped-api.exe");
