@@ -648,6 +648,61 @@ TEST(BridgeTest, ThreadIdentityReachesGdkService) {
     EXPECT_EQ(other_process.return_value, 0u);
 }
 
+TEST(BridgeTest, MarshalWaitForMultipleObjectsReadsGuestHandleArray) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("wait-multiple.exe");
+    const auto pid = proc->pid();
+    guest::GuestMemory mem(proc->address_space());
+    auto first = w.grt->create_event(pid, true, false);
+    auto second = w.grt->create_event(pid, true, true);
+    ASSERT_TRUE(first.ok());
+    ASSERT_TRUE(second.ok());
+
+    std::uint64_t handles_va = 0;
+    scratch_region(*proc, 0x1000, &handles_va);
+    ASSERT_TRUE(mem.write_u64(handles_va, first.value()).ok());
+    ASSERT_TRUE(mem.write_u64(handles_va + 8, second.value()).ok());
+
+    const auto* descriptor = w.reg.find("kernel32", "WaitForMultipleObjects");
+    ASSERT_NE(descriptor, nullptr);
+    auto plan = plan_for_descriptor(*descriptor);
+    ASSERT_TRUE(plan.ok());
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack host_stack(0x2003F000ull, 0x1000);
+    std::vector<rt::abi::ArgValue> values(4);
+    values[0].int_v = 2; // nCount
+    values[1].ptr_va = handles_va;
+    values[1].int_v = handles_va;
+    values[1].kind = rt::abi::ArgKind::Ptr;
+    values[2].int_v = 0; // wait-any
+    values[3].int_v = 0; // poll
+    auto prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000004, plan.value().call, values,
+        HostStack::writer(&host_stack));
+    ASSERT_TRUE(prepared.ok()) << prepared.error_string();
+
+    auto result = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    ASSERT_TRUE(result.ok()) << result.error_string();
+    EXPECT_TRUE(result.value().dispatched);
+    EXPECT_EQ(result.value().api_result.return_value, 1u);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 1u);
+
+    // The same guest array with wait-all requested fails closed.
+    values[2].int_v = 1;
+    auto wait_all_prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000005, plan.value().call, values,
+        HostStack::writer(&host_stack));
+    ASSERT_TRUE(wait_all_prepared.ok());
+    auto wait_all = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    ASSERT_TRUE(wait_all.ok());
+    EXPECT_EQ(wait_all.value().api_result.return_value, 0xFFFFFFFFu);
+}
+
 TEST(BridgeTest, MarshalPointerCallWithOutBuffer) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("br2.exe");
