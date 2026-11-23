@@ -207,7 +207,7 @@ public:
         if (!r.ok()) out.note = r.error_string();
         return true;
     }
-    std::string describe() const override { return "Win32: VirtualFree (MEM_RELEASE subset)"; }
+    std::string describe() const override { return "Win32: VirtualFree (whole-region MEM_RELEASE and MEM_DECOMMIT subset)"; }
 private: GameRuntimeService& svc_;
 };
 class VirtualProtectImpl : public IApiImplementation {
