@@ -51,6 +51,7 @@
 //   [GDK-ERR]     GDK error codes doc (E_GAMERUNTIME_* semantics)
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -277,11 +278,11 @@ public:
     bool resolve_module(const std::string& dll) override;
 
     // Number of bindings issued (deterministic counter).
-    std::uint64_t bindings_issued() const { return bindings_issued_; }
+    std::uint64_t bindings_issued() const { return bindings_issued_.load(std::memory_order_relaxed); }
 
 private:
     ApiRegistry& reg_;
-    std::uint64_t bindings_issued_ = 0;
+    std::atomic<std::uint64_t> bindings_issued_{0};
 };
 
 // ── delay-load imports ────────────────────────────────────────────────────
