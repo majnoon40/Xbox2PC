@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <thread>
 #include <unordered_set>
@@ -542,8 +543,8 @@ public:
         if (ctx.arg_count != 4) return false;
         const auto r = svc_.terminate_queue(ctx.process_id, ctx.args[0], ctx.args[1] != 0);
         out.return_value = r.ok() ? kSOk : kEInvalidArg;
-        out.note = "cancel + E_ABORT submissions (documented); callbacks "
-                   "option ignored in M7 (none exist)";
+        out.note = "queue marked terminated; pending manual callbacks are delivered "
+                   "with canceled=true; wait/drain and termination callback are unsupported";
         return r.ok();
     }
     std::string describe() const override {
