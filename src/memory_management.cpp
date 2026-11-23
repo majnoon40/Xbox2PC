@@ -69,6 +69,24 @@ std::uint64_t overlap_in(const std::map<std::uint64_t, VmRegion>& regions,
     return 0;
 }
 
+// Split a tracked reservation at a page boundary without changing its
+// logical allocation identity. The caller holds AddressSpace::Impl::lock.
+bool split_region_at(std::map<std::uint64_t, VmRegion>& regions,
+                     std::uint64_t boundary) {
+    auto it = regions.upper_bound(boundary);
+    if (it == regions.begin()) return false;
+    --it;
+    const auto start = it->first;
+    const auto end = start + it->second.size;
+    if (boundary <= start || boundary >= end) return true;
+    VmRegion right = it->second;
+    right.xbox_va = boundary;
+    right.size = end - boundary;
+    it->second.size = boundary - start;
+    regions.emplace(boundary, std::move(right));
+    return true;
+}
+
 // Host-side protection bits for a MemProtect value.
 pal::Result<void> apply_subrange_protect(pal::PalMemoryRegion& host,
                                           std::uint64_t offset,
@@ -269,56 +287,103 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
 }
 
 Result<void> AddressSpace::commit_region(std::uint64_t xbox_va) {
+    auto region = find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    return commit_range(xbox_va, region.value().size);
+}
+
+Result<void> AddressSpace::commit_range(std::uint64_t xbox_va,
+                                        std::uint64_t size) {
+    if (size == 0 || !is_page_aligned(xbox_va) || size % page_size_ != 0 ||
+        xbox_va > (~0ull) - size)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "commit range must be non-empty, page-aligned, and non-overflowing");
+    const auto end = xbox_va + size;
     std::lock_guard lock(impl_->lock);
-    const auto it = impl_->regions.find(xbox_va);
-    if (it == impl_->regions.end()) {
-        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
+    auto it = impl_->regions.upper_bound(xbox_va);
+    if (it == impl_->regions.begin())
+        return Result<void>(RuntimeErrc::NotFound, "commit range is not reserved");
+    --it;
+    const auto allocation = it->second.allocation_base;
+    std::uint64_t cursor = xbox_va;
+    for (; cursor < end; ++it) {
+        if (it == impl_->regions.end() || it->first > cursor ||
+            cursor - it->first >= it->second.size ||
+            it->second.allocation_base != allocation ||
+            it->second.state != RegionState::Reserved)
+            return Result<void>(RuntimeErrc::InvalidState,
+                                "commit range must lie in one reserved allocation");
+        cursor = std::min(end, it->first + it->second.size);
     }
-    VmRegion& r = it->second;
-    if (r.state == RegionState::Committed) {
-        return Result<void>(RuntimeErrc::InvalidState, "already committed");
-    }
-    if (impl_->host == nullptr) {
+    if (impl_->host == nullptr)
         return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
-    }
-    // Committed-limit check.
     if (limits_.max_committed_bytes != 0) {
-        std::uint64_t current_committed = 0;
-        for (const auto& [va, reg] : impl_->regions) {
-            if (reg.state == RegionState::Committed) current_committed += reg.size;
+        std::uint64_t used = 0;
+        for (const auto& [va, region] : impl_->regions) {
+            (void)va;
+            if (region.state == RegionState::Committed)
+                used = region.size > (~0ull) - used ? ~0ull : used + region.size;
         }
-        if (current_committed > limits_.max_committed_bytes ||
-            r.size > limits_.max_committed_bytes - current_committed) {
+        if (used > limits_.max_committed_bytes ||
+            size > limits_.max_committed_bytes - used)
             return Result<void>(RuntimeErrc::OutOfResources,
                                 "committed-bytes limit exceeded");
-        }
     }
-    // Host: flip the subrange to RW (the W^X default for commits).
-    const auto host_ok = impl_->host->commit_subrange(xbox_va - xbox_base_, r.size);
-    if (!host_ok.ok()) {
-        return Result<void>(host_ok.errc(), host_ok.context());
+    const auto host_ok = impl_->host->commit_subrange(xbox_va - xbox_base_, size);
+    if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
+    if (!split_region_at(impl_->regions, xbox_va) ||
+        !split_region_at(impl_->regions, end))
+        return Result<void>(RuntimeErrc::InvalidState, "failed to split committed range metadata");
+    for (auto page = impl_->regions.lower_bound(xbox_va);
+         page != impl_->regions.end() && page->first < end; ++page) {
+        page->second.state = RegionState::Committed;
+        page->second.protection = MemProtect::ReadWrite;
     }
-    r.state = RegionState::Committed;
-    r.protection = MemProtect::ReadWrite;
     return Result<void>::ok_result();
 }
 
-
 Result<void> AddressSpace::decommit_region(std::uint64_t xbox_va) {
+    auto region = find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    return decommit_range(xbox_va, region.value().size);
+}
+
+Result<void> AddressSpace::decommit_range(std::uint64_t xbox_va,
+                                          std::uint64_t size) {
+    if (size == 0 || !is_page_aligned(xbox_va) || size % page_size_ != 0 ||
+        xbox_va > (~0ull) - size)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "decommit range must be non-empty, page-aligned, and non-overflowing");
+    const auto end = xbox_va + size;
     std::lock_guard lock(impl_->lock);
-    const auto it = impl_->regions.find(xbox_va);
-    if (it == impl_->regions.end())
-        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
-    VmRegion& region = it->second;
-    if (region.state != RegionState::Committed)
-        return Result<void>(RuntimeErrc::InvalidState, "region is not committed");
+    auto it = impl_->regions.upper_bound(xbox_va);
+    if (it == impl_->regions.begin())
+        return Result<void>(RuntimeErrc::NotFound, "decommit range is not committed");
+    --it;
+    const auto allocation = it->second.allocation_base;
+    std::uint64_t cursor = xbox_va;
+    for (; cursor < end; ++it) {
+        if (it == impl_->regions.end() || it->first > cursor ||
+            cursor - it->first >= it->second.size ||
+            it->second.allocation_base != allocation ||
+            it->second.state != RegionState::Committed)
+            return Result<void>(RuntimeErrc::InvalidState,
+                                "decommit range must lie in one committed allocation");
+        cursor = std::min(end, it->first + it->second.size);
+    }
     if (impl_->host == nullptr)
         return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
     const auto host_ok = apply_subrange_protect(*impl_->host,
-        xbox_va - xbox_base_, region.size, MemProtect::NoAccess);
+        xbox_va - xbox_base_, size, MemProtect::NoAccess);
     if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
-    region.state = RegionState::Reserved;
-    region.protection = MemProtect::NoAccess;
+    if (!split_region_at(impl_->regions, xbox_va) ||
+        !split_region_at(impl_->regions, end))
+        return Result<void>(RuntimeErrc::InvalidState, "failed to split decommitted range metadata");
+    for (auto page = impl_->regions.lower_bound(xbox_va);
+         page != impl_->regions.end() && page->first < end; ++page) {
+        page->second.state = RegionState::Reserved;
+        page->second.protection = MemProtect::NoAccess;
+    }
     return Result<void>::ok_result();
 }
 
@@ -349,51 +414,85 @@ Result<void> AddressSpace::set_region_type(
 }
 
 Result<void> AddressSpace::protect_region(std::uint64_t xbox_va, MemProtect p) {
-    std::lock_guard lock(impl_->lock);
-    const auto it = impl_->regions.find(xbox_va);
-    if (it == impl_->regions.end()) {
-        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
-    }
-    VmRegion& r = it->second;
-    // Protection transitions: Reserved regions have no storage — the
-    // only legal change while reserved is (NoAccess -> NoAccess), i.e.
-    // none. Committed regions may move among NoAccess/R/RW/RX/RWX without
-    // changing their committed state.
-    if (r.state == RegionState::Reserved) {
-        return Result<void>(RuntimeErrc::InvalidState,
-                            "cannot protect a reserved region (commit first)");
-    }
-    // PAGE_NOACCESS is a valid protection for committed pages. The region
-    // remains committed; release_region is the separate deallocation path.
-    if (impl_->host == nullptr) {
-        return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
-    }
-    const auto host_ok = apply_subrange_protect(*impl_->host, xbox_va - xbox_base_,
-                                                r.size, p);
-    if (!host_ok.ok()) {
-        return Result<void>(host_ok.errc(), host_ok.context());
-    }
-    r.protection = p;
+    auto region = find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    auto changed = protect_range(xbox_va, region.value().size, p);
+    if (!changed.ok()) return Result<void>(changed.errc(), changed.context());
     return Result<void>::ok_result();
+}
+
+Result<MemProtect> AddressSpace::protect_range(std::uint64_t xbox_va,
+                                               std::uint64_t size,
+                                               MemProtect p) {
+    if (size == 0 || !is_page_aligned(xbox_va) || size % page_size_ != 0 ||
+        xbox_va > (~0ull) - size)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument,
+            "protection range must be non-empty, page-aligned, and non-overflowing");
+    const auto end = xbox_va + size;
+    std::lock_guard lock(impl_->lock);
+    auto it = impl_->regions.upper_bound(xbox_va);
+    if (it == impl_->regions.begin())
+        return Result<MemProtect>(RuntimeErrc::NotFound, "protection range is not committed");
+    --it;
+    const auto allocation = it->second.allocation_base;
+    const auto previous = it->second.protection;
+    std::uint64_t cursor = xbox_va;
+    for (; cursor < end; ++it) {
+        if (it == impl_->regions.end() || it->first > cursor ||
+            cursor - it->first >= it->second.size ||
+            it->second.allocation_base != allocation ||
+            it->second.state != RegionState::Committed)
+            return Result<MemProtect>(RuntimeErrc::InvalidState,
+                "protection range must lie in one committed allocation");
+        cursor = std::min(end, it->first + it->second.size);
+    }
+    if (impl_->host == nullptr)
+        return Result<MemProtect>(RuntimeErrc::OutOfResources, "no backing mapping");
+    const auto host_ok = apply_subrange_protect(*impl_->host,
+        xbox_va - xbox_base_, size, p);
+    if (!host_ok.ok()) return Result<MemProtect>(host_ok.errc(), host_ok.context());
+    if (!split_region_at(impl_->regions, xbox_va) ||
+        !split_region_at(impl_->regions, end))
+        return Result<MemProtect>(RuntimeErrc::InvalidState,
+                                  "failed to split protected range metadata");
+    for (auto page = impl_->regions.lower_bound(xbox_va);
+         page != impl_->regions.end() && page->first < end; ++page)
+        page->second.protection = p;
+    return Result<MemProtect>(previous);
 }
 
 Result<void> AddressSpace::release_region(std::uint64_t xbox_va) {
     std::lock_guard lock(impl_->lock);
-    const auto it = impl_->regions.find(xbox_va);
-    if (it == impl_->regions.end()) {
-        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
-    }
-    if (impl_->host != nullptr) {
-        // Return the subrange to PROT_NONE (address space reusable).
-        const auto host_ok = apply_subrange_protect(*impl_->host,
-                                                     xbox_va - xbox_base_,
-                                                     it->second.size,
-                                                     MemProtect::NoAccess);
-        if (!host_ok.ok()) {
-            return Result<void>(host_ok.errc(), host_ok.context());
+    auto it = impl_->regions.find(xbox_va);
+    if (it == impl_->regions.end())
+        return Result<void>(RuntimeErrc::NotFound, "no allocation starts at that address");
+    const auto allocation = it->second.allocation_base == 0
+        ? xbox_va : it->second.allocation_base;
+    if (allocation != xbox_va)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "release requires the original allocation base");
+    std::uint64_t first = ~0ull;
+    std::uint64_t last = 0;
+    for (const auto& [va, region] : impl_->regions) {
+        const auto base = region.allocation_base == 0 ? va : region.allocation_base;
+        if (base == allocation) {
+            first = std::min(first, va);
+            last = std::max(last, va + region.size);
         }
     }
-    impl_->regions.erase(it);
+    if (first == ~0ull || last <= first)
+        return Result<void>(RuntimeErrc::NotFound, "allocation metadata is inconsistent");
+    if (impl_->host != nullptr) {
+        const auto host_ok = apply_subrange_protect(*impl_->host,
+            first - xbox_base_, last - first, MemProtect::NoAccess);
+        if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
+    }
+    for (auto current = impl_->regions.begin(); current != impl_->regions.end();) {
+        const auto base = current->second.allocation_base == 0
+            ? current->first : current->second.allocation_base;
+        if (base == allocation) current = impl_->regions.erase(current);
+        else ++current;
+    }
     return Result<void>::ok_result();
 }
 
