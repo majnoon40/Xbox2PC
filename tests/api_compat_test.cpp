@@ -560,7 +560,7 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     const auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
     auto base=w.pm.reserve_region(w.last_handle,0x2000,"query-region"); ASSERT_TRUE(base.ok());
     ASSERT_TRUE(w.pm.commit_region(w.last_handle,base.value()).ok());
-    ASSERT_TRUE(w.pm.protect_region(w.last_handle,base.value(),MemProtect::ReadWrite,{}).ok());
+    ASSERT_TRUE(w.pm.protect_region(w.last_handle,base.value(),xbox2pc::rt::MemProtect::ReadWrite,{}).ok());
     ApiContext ctx; ctx.process_id=pid.value(); ctx.arg_count=3; ctx.args[0]=base.value()+0x123; ctx.args[1]=0x100000; ctx.args[2]=48;
     const auto result=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(result.ok)<<result.error;
     EXPECT_EQ(result.return_value,48u); ASSERT_TRUE(result.has_out); EXPECT_EQ(result.out_bytes_size,48u);
