@@ -656,14 +656,17 @@ Result<void> ProcessManager::commit_region_by_pid(
     if (proc == nullptr || proc->state() != ProcessState::Running)
         return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
     std::lock_guard lock(lock_);
-    auto region = proc->address_space().find_region(xbox_va);
-    if (!region.ok()) return Result<void>(region.errc(), region.context());
     const auto page = proc->address_space().page_size();
-    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
-        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest commit size");
+    if (size == 0 || page == 0 || xbox_va % page != 0 ||
+        size > (~0ull) - (page - 1))
+        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest commit range");
     const auto aligned = ((size + page - 1) / page) * page;
-    if (aligned != region.value().size || region.value().state != RegionState::Reserved)
-        return Result<void>(RuntimeErrc::InvalidArgument, "commit must cover one complete reserved region");
+    const auto region = proc->address_space().find_containing(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    if (xbox_va > (~0ull) - aligned ||
+        region.value().allocation_base == 0 ||
+        xbox_va < region.value().allocation_base)
+        return Result<void>(RuntimeErrc::InvalidArgument, "commit range is outside its reservation");
     if (limits_.max_committed_bytes_total != 0) {
         std::uint64_t total = 0;
         for (const auto& [other_pid, id] : pid_to_object_id_) {
@@ -675,12 +678,12 @@ Result<void> ProcessManager::commit_region_by_pid(
             const auto used = managed->address_space().stats().committed_bytes;
             total = used > (~0ull) - total ? ~0ull : total + used;
         }
-        if (total > limits_.max_committed_bytes_total || aligned > limits_.max_committed_bytes_total - total)
+        if (total > limits_.max_committed_bytes_total ||
+            aligned > limits_.max_committed_bytes_total - total)
             return Result<void>(RuntimeErrc::OutOfResources, "global committed-bytes limit");
     }
-    return proc->address_space().commit_region(xbox_va);
+    return proc->address_space().commit_range(xbox_va, aligned);
 }
-
 
 Result<void> ProcessManager::decommit_region_by_pid(
     std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
@@ -690,15 +693,12 @@ Result<void> ProcessManager::decommit_region_by_pid(
     if (proc == nullptr || proc->state() != ProcessState::Running)
         return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
     std::lock_guard lock(lock_);
-    auto region = proc->address_space().find_region(xbox_va);
-    if (!region.ok()) return Result<void>(region.errc(), region.context());
     const auto page = proc->address_space().page_size();
-    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
-        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest decommit size");
+    if (size == 0 || page == 0 || xbox_va % page != 0 ||
+        size > (~0ull) - (page - 1))
+        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest decommit range");
     const auto aligned = ((size + page - 1) / page) * page;
-    if (aligned != region.value().size || region.value().state != RegionState::Committed)
-        return Result<void>(RuntimeErrc::InvalidArgument, "decommit must cover one complete committed region");
-    return proc->address_space().decommit_region(xbox_va);
+    return proc->address_space().decommit_range(xbox_va, aligned);
 }
 
 Result<MemProtect> ProcessManager::protect_region_by_pid(
@@ -711,18 +711,12 @@ Result<MemProtect> ProcessManager::protect_region_by_pid(
     std::lock_guard lock(lock_);
     if (prot == MemProtect::Full && !limits_.allow_wx_pages)
         return Result<MemProtect>(RuntimeErrc::InvalidArgument, "RWX protection requires allow_wx_pages");
-    auto region = proc->address_space().find_region(xbox_va);
-    if (!region.ok()) return Result<MemProtect>(region.errc(), region.context());
     const auto page = proc->address_space().page_size();
-    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
-        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "invalid guest protection size");
+    if (size == 0 || page == 0 || xbox_va % page != 0 ||
+        size > (~0ull) - (page - 1))
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "invalid guest protection range");
     const auto aligned = ((size + page - 1) / page) * page;
-    if (aligned != region.value().size || region.value().state != RegionState::Committed)
-        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "protection must cover one complete committed region");
-    const auto previous = region.value().protection;
-    auto changed = proc->address_space().protect_region(xbox_va, prot);
-    if (!changed.ok()) return Result<MemProtect>(changed.errc(), changed.context());
-    return Result<MemProtect>(previous);
+    return proc->address_space().protect_range(xbox_va, aligned, prot);
 }
 
 Result<void> ProcessManager::release_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va) {
