@@ -173,25 +173,92 @@ ExecutionResult DeterministicBackend::run(
 
         const std::uint64_t rip = io_cpu.rip;
 
-        // Imported-API entry: landing on a binding value.
+        // Imported-API entry: resolve the exact import identity captured
+        // by ExecutionContext from the loader diagnostics, then marshal
+        // through the same GuestMemory + ApiRegistry path used by tests.
         if (is_api_binding(rip)) {
-            // Find the plan: the binding value encodes an id into the
-            // resolver table; the engine resolves the API by matching
-            // the binding VALUE against the request's list, then asks
-            // the M7 registry for the descriptor by index. The request
-            // carries binding values in IAT order; we map binding ->
-            // (library, export) by asking the registry for what is
-            // registered — the bridge needs a plan per call.
-            // (See marshal path: the context supplies the plan list.)
-            res.exception = std::nullopt;
-            // Handled at the context level; the engine-level fallback:
-            // a binding hit with no plan is an InvalidState fault.
-            fault(GuestFault::InvalidState, io_cpu, AccessType::None, rip,
-                  pid_, tid_, Recoverability::Fatal,
-                  "API binding hit with no marshal plan bound",
-                  res.exception);
-            res.outcome = Outcome::Faulted;
-            break;
+            const auto binding = std::find_if(
+                req.api_bindings.begin(), req.api_bindings.end(),
+                [rip](const ApiBindingInfo& item) { return item.value == rip; });
+            if (binding == req.api_bindings.end()) {
+                fault(GuestFault::InvalidState, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API binding has no matching resolved import identity",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            const auto* descriptor = binding->by_ordinal
+                ? registry_.find_ordinal(binding->library, binding->ordinal)
+                : registry_.find(binding->library, binding->export_name);
+            if (descriptor == nullptr) {
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "resolved API import no longer has a verified descriptor",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            auto plan = plan_for_descriptor(*descriptor);
+            if (!plan.ok()) {
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API marshalling plan unavailable: " + plan.error_string(),
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            const auto rsp = rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+            auto return_address = mem.read_u64(rsp);
+            if (!return_address.ok()) {
+                fault(GuestFault::InvalidAccess, io_cpu, AccessType::Read, rsp,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API call return address is unreadable",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            const auto return_valid = mem.validate_exec(return_address.value());
+            if (!return_valid.ok()) {
+                const auto kind = return_valid.err == guest::GuestMemErrc::PermissionDenied
+                    ? GuestFault::PermissionExec : GuestFault::InvalidAccess;
+                fault(kind, io_cpu, AccessType::Execute, return_address.value(),
+                      pid_, tid_, Recoverability::Fatal,
+                      "API call return address is not executable",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            const auto depth = impl_->dispatch_depth;
+            ++impl_->dispatch_depth;
+            auto dispatched = marshal_and_dispatch(
+                io_cpu, mem, registry_, plan.value(), pid_, depth,
+                cfg_.max_dispatch_depth, tid_);
+            --impl_->dispatch_depth;
+            if (!dispatched.ok()) {
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API marshalling/dispatch failed: " + dispatched.error_string(),
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            if (!dispatched.value().dispatched || !dispatched.value().api_result.ok) {
+                const auto detail = dispatched.value().api_result.error.empty()
+                    ? std::string("API implementation rejected the call")
+                    : dispatched.value().api_result.error;
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal, detail, res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            io_cpu.rip = return_address.value();
+            ++res.api_calls;
+            continue;
         }
 
         // Completion sentinel check happens on RET target (below).
