@@ -570,7 +570,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.signature="BOOL ReleaseSemaphore(HANDLE, LONG, LPLONG)";
         a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
         a.evidence="[MS-SYNC-SEMAPHORE]"; a.evidence_url=kReleaseSemaphoreUrl;
-        a.notes="positive release count; lpPreviousCount must be null in this implementation"; add(a);
+        a.notes="positive release count; optional lpPreviousCount output is written when non-null"; add(a);
     }
     // Partial Win32 event synchronization: no names/security descriptors,
     // duplicate handles, or non-event waitable objects are modeled.
