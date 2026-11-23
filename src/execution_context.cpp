@@ -61,6 +61,14 @@ ExecutionContext::ExecutionContext(std::uint64_t process_id,
       mem_(space),
       ctx_name_(std::move(name)) {}
 
+ExecutionContext::ExecutionContext(RtThread& thread, AddressSpace& space,
+                                   api::ApiRegistry& api_reg,
+                                   ExecutionConfig cfg, std::string name)
+    : ExecutionContext(thread.owner_process_id(), thread.thread_id(), space,
+                       api_reg, cfg, std::move(name)) {
+    execution_control_ = thread.execution_control();
+}
+
 ExecutionContext::~ExecutionContext() {
     (void)destroy();
     // M9 fix (audit A3): initialize() acquires the limiter slot; the
@@ -217,6 +225,11 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     return Ret(req);
 }
 
+std::shared_ptr<ExecutionControl> ExecutionContext::execution_control() const {
+    std::lock_guard lock(lock_);
+    return execution_control_;
+}
+
 Result<void> ExecutionContext::bind_thread_control(
     std::shared_ptr<ExecutionControl> control) {
     if (control == nullptr) {
@@ -284,7 +297,9 @@ Result<std::uint64_t> ExecutionContext::step(const ExecutionRequest& req,
     if (!bound.ok()) {
         return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
     }
-    return engine.single_step(cpu_, req);
+    ExecutionRequest controlled = req;
+    if (controlled.control == nullptr) controlled.control = execution_control_;
+    return engine.single_step(cpu_, controlled);
 }
 
 Result<void> ExecutionContext::destroy() {
@@ -458,6 +473,9 @@ Result<TlsCallbackResult> execute_tls_callbacks(
         req.stack_top_va = ctx.info().stack_top;
         req.stack_size = ctx.info().stack_size;
         req.completion_va = kCompletionSentinel;
+        // TLS initialization runs on the owning guest thread and must
+        // obey the same suspend/terminate gate as the entry point.
+        req.control = ctx.execution_control();
         std::atomic<bool> stop{false};
         auto res = engine.run(req, call, stop);
         if (res.outcome == Outcome::Faulted) {
