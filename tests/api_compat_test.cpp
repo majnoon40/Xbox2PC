@@ -925,6 +925,16 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x1000; ctx.args[3] = 0x04;
     const auto committed = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
     ASSERT_TRUE(committed.ok); EXPECT_EQ(committed.return_value, base);
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x1000; ctx.args[2] = 0x4000;
+    const auto partial_decommit = w.reg.dispatch("kernel32", "VirtualFree", ctx);
+    ASSERT_TRUE(partial_decommit.ok);
+    EXPECT_EQ(partial_decommit.return_value, 0u); // partial decommit is rejected atomically
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x100000; ctx.args[2] = 48;
+    const auto still_committed = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(still_committed.ok);
+    ASSERT_EQ(still_committed.return_value, 48u);
+    EXPECT_EQ(still_committed.out_bytes[32], 0x00u);
+    EXPECT_EQ(still_committed.out_bytes[33], 0x10u); // MEM_COMMIT
     ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x4000;
     const auto decommitted = w.reg.dispatch("kernel32", "VirtualFree", ctx);
     ASSERT_TRUE(decommitted.ok); EXPECT_EQ(decommitted.return_value, 1u);
