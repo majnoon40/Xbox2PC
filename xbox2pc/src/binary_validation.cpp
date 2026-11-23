@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include "xbox2pc/diagnostics.hpp"
 #include "xbox2pc/pe_parser.hpp"
 namespace xbox2pc::validation {
