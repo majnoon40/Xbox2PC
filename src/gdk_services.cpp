@@ -1346,16 +1346,18 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
                 return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
                                              "mutex wait cancelled by guest thread stop");
             const auto now = pal::now_ns();
-            if (deadline != INT64_MAX && now >= deadline)
-                return Result<std::uint32_t>(0x102u);
+            const bool expired = deadline != INT64_MAX && now >= deadline;
             const auto remaining = deadline == INT64_MAX
                 ? pal::MonotonicNs(2'000'000)
-                : std::max<pal::MonotonicNs>(0, deadline - now);
-            const auto slice = std::min<pal::MonotonicNs>(2'000'000, remaining);
+                : (expired ? pal::MonotonicNs(0)
+                           : std::max<pal::MonotonicNs>(0, deadline - now));
+            const auto slice = expired ? pal::MonotonicNs(0)
+                : std::min<pal::MonotonicNs>(2'000'000, remaining);
             auto waited = mutex->acquire(tid, slice, cancelled);
             if (waited.ok()) return Result<std::uint32_t>(waited.value() ? 0x80u : 0u);
             if (waited.errc() != RuntimeErrc::Timeout)
                 return Result<std::uint32_t>(waited.errc(), waited.context());
+            if (expired) return Result<std::uint32_t>(0x102u);
         }
     }
     if (auto* semaphore = value->as<RtGuestSemaphore>()) {
@@ -1368,16 +1370,18 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
                 return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
                                              "semaphore wait cancelled by guest thread stop");
             const auto now = pal::now_ns();
-            if (deadline != INT64_MAX && now >= deadline)
-                return Result<std::uint32_t>(0x102u);
+            const bool expired = deadline != INT64_MAX && now >= deadline;
             const auto remaining = deadline == INT64_MAX
                 ? pal::MonotonicNs(2'000'000)
-                : std::max<pal::MonotonicNs>(0, deadline - now);
-            const auto slice = std::min<pal::MonotonicNs>(2'000'000, remaining);
+                : (expired ? pal::MonotonicNs(0)
+                           : std::max<pal::MonotonicNs>(0, deadline - now));
+            const auto slice = expired ? pal::MonotonicNs(0)
+                : std::min<pal::MonotonicNs>(2'000'000, remaining);
             auto waited = semaphore->acquire(slice, cancelled);
             if (waited.ok()) return Result<std::uint32_t>(0u);
             if (waited.errc() != RuntimeErrc::Timeout)
                 return Result<std::uint32_t>(waited.errc(), waited.context());
+            if (expired) return Result<std::uint32_t>(0x102u);
         }
     }
     return Result<std::uint32_t>(RuntimeErrc::ObjectTypeMismatch,
