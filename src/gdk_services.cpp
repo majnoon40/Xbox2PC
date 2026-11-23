@@ -1123,9 +1123,11 @@ Result<void> GameRuntimeService::virtual_free(
         const auto page = snapshot.value().page_size;
         if (page == 0 || size > (~0ull) - (page - 1))
             return Result<void>(RuntimeErrc::InvalidArgument, "VirtualFree size overflows page rounding");
-        const auto start = address - (address % page);
+        if (address % page != 0)
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "MEM_DECOMMIT address must be page-aligned");
         const auto aligned = ((size + page - 1) / page) * page;
-        return process_manager_.decommit_region_by_pid(pid, start, aligned);
+        return process_manager_.decommit_region_by_pid(pid, address, aligned);
     }
     return Result<void>(RuntimeErrc::InvalidArgument,
         "VirtualFree supports MEM_RELEASE with size zero or page-range MEM_DECOMMIT");
