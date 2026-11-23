@@ -1020,10 +1020,11 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
         done.store(true, std::memory_order_release);
     });
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    ASSERT_FALSE(done.load(std::memory_order_acquire));
+    EXPECT_FALSE(done.load(std::memory_order_acquire));
 
-    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+    const auto terminated = w.pm.terminate_process(w.last_handle, 0);
     waiter.join();
+    ASSERT_TRUE(terminated.ok());
     EXPECT_TRUE(done.load(std::memory_order_acquire));
     EXPECT_TRUE(succeeded.load(std::memory_order_acquire));
     EXPECT_EQ(w.tq->live_queues(), 0u);
