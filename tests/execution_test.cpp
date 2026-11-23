@@ -771,16 +771,26 @@ TEST(BridgeTest, MarshalWaitForMultipleObjectsReadsGuestHandleArray) {
     EXPECT_EQ(result.value().api_result.return_value, 1u);
     EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 1u);
 
-    // The same guest array with wait-all requested fails closed.
+    // The same guest array now exercises transactional wait-all through
+    // the guest-memory marshalling bridge. The first event is initially
+    // unsignaled, so the initial attempt times out without consuming the
+    // second manual-reset event.
     values[2].int_v = 1;
     auto wait_all_prepared = rt::abi::prepare_call(
         cpu_state, 0x51000005, plan.value().call, values,
         HostStack::writer(&host_stack));
     ASSERT_TRUE(wait_all_prepared.ok());
-    auto wait_all = marshal_and_dispatch(
+    auto wait_all_timeout = marshal_and_dispatch(
         cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
-    ASSERT_TRUE(wait_all.ok());
-    EXPECT_EQ(wait_all.value().api_result.return_value, 0xFFFFFFFFu);
+    ASSERT_TRUE(wait_all_timeout.ok());
+    EXPECT_EQ(wait_all_timeout.value().api_result.return_value, 0x102u);
+
+    ASSERT_TRUE(w.grt->set_event(pid, first.value()).ok());
+    auto wait_all_ready = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    ASSERT_TRUE(wait_all_ready.ok());
+    EXPECT_EQ(wait_all_ready.value().api_result.return_value, 0u);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 0u);
 
     // Counts above the explicit ABI bridge bound are rejected before reading.
     cpu_state.reset();
