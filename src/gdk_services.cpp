@@ -277,7 +277,7 @@ public:
         std::uint64_t base_address = space.base;
         std::uint64_t allocation_base = 0;
         std::uint64_t region_size = 0;
-        std::uint32_t allocation_protect = 0x04u; // default for tracked M4 reservations
+        std::uint32_t allocation_protect = 0; // MEM_FREE has no allocation protection
         std::uint32_t state = 0x10000u;        // MEM_FREE
         std::uint32_t protect = 0x01u;         // PAGE_NOACCESS
         std::uint32_t type = 0;                // free regions have no type
