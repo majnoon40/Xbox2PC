@@ -89,9 +89,9 @@ TEST(M9CliTest, AllNineBinaryCommandsProduceJsonForSyntheticPe) {
     std::ifstream invalid_file(invalid_output, std::ios::binary);
     const std::string invalid_json((std::istreambuf_iterator<char>(invalid_file)),
                                    std::istreambuf_iterator<char>());
-    const auto imports_pos = invalid_json.find("\\"imports\\"");
+    const auto imports_pos = invalid_json.find("\"imports\"");
     ASSERT_NE(imports_pos, std::string::npos);
-    EXPECT_NE(invalid_json.find("\\"status\\":\\"INVALID\\"", imports_pos),
+    EXPECT_NE(invalid_json.find("\"status\":\"INVALID\"", imports_pos),
               std::string::npos);
 
     std::filesystem::remove_all(root);
