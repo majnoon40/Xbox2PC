@@ -32,7 +32,7 @@ TEST(BinaryValidationTest, ParsesSyntheticPeAndKeepsUnperformedStagesUntested) {
     EXPECT_TRUE(report.is_pe32_plus_amd64);
     ASSERT_EQ(report.stages.size(), 6u);
     EXPECT_TRUE(report.structurally_valid());
-    EXPECT_EQ(report.stages[4].status,
+    EXPECT_EQ(report.stages[5].status,
               xbox2pc::validation::StageStatus::NotTested);
 }
 
