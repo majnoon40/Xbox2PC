@@ -1,6 +1,6 @@
 # M10 synchronization and execution audit
 
-Audit target: `feature/m10-game-os-compatibility` at `e9d2b41186ef62a33ff7d4a9`.
+Audit target: `feature/m10-game-os-compatibility` at `e9d2b41186ef59bcce025b33e0ff62a33ff7d4a9`.
 
 This document records implementation constraints found while selecting the next M10 synchronization slice. It is not a claim of Xbox kernel equivalence.
 
