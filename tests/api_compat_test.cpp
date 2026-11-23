@@ -1431,6 +1431,28 @@ TEST(GdkServiceTest, Win32VirtualMemorySupportsPartialPageRanges) {
     EXPECT_EQ(tail_page.return_value, 1u);
     EXPECT_EQ(tail_page.out_bytes[0], 0x04u); // second committed page was RW
 
+    // A commit spanning an already-committed page and a reserved page is
+    // idempotent for the former and applies the requested protection only
+    // to the newly committed page.
+    ctx.args[0] = base + 2 * 4096;
+    ctx.args[1] = 2 * 4096;
+    ctx.args[2] = 0x1000; // MEM_COMMIT
+    ctx.args[3] = 0x04;   // PAGE_READWRITE
+    const auto mixed_commit = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(mixed_commit.ok);
+    EXPECT_EQ(mixed_commit.return_value, base + 2 * 4096);
+    ctx.arg_count = 3;
+    ctx.args[1] = 0x100000;
+    ctx.args[2] = 48;
+    auto existing_page = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(existing_page.ok);
+    EXPECT_EQ(existing_page.out_bytes[36], 0x02u); // existing page stays READONLY
+    ctx.args[0] = base + 3 * 4096;
+    auto new_page = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(new_page.ok);
+    EXPECT_EQ(new_page.out_bytes[33], 0x10u); // newly committed
+    EXPECT_EQ(new_page.out_bytes[36], 0x04u); // requested READWRITE
+
     // Decommit the second page only, preserving the first page's protection.
     ctx.arg_count = 3;
     ctx.args[0] = base + 2 * 4096;
