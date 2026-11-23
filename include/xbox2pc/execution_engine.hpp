@@ -251,6 +251,8 @@ struct MarshalPlan {
     // For pointer outputs: which argument INDEX is an out buffer whose
     // bytes the bridge writes from the ApiCallResult out_value slot.
     std::vector<std::uint32_t> out_buffer_args;
+    struct PointerArrayArg { std::uint32_t pointer_arg = 0; std::uint32_t count_arg = 0; std::uint32_t max_count = 0; std::uint32_t element_size = 0; };
+    std::vector<PointerArrayArg> pointer_array_args;
     // String input argument indexes (read as guest C strings).
     std::vector<std::uint32_t> string_args;
 };
