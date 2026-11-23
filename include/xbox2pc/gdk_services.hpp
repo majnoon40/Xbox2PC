@@ -136,7 +136,8 @@ private:
     std::map<std::uint64_t, ProcState> procs_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
     std::map<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<RtEvent>> events_;
-    std::atomic<std::uint64_t> next_event_handle_{1};
+    // Dedicated high-bit namespace avoids collisions with the low-valued task-queue tokens.
+    std::atomic<std::uint64_t> next_event_handle_{0xE000000000000001ull};
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 

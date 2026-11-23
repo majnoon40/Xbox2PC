@@ -794,7 +794,7 @@ Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
 
     std::uint64_t handle = next_event_handle_.load(std::memory_order_relaxed);
     for (;;) {
-        if (handle == 0 || handle == UINT64_MAX)
+        if ((handle & 0xF000000000000000ull) != 0xE000000000000000ull || handle == UINT64_MAX)
             return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "event handle space exhausted");
         if (next_event_handle_.compare_exchange_weak(handle, handle + 1,
                 std::memory_order_relaxed, std::memory_order_relaxed)) break;
