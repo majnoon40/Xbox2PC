@@ -477,12 +477,15 @@ public:
         const auto submitted = svc_.submit_callback(
             ctx.process_id, ctx.args[0],
             static_cast<XTaskQueuePort>(ctx.args[1]), ctx.args[2], ctx.args[3]);
-        out.return_value = submitted.ok() ? kSOk : kEInvalidArg;
+        out.return_value = submitted.ok() ? kSOk
+            : submitted.errc() == RuntimeErrc::ProcessTerminated ? kEAbort
+                                                                  : kEInvalidArg;
         if (!submitted.ok()) out.error = submitted.error_string();
         out.note = submitted.ok()
             ? "guest callback queued for explicit manual dispatch"
             : "callback submission rejected";
-        return submitted.ok();
+        // HRESULT failures are guest-visible results, not bridge faults.
+        return true;
     }
     std::string describe() const override {
         return "XTaskQueue: submit guest callback (manual dispatch)";
