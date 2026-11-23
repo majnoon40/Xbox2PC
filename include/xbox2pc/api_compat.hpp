@@ -263,10 +263,10 @@ ApiRegistry& default_registry();
 // ── the import resolver (M6 integration) ──────────────────────────────────
 
 // Binds imports to REGISTERED implementations. The binding value is a
-// synthetic dispatch address: (impl_counter << 32) | slot — an opaque id
-// into THIS resolver's table (never a host pointer; the loader writes it
-// into the IAT like any resolved value, and future execution-context work
-// would decode it through the dispatcher).
+// synthetic guest dispatch address in the reserved GDK/Win32 ranges; it is
+// never a host pointer. The loader preserves the exact ImportLookup and
+// value in LoadDiagnostics, and ExecutionContext copies that identity into
+// ExecutionRequest so the engine can resolve the descriptor safely.
 class ApiResolver : public loader::IImportResolver {
 public:
     explicit ApiResolver(ApiRegistry& reg) : reg_(reg) {}
