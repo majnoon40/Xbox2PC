@@ -35,6 +35,20 @@ TEST(StaticAnalysisTest, RejectsWrongArchitectureWithoutScanning) {
     EXPECT_FALSE(report.notes.empty());
 }
 
+TEST(StaticAnalysisTest, ReportsFsSegmentUse) {
+    xbox2pc::test::PeBuildSpec spec;
+    spec.text_payloads.push_back(
+        {0x1000, {0x64, 0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00}});
+    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+
+    const auto report =
+        xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "fs-access.exe");
+
+    ASSERT_TRUE(report.parsed);
+    ASSERT_FALSE(report.fs_gs_uses.empty());
+    EXPECT_EQ(report.fs_gs_uses.front().segment, "FS");
+}
+
 TEST(StaticAnalysisTest, HandlesNullAndEmptyInput) {
     const auto report = xbox2pc::analysis::analyze_pe(nullptr, 0, "empty");
     EXPECT_FALSE(report.parsed);
