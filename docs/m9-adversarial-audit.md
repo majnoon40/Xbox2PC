@@ -104,3 +104,15 @@ latest branch head before this audit can be marked fully verified.
    test registers a deliberately oversized implementation and verifies that
    dispatch fails without changing guest RSP/RAX.
 
+
+
+7. **Medium — ABI call preparation changed GP/XMM registers before all stack
+   writes had succeeded.** A stack-writer failure could therefore return an
+   error with partially updated caller CPU state. Register updates are now
+   staged in a CPU-state copy and committed only after stack arguments and the
+   return-address write succeed. A regression test forces a stack-writer
+   failure and checks that GP, XMM, RIP, and RFLAGS remain unchanged. Stack
+   bytes already written by an arbitrary failing callback cannot be rolled
+   back by the current `StackWriter` interface; they remain below the
+   unmodified caller RSP and are not made the active call frame.
+
