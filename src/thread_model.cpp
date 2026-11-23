@@ -61,6 +61,9 @@ void CooperativeExecutionGate::resume() {
     {
         std::lock_guard guard(mutex_);
         suspend_requested_ = false;
+        // Once resume is published, callers must not observe the gate as
+        // logically parked while the waiter is merely waking from its CV.
+        parked_.store(false, std::memory_order_release);
     }
     changed_.notify_all();
 }
@@ -195,10 +198,20 @@ Result<void> RtThread::start() {
 
 void* RtThread::pal_trampoline(void* self_ptr) {
     auto* self = static_cast<RtThread*>(self_ptr);
-    self->state_.store(ThreadState::Running, std::memory_order_release);
+    // start() publishes Ready before spawning. A concurrent suspend() may
+    // publish Suspended before this trampoline runs; do not overwrite it.
+    ThreadState expected = ThreadState::Ready;
+    (void)self->state_.compare_exchange_strong(
+        expected, ThreadState::Running, std::memory_order_acq_rel,
+        std::memory_order_acquire);
     void* code = nullptr;
     try {
-        code = self->main_(*self, self->arg_);
+        // Honor a suspend requested between start() and trampoline entry.
+        if (!self->suspension_point()) {
+            code = nullptr;
+        } else {
+            code = self->main_(*self, self->arg_);
+        }
     } catch (const std::exception& e) {
         self->fail(std::string("thread exception: ") + e.what());
         abandon_guest_mutexes_for_thread(self->thread_id());
