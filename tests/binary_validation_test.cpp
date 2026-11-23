@@ -48,3 +48,8 @@ TEST(BinaryValidationTest, RejectsNonAmd64Machine) {
     EXPECT_FALSE(report.is_pe32_plus_amd64);
     EXPECT_FALSE(report.structurally_valid());
 }
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}
