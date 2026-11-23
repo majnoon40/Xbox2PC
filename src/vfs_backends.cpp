@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 namespace xbox2pc::rt {
@@ -29,8 +30,10 @@ HostDirBackend::HostDirBackend(std::string host_root, bool read_only)
     root_valid_ = root_link.ok() && !root_link.value() &&
                   st.ok() && st.value().is_directory;
     if (!root_valid_) {
-        root_error_ = st.ok() ? "host root is not a directory"
-                              : st.error_string();
+        root_error_ = root_link.ok() && root_link.value()
+                          ? "host root is a symlink"
+                          : (st.ok() ? "host root is not a directory"
+                                     : st.error_string());
     }
 }
 
@@ -156,11 +159,17 @@ Result<std::unique_ptr<IVfsFileHandle>> HostDirBackend::open(const VfsPath& rel,
         Result<std::uint64_t> write(const void* buf, std::uint64_t len) override {
             std::lock_guard lock(lock_);
             auto r = pal_->write(buf, len);
-            if (r.ok()) pos_ += r.value();
+            if (r.ok()) {
+                // This handle is opened in append mode: O_APPEND may move
+                // the descriptor to EOF before writing, so pos_ += n from
+                // the old shadow position would be incorrect.
+                auto end = pal_->seek(0, true);
+                pos_ = end.ok() ? end.value() : pos_ + r.value();
+            }
             return r;
         }
         Result<std::uint64_t> seek(std::uint64_t position) override {
-            if (position > static_cast<std::uint64_t>(INT64_MAX)) {
+            if (position > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
                 return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                              "seek position exceeds PAL range");
             }
@@ -183,11 +192,7 @@ Result<std::unique_ptr<IVfsFileHandle>> HostDirBackend::open(const VfsPath& rel,
         mutable std::mutex lock_;
         std::uint64_t pos_ = 0;
     };
-    // PAL files track position internally (read/write/seek); the wrapper
-    // forwards. position() mirrors PAL state lazily via seek(0)? No —
-    // keep a shadow tracked on each op:
-    // (simplified: position() is 0 after open; ops advance it via the
-    //  wrapper below)
+    // The wrapper serializes operations and tracks the PAL file cursor.
     auto wrap = std::make_unique<PalVfsFileHandle>(std::move(fh.value()));
     return Result<std::unique_ptr<IVfsFileHandle>>(
         std::unique_ptr<IVfsFileHandle>(wrap.release()));
