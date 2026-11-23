@@ -142,6 +142,9 @@ public:
     // Observers run only after cleanup succeeds and state becomes Terminated.
     Result<void> terminate_process(Handle process, std::uint64_t exit_code);
 
+    // Observers receive the stable process ID and execute under the manager
+    // lock. They must be short, non-throwing, and MUST NOT re-enter
+    // ProcessManager. Unregistration waits for any active callback to finish.
     using ProcessExitObserver = std::function<void(std::uint64_t)>;
     Result<std::uint64_t> add_process_exit_observer(ProcessExitObserver observer);
     Result<void> remove_process_exit_observer(std::uint64_t observer_id);

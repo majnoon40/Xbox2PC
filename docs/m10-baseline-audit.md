@@ -70,3 +70,11 @@ documented behavior. Stubs remain explicitly stubbed/partial.
 - The GDK service unregisters its observer during shutdown and removes its
   process initialization and thread time-sensitive state on successful exit.
 - Tests cover automatic cleanup, replacing the prior manual-only follow-up.
+
+
+### Observer concurrency contract
+
+Process-exit callbacks execute while the manager lock is held. Unregistration
+therefore waits for any active callback before returning, preventing a service
+from being destroyed while its callback is in flight. Callbacks must be short,
+non-throwing, and must not re-enter `ProcessManager`.

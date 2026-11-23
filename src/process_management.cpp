@@ -314,18 +314,16 @@ Result<void> ProcessManager::terminate_process(Handle process,
     auto finished = proc->finish_termination(exit_code);
     if (!finished.ok()) return finished;
 
-    std::vector<ProcessExitObserver> observers;
     {
+        // Serialize callback execution with observer removal. This ensures
+        // service shutdown cannot destroy a target while its callback is active.
+        // Observers must not re-enter ProcessManager (see the public contract).
         std::lock_guard lock(lock_);
-        observers.reserve(exit_observers_.size());
         for (const auto& [observer_id, observer] : exit_observers_) {
             (void)observer_id;
-            observers.push_back(observer);
-        }
-    }
-    for (const auto& observer : observers) {
-        try { observer(pid); } catch (...) {
-            // A notification cannot undo or escape successful teardown.
+            try { observer(pid); } catch (...) {
+                // A notification cannot undo or escape successful teardown.
+            }
         }
     }
     return Result<void>::ok_result();
