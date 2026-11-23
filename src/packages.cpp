@@ -26,6 +26,11 @@ BoundedReader::BoundedReader(const std::uint8_t* data, std::uint64_t size)
     : data_(data), size_(size) {}
 
 Result<void> BoundedReader::read_exact(void* out, std::uint64_t len) {
+    if (len == 0) return Result<void>::ok_result();
+    if (out == nullptr || data_ == nullptr) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "null bounded-reader buffer");
+    }
     if (len > remaining()) {
         return Result<void>(RuntimeErrc::OutOfResources,
                             "read past end: want " + std::to_string(len) +
@@ -38,6 +43,11 @@ Result<void> BoundedReader::read_exact(void* out, std::uint64_t len) {
 
 Result<std::uint64_t> BoundedReader::read_some(void* out, std::uint64_t len) {
     const std::uint64_t n = len < remaining() ? len : remaining();
+    if (n == 0) return Result<std::uint64_t>(0);
+    if (out == nullptr || data_ == nullptr) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "null bounded-reader buffer");
+    }
     std::memcpy(out, data_ + pos_, static_cast<std::size_t>(n));
     pos_ += n;
     return Result<std::uint64_t>(n);
@@ -55,6 +65,11 @@ Result<std::vector<std::uint8_t>> BoundedReader::peek(std::uint64_t offset,
             "peek out of bounds: [" + std::to_string(offset) + ", " +
                 std::to_string(end.value()) + ") vs size " +
                 std::to_string(size_));
+    }
+    if (len == 0) return Result<std::vector<std::uint8_t>>(std::vector<std::uint8_t>{});
+    if (data_ == nullptr) {
+        return Result<std::vector<std::uint8_t>>(
+            RuntimeErrc::InvalidArgument, "null bounded-reader buffer");
     }
     std::vector<std::uint8_t> out(
         data_ + offset, data_ + offset + len);
@@ -105,6 +120,12 @@ Result<std::uint64_t> BoundedReader::u64le() {
 FormatClassification classify_bytes(const std::uint8_t* data, std::uint64_t size,
                                      const std::string& name_hint) {
     FormatClassification c;
+    if (data == nullptr) {
+        c.label = "unknown";
+        c.parseable = false;
+        c.evidence_note = "null input buffer";
+        return c;
+    }
     // XPK: fully specified by this project → parseable.
     if (size >= 4 && data[0] == 'X' && data[1] == 'P' && data[2] == 'K' &&
         data[3] == '1') {
@@ -320,7 +341,7 @@ Result<std::unique_ptr<ParsedPackage>> XpkPackage::parse(
     std::set<std::string> known_paths;
     std::set<std::string> dir_paths;
     // Overlap tracking for file data spans (forbidden by the format).
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> spans;
+    std::map<std::uint64_t, std::uint64_t> spans;  // start -> exclusive end
     std::uint64_t data_cursor = table_end.value();  // data region base
 
     for (std::uint32_t i = 0; i < entry_count.value(); ++i) {
@@ -489,16 +510,25 @@ Result<std::unique_ptr<ParsedPackage>> XpkPackage::parse(
                     RuntimeErrc::InvalidArgument,
                     "entry data span out of the data region");
             }
-            // Overlap check (sorted spans): non-overlapping, increasing.
-            for (const auto& [s_off, s_len] : spans) {
-                const std::uint64_t s_end = s_off + s_len;
-                if (abs_off.value() < s_end && s_off < abs_end.value()) {
+            // O(log n) overlap check. A linear scan here made a valid
+            // package with many tiny files quadratic to parse (CPU DoS).
+            if (data_size.value() != 0) {
+                const auto next = spans.lower_bound(abs_off.value());
+                if (next != spans.end() && abs_end.value() > next->first) {
                     return Result<std::unique_ptr<ParsedPackage>>(
                         RuntimeErrc::InvalidArgument,
                         "entry data spans overlap (forbidden by the format)");
                 }
+                if (next != spans.begin()) {
+                    const auto prev = std::prev(next);
+                    if (prev->second > abs_off.value()) {
+                        return Result<std::unique_ptr<ParsedPackage>>(
+                            RuntimeErrc::InvalidArgument,
+                            "entry data spans overlap (forbidden by the format)");
+                    }
+                }
+                spans.emplace(abs_off.value(), abs_end.value());
             }
-            spans.emplace_back(abs_off.value(), data_size.value());
             e.offset = abs_off.value();
             e.size = data_size.value();
         }
