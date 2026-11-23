@@ -36,6 +36,31 @@ TEST(BinaryValidationTest, ParsesSyntheticPeAndKeepsUnperformedStagesUntested) {
               xbox2pc::validation::StageStatus::NotTested);
 }
 
+
+TEST(BinaryValidationTest, DecodesRelocationsAndTlsWithoutExecutingCallbacks) {
+    xbox2pc::test::PeBuildSpec spec;
+    spec.text_payloads.push_back({0x1000, {0x90, 0xC3}});
+    spec.reloc_blocks = {
+        {0x1000, {{10, 0x1008, 0x140001000ull}}},
+    };
+    spec.tls.template_data = {1, 2, 3, 4};
+    spec.tls.zero_fill = 16;
+    spec.tls.callback_vas = {0x140001000ull};
+    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+
+    const auto report = xbox2pc::validation::validate_pe(
+        bytes.data(), bytes.size(), "reloc-tls.exe");
+
+    ASSERT_EQ(report.stages.size(), 6u);
+    EXPECT_NE(report.stages[3].status,
+              xbox2pc::validation::StageStatus::Failed);
+    EXPECT_NE(report.stages[4].status,
+              xbox2pc::validation::StageStatus::Failed);
+    EXPECT_NE(report.stages[4].status,
+              xbox2pc::validation::StageStatus::NotTested);
+    // Validation reports callback metadata only; it never executes callbacks.
+}
+
 TEST(BinaryValidationTest, RejectsNonAmd64Machine) {
     xbox2pc::test::PeBuildSpec spec;
     spec.machine = 0x14C;  // I386
