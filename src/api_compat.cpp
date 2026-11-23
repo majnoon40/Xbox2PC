@@ -602,7 +602,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.category = registry::ApiCategory::WindowsWin32;
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-VIRTUAL-PROTECT]"; a.evidence_url = kVirtualProtectUrl;
-        a.notes = "whole tracked regions only; returns previous protection; unsupported protection constants fail closed";
+        a.notes = "page-range protection within one committed reservation; returns the first page previous protection; unsupported protection constants fail closed";
         add(a);
     }
     {
