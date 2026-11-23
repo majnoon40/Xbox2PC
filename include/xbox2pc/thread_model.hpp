@@ -20,6 +20,7 @@
 // atomic state(). The joined exit status is written once at termination.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -72,6 +73,9 @@ public:
     Result<void> start();           // Created -> Ready (host thread spawned)
     Result<void> suspend();         // Running/Ready -> Suspended (cooperative)
     Result<void> resume();          // Suspended -> Ready
+    // Cooperative safe point for thread mains. Returns false after stop.
+    // A suspended thread parks here until resume() or request_stop().
+    bool suspension_point();
     Result<void> block_note();      // Running -> Blocked (called by sync waits)
     Result<void> unblock_note();    // Blocked -> Running/Ready
     Result<void> terminate(std::uint64_t exit_code);  // -> Terminated
@@ -145,6 +149,9 @@ private:
     std::unique_ptr<pal::PalThread> host_;
     mutable std::mutex transition_lock_;   // serializes transitions (const readers lock too)
     std::atomic<bool> stop_flag_{false};
+    mutable std::mutex suspend_lock_;
+    std::condition_variable suspend_cv_;
+    bool suspend_requested_ = false;
     std::atomic<std::uint64_t> exit_code_{0};
     std::atomic<bool> exited_{false};
     std::string fail_reason_;
