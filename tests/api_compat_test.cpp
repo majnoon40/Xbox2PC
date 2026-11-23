@@ -166,7 +166,7 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     ASSERT_NE(wait_many, nullptr);
     EXPECT_EQ(wait_many->impl, ApiStatus::PartiallyImplemented);
     EXPECT_NE(wait_many->notes.find("wait-any"), std::string::npos);
-    EXPECT_NE(wait_many->notes.find("wait-all is unsupported"), std::string::npos);
+    EXPECT_NE(wait_many->notes.find("transactional wait-all"), std::string::npos);
     EXPECT_EQ(alloc->impl, ApiStatus::PartiallyImplemented);
     EXPECT_NE(alloc->notes.find("fixed-address"), std::string::npos);
     EXPECT_NE(query->notes.find("MEM_IMAGE"), std::string::npos);
