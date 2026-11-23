@@ -230,6 +230,14 @@ target_compile_features(binary_validation_test PRIVATE cxx_std_20)
 add_test(NAME binary_validation_test COMMAND binary_validation_test)
 
 
+
+# M9: exercise every binary CLI command against a generated PE fixture.
+add_executable(m9_cli_test m9_cli_test.cpp)
+target_link_libraries(m9_cli_test PRIVATE
+    xbox2pc_rt_m9_cli xbox2pc_pe_builder gtest)
+target_compile_features(m9_cli_test PRIVATE cxx_std_20)
+add_test(NAME m9_cli_test COMMAND m9_cli_test)
+
 # M9: deterministic decoder/PE/static-analysis mutation fuzzing.
 add_executable(m9_fuzz_test m9_fuzz_test.cpp)
 target_link_libraries(m9_fuzz_test PRIVATE
