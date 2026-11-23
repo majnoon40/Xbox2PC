@@ -34,6 +34,7 @@ const char* return_kind_to_name(ReturnKind r) {
         case ReturnKind::HResult: return "HRESULT";
         case ReturnKind::Bool: return "BOOL";
         case ReturnKind::Uint32: return "uint32";
+        case ReturnKind::Uint64: return "uint64";
         case ReturnKind::Uint32Enum: return "uint32-enum";
         case ReturnKind::Pointer: return "pointer-out";
         case ReturnKind::Unknown: return "unknown";
@@ -135,6 +136,9 @@ const char* kCurrentProcessIdUrl =
 const char* kCurrentThreadIdUrl =
     "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/"
     "nf-processthreadsapi-getcurrentthreadid";
+const char* kVirtualQueryUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/"
+    "nf-memoryapi-virtualquery";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
@@ -479,6 +483,18 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         add(a);
     }
 
+    {
+        ApiDescriptor a;
+        a.library = "kernel32"; a.export_name = "VirtualQuery";
+        a.convention = Convention::X64Microsoft; a.param_count = 3;
+        a.ret = ReturnKind::Uint64;
+        a.signature = "SIZE_T VirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer, SIZE_T dwLength)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-QUERY]"; a.evidence_url = kVirtualQueryUrl;
+        a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; free gaps and original allocation protection are not modeled";
+        add(a);
+    }
     return d;
 }
 

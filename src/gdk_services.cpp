@@ -169,6 +169,33 @@ private:
     GameRuntimeService& svc_;
 };
 
+class VirtualQueryImpl : public IApiImplementation {
+public:
+    explicit VirtualQueryImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        constexpr std::uint64_t kSize = 48;
+        if (ctx.arg_count != 3) return false;
+        if (ctx.args[2] < kSize || ctx.process_id == 0) { out.return_value = 0; return true; }
+        const auto found = svc_.query_memory_region(ctx.process_id, ctx.args[0]);
+        if (!found.ok()) { out.return_value = 0; out.note = found.error_string(); return true; }
+        const auto& r = found.value();
+        const std::uint64_t page = ctx.args[0] & ~std::uint64_t(4095);
+        if (page < r.xbox_va || page - r.xbox_va >= r.size) { out.return_value = 0; return true; }
+        const auto remaining = r.size - (page - r.xbox_va);
+        const std::uint32_t prot = r.protection == MemProtect::NoAccess ? 1u : r.protection == MemProtect::ReadOnly ? 2u : r.protection == MemProtect::ReadWrite ? 4u : r.protection == MemProtect::ReadExecute ? 0x20u : 0x40u;
+        const std::uint32_t state = r.state == RegionState::Committed ? 0x1000u : 0x2000u;
+        auto p16=[&](std::size_t o,std::uint16_t x){out.out_bytes[o]=static_cast<std::uint8_t>(x);out.out_bytes[o+1]=static_cast<std::uint8_t>(x>>8);};
+        auto p32=[&](std::size_t o,std::uint32_t x){for(unsigned i=0;i<4;++i)out.out_bytes[o+i]=static_cast<std::uint8_t>(x>>(8*i));};
+        auto p64=[&](std::size_t o,std::uint64_t x){for(unsigned i=0;i<8;++i)out.out_bytes[o+i]=static_cast<std::uint8_t>(x>>(8*i));};
+        p64(0,page); p64(8,r.xbox_va); p32(16,prot); p16(20,0); p64(24,remaining);
+        p32(32,state); p32(36,prot); p32(40,0x20000u); p32(44,0);
+        out.return_value=kSize; out.has_out=true; out.out_size=kSize; out.out_bytes_size=kSize;
+        out.note="partial: tracked M4 regions only; free gaps and original allocation protection are not modeled";
+        return true;
+    }
+    std::string describe() const override { return "Win32: VirtualQuery (tracked M4 guest regions; partial)"; }
+private: GameRuntimeService& svc_;
+};
 class ThreadSetTsImpl : public IApiImplementation {
 public:
     explicit ThreadSetTsImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -447,7 +474,8 @@ Result<void> GameRuntimeService::on_initialize() {
                   keep(std::make_shared<ThreadSetTsImpl>(*this)));
     auto r10 = reg("XThreadIsTimeSensitive",
                    keep(std::make_shared<ThreadIsTsImpl>(*this)));
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10}) {
+    auto r11 = api_reg_.register_implementation("kernel32", "VirtualQuery", keep(std::make_shared<VirtualQueryImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -571,6 +599,14 @@ Result<bool> GameRuntimeService::is_time_sensitive(
     std::lock_guard lock(state_lock_);
     const auto it = ts_bits_.find({process_id, thread_id});
     return Result<bool>(it != ts_bits_.end() && it->second);
+}
+
+Result<VmRegion> GameRuntimeService::query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const {
+    auto process = process_manager_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<VmRegion>(process.errc(), process.context());
+    auto* managed = process.value().get()->as<ManagedProcess>();
+    if (managed == nullptr) return Result<VmRegion>(RuntimeErrc::ObjectTypeMismatch, "not a managed process");
+    return managed->address_space().find_containing(guest_address);
 }
 
 void GameRuntimeService::release_process(std::uint64_t process_id) {

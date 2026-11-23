@@ -104,6 +104,7 @@ public:
                                    std::uint64_t thread_id) const;
     // Remove process-owned GDK state during M4 process teardown.
     void release_process(std::uint64_t process_id);
+    Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
 
     // Registry back-reference (tests/introspection).
     ApiRegistry& registry() { return api_reg_; }

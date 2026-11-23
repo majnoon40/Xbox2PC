@@ -525,8 +525,11 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(ptr_in(0));
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "QueryPerformanceCounter" || id == "QueryPerformanceFrequency") {
-        plan.call.args.push_back(ptr_out(8));
-        plan.out_buffer_args.push_back(0);
+        plan.call.args.push_back(ptr_out(8)); plan.out_buffer_args.push_back(0);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualQuery") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(ptr_out(48));
+        plan.call.args.push_back(int_arg()); plan.out_buffer_args.push_back(1);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else {
         return Ret(RuntimeErrc::NotFound,

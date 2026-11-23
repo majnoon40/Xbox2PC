@@ -115,3 +115,12 @@ Evidence:
 - https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentthreadid
 
 This does not imply that the execution engine automatically supplies a calling-thread ID in every execution path. The API is only fully usable where the caller provides a valid guest identity in `ApiContext`.
+
+
+## M10.4 — VirtualQuery memory-query slice
+
+Added the documented Win32 VirtualQuery descriptor and x64 marshalling plan. ProcessManager supports a pinned lookup by stable PID, and GameRuntimeService queries the authoritative M4 AddressSpace. The implementation emits the 48-byte x64 MEMORY_BASIC_INFORMATION layout for tracked committed/reserved regions. Tests cover a committed RW region, output fields, an untracked address, and a short output buffer.
+
+Partial behavior: free gaps are not enumerated as MEM_FREE; original allocation protection is not retained, so current protection is reported; memory type is reported as MEM_PRIVATE. This is not complete Win32 or Xbox memory-query behavior.
+
+Evidence: https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery and https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information

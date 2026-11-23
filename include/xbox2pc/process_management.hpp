@@ -168,6 +168,7 @@ public:
 
     // ── lookup ──
     Result<RefGuard> find_process(Handle process) const;
+    Result<RefGuard> find_process_by_pid(std::uint64_t pid) const;
     Result<std::uint64_t> resolve_pid(Handle process) const;
 
     // ── accounting ──

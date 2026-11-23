@@ -555,6 +555,22 @@ TEST(GdkServiceTest, ProcessExitReleasesOwnedTaskQueues) {
                                 XTaskQueuePort::Work, 0).ok());
 }
 
+TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
+    ApiWorld w; auto* proc = w.new_process("virtual-query.exe"); ASSERT_NE(proc,nullptr);
+    const auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    auto base=w.pm.reserve_region(w.last_handle,0x2000,"query-region"); ASSERT_TRUE(base.ok());
+    ASSERT_TRUE(w.pm.commit_region(w.last_handle,base.value()).ok());
+    ASSERT_TRUE(w.pm.protect_region(w.last_handle,base.value(),MemProtect::ReadWrite,{}).ok());
+    ApiContext ctx; ctx.process_id=pid.value(); ctx.arg_count=3; ctx.args[0]=base.value()+0x123; ctx.args[1]=0x100000; ctx.args[2]=48;
+    const auto result=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(result.ok)<<result.error;
+    EXPECT_EQ(result.return_value,48u); ASSERT_TRUE(result.has_out); EXPECT_EQ(result.out_bytes_size,48u);
+    auto rd32=[&](std::size_t o){std::uint32_t v=0;for(unsigned i=0;i<4;++i)v|=std::uint32_t(result.out_bytes[o+i])<<(8*i);return v;};
+    auto rd64=[&](std::size_t o){std::uint64_t v=0;for(unsigned i=0;i<8;++i)v|=std::uint64_t(result.out_bytes[o+i])<<(8*i);return v;};
+    EXPECT_EQ(rd64(0),base.value()); EXPECT_EQ(rd64(8),base.value()); EXPECT_EQ(rd64(24),0x2000u);
+    EXPECT_EQ(rd32(32),0x1000u); EXPECT_EQ(rd32(36),0x04u);
+    ctx.args[0]=0x7FFFFFFFFFFFFFFFull; const auto bad=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(bad.ok); EXPECT_EQ(bad.return_value,0u);
+    ctx.args[2]=47; const auto short_buf=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(short_buf.ok); EXPECT_EQ(short_buf.return_value,0u);
+}
 TEST(GdkServiceTest, TimingNativeEquivalents) {
     ApiWorld w;
     auto v1 = w.tim->qpc_value();

@@ -545,6 +545,14 @@ Result<RefGuard> ProcessManager::find_process(Handle process) const {
     return objects_.lookup_handle(process);
 }
 
+Result<RefGuard> ProcessManager::find_process_by_pid(std::uint64_t pid) const {
+    if (pid == 0) return Result<RefGuard>(RuntimeErrc::InvalidArgument, "process ID zero is not a guest process");
+    std::lock_guard lock(lock_);
+    const auto it = pid_to_object_id_.find(pid);
+    if (it == pid_to_object_id_.end()) return Result<RefGuard>(RuntimeErrc::NotFound, "unknown or terminated process ID");
+    return objects_.lookup_id(it->second);
+}
+
 Result<std::uint64_t> ProcessManager::resolve_pid(Handle process) const {
     auto found = objects_.lookup_handle(process);
     if (!found.ok()) {
