@@ -1350,7 +1350,7 @@ StepResult Interpreter::step(const Decoded& ins) {
                 // For a memory bit string, the signed register index selects
                 // a word relative to the effective address, not merely a bit
                 // within the first word.
-                const std::int64_t index = static_cast<std::int64_t>(pos.raw);
+                const std::int64_t index = static_cast<std::int64_t>(pos.sign_extended());
                 std::int64_t word = index / static_cast<std::int64_t>(bits);
                 std::int64_t rem = index % static_cast<std::int64_t>(bits);
                 if (rem < 0) { rem += bits; --word; }
