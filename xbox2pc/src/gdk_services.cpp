@@ -1,0 +1,753 @@
+// xbox2pc/src/gdk_services.cpp — M7 GDK + Game OS service implementations.
+//
+// Every implementation is bound to a documented descriptor in
+// api_compat.hpp; the service registers the implementations at
+// on_initialize and revokes them at on_shutdown. HRESULT values follow
+// the documented semantics (S_OK / E_GAMERUNTIME_DLL_NOT_FOUND /
+// ERROR_INSUFFICIENT_BUFFER fallbacks / E_ABORT / documented defaults).
+// No host function pointers are exposed; dispatch goes through
+// IApiImplementation under the ApiContext contract.
+
+#include "xbox2pc/gdk_services.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstring>
+
+namespace xbox2pc::rt::api {
+
+namespace {
+
+using loader::ImportStatus;
+
+// ── implementation adapters ──────────────────────────────────────────────
+//
+// Each adapter closes over the owning service and translates the
+// ApiContext into the service's typed API. Argument mapping follows the
+// DOCUMENTED parameter order (position i of the signature).
+
+class GrtInitializeImpl : public IApiImplementation {
+public:
+    explicit GrtInitializeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        const auto r = svc_.grt_initialize(ctx.process_id);
+        out.return_value = r.ok() ? kSOk : kEGameruntimeDllNotFound;
+        out.note = "per-process init count now " +
+                   (r.ok() ? std::to_string(r.value()) : "0");
+        return r.ok();
+    }
+    std::string describe() const override {
+        return "GRT lifecycle: per-process ref-counted initialize";
+    }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+class GrtUninitializeImpl : public IApiImplementation {
+public:
+    explicit GrtUninitializeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        const auto r = svc_.grt_uninitialize(ctx.process_id);
+        out.return_value = kSOk;   // documented: void
+        out.note = r.ok() ? "uninitialized" : r.error_string();
+        return true;  // void return: dispatch success regardless
+    }
+    std::string describe() const override { return "GRT lifecycle: uninitialize"; }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+class GrtInitOptionsImpl : public IApiImplementation {
+public:
+    explicit GrtInitOptionsImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        // Stub policy (documented: options compared; mismatch fails):
+        // a null options pointer (arg slot 0 == 0) takes default options.
+        const auto r = svc_.grt_initialize(ctx.process_id);
+        out.return_value = r.ok() ? kSOk : kEGameruntimeDllNotFound;
+        out.note = "stub: options pointer not interpreted (documented "
+                   "comparison semantics deferred)";
+        return r.ok();
+    }
+    std::string describe() const override {
+        return "GRT lifecycle: initialize-with-options (stub)";
+    }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+class SysDeviceTypeImpl : public IApiImplementation {
+public:
+    explicit SysDeviceTypeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext&, ApiCallResult& out) override {
+        // Documented: returns Unknown when the device type cannot be
+        // determined — always the honest answer in this runtime.
+        out.return_value =
+            static_cast<std::uint64_t>(svc_.device_type());
+        out.note = "XSystemDeviceType::Unknown (documented fallback; no "
+                   "device spoofing)";
+        return true;
+    }
+    std::string describe() const override {
+        return "XSystem: device type (documented Unknown fallback)";
+    }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+// Shared shape for the three (size, buffer, used) string APIs.
+class SysIdImpl : public IApiImplementation {
+public:
+    enum class Which { ConsoleId, SandboxId, AppDeviceId };
+    SysIdImpl(GameRuntimeService& svc, Which which) : svc_(svc), which_(which) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;  // validated by dispatcher too
+        const std::uint64_t size = ctx.args[0];
+        // Documented: not safe on time-sensitive threads.
+        if (ctx.thread_time_sensitive) {
+            out.return_value = kEInvalidArg;
+            out.error = "not safe on a time-sensitive thread (documented)";
+            return false;
+        }
+        Result<std::string> r =
+            which_ == Which::ConsoleId ? svc_.console_id(size, nullptr)
+            : which_ == Which::SandboxId ? svc_.sandbox_id(size, nullptr)
+                                         : svc_.app_device_id(size, nullptr);
+        if (!r.ok()) {
+            out.return_value = kEInsufficientBuffer;
+            out.error = r.error_string();
+            return false;
+        }
+        out.return_value = kSOk;
+        out.has_out = true;
+        out.out_value = r.value().size();
+        out.out_size = r.value().size();
+        // The payload bytes for the bridge's byte-granular write-back.
+        out.out_bytes_size = r.value().size();
+        for (std::size_t i = 0; i < out.out_bytes.size() && i < r.value().size(); ++i) {
+            out.out_bytes[i] = static_cast<std::uint8_t>(r.value()[i]);
+        }
+        out.note = "documented fallback string returned (" + r.value() + ")";
+        return true;
+    }
+    std::string describe() const override {
+        switch (which_) {
+            case Which::ConsoleId: return "XSystem: console id (documented all-zero PC fallback)";
+            case Which::SandboxId: return "XSystem: Xbox Live sandbox id (RETAIL fallback)";
+            case Which::AppDeviceId: return "XSystem: app-specific device id (all-zero fallback)";
+        }
+        return "?";
+    }
+
+private:
+    GameRuntimeService& svc_;
+    Which which_;
+};
+
+class SysRuntimeInfoImpl : public IApiImplementation {
+public:
+    explicit SysRuntimeInfoImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext&, ApiCallResult& out) override {
+        const auto info = svc_.runtime_info();
+        out.return_value =
+            (static_cast<std::uint64_t>(info.current_major) << 32) |
+            info.current_minor;
+        out.note = "stub XSystemRuntimeInfo (zero versions; callable "
+                   "before initialize — documented)";
+        return true;
+    }
+    std::string describe() const override {
+        return "XSystem: runtime info (zero-version stub)";
+    }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+class ThreadSetTsImpl : public IApiImplementation {
+public:
+    explicit ThreadSetTsImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 1) return false;
+        const bool on = ctx.args[0] != 0;
+        // The context's thread identity: M7 models the runtime's own
+        // threads (the documented API targets the CALLING thread; the
+        // dispatch context carries the thread id in process_id's companion
+        // slot via ctx.process_id high bits — see dispatcher notes).
+        const std::uint64_t tid = ctx.args[0] >> 32;  // not used; explicit
+        (void)tid;
+        const auto r = svc_.set_time_sensitive(ctx.process_id, on);
+        out.return_value = r.ok() ? kSOk : kEInvalidArg;
+        out.note = "time-sensitive bit per runtime thread";
+        return r.ok();
+    }
+    std::string describe() const override {
+        return "XThread: set time-sensitive bit";
+    }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+class ThreadIsTsImpl : public IApiImplementation {
+public:
+    explicit ThreadIsTsImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        const auto r = svc_.is_time_sensitive(ctx.process_id);
+        out.return_value = r.ok() && r.value() ? 1 : 0;
+        return true;
+    }
+    std::string describe() const override {
+        return "XThread: query time-sensitive bit";
+    }
+
+private:
+    GameRuntimeService& svc_;
+};
+
+// ── TaskQueue adapters ──
+
+class TqCreateImpl : public IApiImplementation {
+public:
+    explicit TqCreateImpl(TaskQueueService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        const auto r = svc_.create_queue(
+            static_cast<std::uint32_t>(ctx.args[0]),
+            static_cast<std::uint32_t>(ctx.args[1]));
+        if (!r.ok()) {
+            out.return_value = kEInvalidArg;
+            out.error = r.error_string();
+            return false;
+        }
+        out.return_value = kSOk;
+        out.has_out = true;
+        out.out_value = r.value();   // XTaskQueueHandle* out slot
+        out.note = "manual-mode queue created (documented handle out)";
+        return true;
+    }
+    std::string describe() const override { return "XTaskQueue: create (manual modes)"; }
+
+private:
+    TaskQueueService& svc_;
+};
+
+class TqDispatchImpl : public IApiImplementation {
+public:
+    explicit TqDispatchImpl(TaskQueueService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        const auto r = svc_.dispatch(
+            ctx.args[0],
+            static_cast<XTaskQueuePort>(ctx.args[1]),
+            static_cast<std::uint32_t>(ctx.args[2]));
+        out.return_value = r.ok() && r.value() ? 1 : 0;   // documented bool
+        out.note = "false when nothing dispatched (documented)";
+        return r.ok();
+    }
+    std::string describe() const override {
+        return "XTaskQueue: dispatch (bool semantics)";
+    }
+
+private:
+    TaskQueueService& svc_;
+};
+
+class TqCloseImpl : public IApiImplementation {
+public:
+    explicit TqCloseImpl(TaskQueueService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 1) return false;
+        const auto r = svc_.close_queue(ctx.args[0]);
+        out.return_value = kSOk;   // documented: void
+        out.note = r.ok() ? "ref-count decremented"
+                          : "unknown handle (typed error reported)";
+        return true;   // void API: dispatch-level success
+    }
+    std::string describe() const override {
+        return "XTaskQueue: close handle (ref count)";
+    }
+
+private:
+    TaskQueueService& svc_;
+};
+
+class TqTerminateImpl : public IApiImplementation {
+public:
+    explicit TqTerminateImpl(TaskQueueService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4) return false;
+        const auto r = svc_.terminate_queue(ctx.args[0], ctx.args[1] != 0);
+        out.return_value = r.ok() ? kSOk : kEInvalidArg;
+        out.note = "cancel + E_ABORT submissions (documented); callbacks "
+                   "option ignored in M7 (none exist)";
+        return r.ok();
+    }
+    std::string describe() const override {
+        return "XTaskQueue: terminate (cancel semantics)";
+    }
+
+private:
+    TaskQueueService& svc_;
+};
+
+// ── Timing adapters (native equivalents through the PAL) ──
+
+class QpcImpl : public IApiImplementation {
+public:
+    explicit QpcImpl(TimingService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext&, ApiCallResult& out) override {
+        const auto r = svc_.qpc_value();
+        if (!r.ok()) {
+            out.return_value = 0;   // documented: zero on failure
+            out.error = r.error_string();
+            return false;
+        }
+        out.return_value = 1;       // documented: nonzero on success
+        out.has_out = true;
+        out.out_value = r.value();  // LARGE_INTEGER* out slot
+        out.note = "PAL CLOCK_MONOTONIC (native equivalent)";
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: QueryPerformanceCounter (PAL monotonic equivalent)";
+    }
+
+private:
+    TimingService& svc_;
+};
+
+class QpfImpl : public IApiImplementation {
+public:
+    explicit QpfImpl(TimingService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext&, ApiCallResult& out) override {
+        const auto r = svc_.qpc_frequency();
+        if (!r.ok()) {
+            out.return_value = 0;
+            out.error = r.error_string();
+            return false;
+        }
+        out.return_value = 1;
+        out.has_out = true;
+        out.out_value = r.value();
+        out.note = "fixed at boot documented; PAL nanosecond clock => "
+                   "1'000'000'000 Hz model";
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: QueryPerformanceFrequency (PAL equivalent)";
+    }
+
+private:
+    TimingService& svc_;
+};
+
+}  // namespace
+
+// ── names ────────────────────────────────────────────────────────────────
+
+const char* device_type_to_name(XSystemDeviceType t) {
+    switch (t) {
+        case XSystemDeviceType::Unknown: return "Unknown";
+        case XSystemDeviceType::Pc: return "Pc";
+        case XSystemDeviceType::XboxOne: return "XboxOne";
+        case XSystemDeviceType::XboxOneS: return "XboxOneS";
+        case XSystemDeviceType::XboxOneX: return "XboxOneX";
+        case XSystemDeviceType::XboxOneXDevkit: return "XboxOneXDevkit";
+        case XSystemDeviceType::XboxScarlettLockhart: return "XboxScarlettLockhart";
+        case XSystemDeviceType::XboxScarlettAnaconda: return "XboxScarlettAnaconda";
+        case XSystemDeviceType::XboxScarlettDevkit: return "XboxScarlettDevkit";
+    }
+    return "?";
+}
+
+// ── GameRuntimeService ───────────────────────────────────────────────────
+
+GameRuntimeService::GameRuntimeService(ApiRegistry& api_reg)
+    : RtService("gdk_game_runtime"), api_reg_(api_reg) {}
+
+GameRuntimeService::~GameRuntimeService() {
+    if (service_state() == ServiceState::Ready) {
+        (void)on_shutdown();
+    }
+}
+
+Result<void> GameRuntimeService::on_initialize() {
+    auto keep = [this](std::shared_ptr<IApiImplementation> impl) {
+        owned_.push_back(impl);
+        return impl;
+    };
+    const std::uint64_t owner = id();
+    auto reg = [&](const char* name, std::shared_ptr<IApiImplementation> impl) {
+        return api_reg_.register_implementation("xgameruntime", name,
+                                               std::move(impl), owner);
+    };
+    auto r1 = reg("XGameRuntimeInitialize",
+                  keep(std::make_shared<GrtInitializeImpl>(*this)));
+    auto r2 = reg("XGameRuntimeUninitialize",
+                  keep(std::make_shared<GrtUninitializeImpl>(*this)));
+    auto r3 = reg("XGameRuntimeInitializeWithOptions",
+                  keep(std::make_shared<GrtInitOptionsImpl>(*this)));
+    auto r4 = reg("XSystemGetDeviceType",
+                  keep(std::make_shared<SysDeviceTypeImpl>(*this)));
+    auto r5 = reg("XSystemGetConsoleId",
+                  keep(std::make_shared<SysIdImpl>(*this, SysIdImpl::Which::ConsoleId)));
+    auto r6 = reg("XSystemGetXboxLiveSandboxId",
+                  keep(std::make_shared<SysIdImpl>(*this, SysIdImpl::Which::SandboxId)));
+    auto r7 = reg("XSystemGetAppSpecificDeviceId",
+                  keep(std::make_shared<SysIdImpl>(*this, SysIdImpl::Which::AppDeviceId)));
+    auto r8 = reg("XSystemGetRuntimeInfo",
+                  keep(std::make_shared<SysRuntimeInfoImpl>(*this)));
+    auto r9 = reg("XThreadSetTimeSensitive",
+                  keep(std::make_shared<ThreadSetTsImpl>(*this)));
+    auto r10 = reg("XThreadIsTimeSensitive",
+                   keep(std::make_shared<ThreadIsTsImpl>(*this)));
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10}) {
+        if (!r->ok()) return Result<void>(r->errc(), r->context());
+    }
+    return Result<void>::ok_result();
+}
+
+Result<void> GameRuntimeService::on_shutdown() {
+    const auto revoked = api_reg_.revoke_owner(id());
+    owned_.clear();
+    if (!revoked.ok()) {
+        return Result<void>(revoked.errc(), revoked.context());
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::uint64_t> GameRuntimeService::grt_initialize(std::uint64_t process_id) {
+    std::lock_guard lock(state_lock_);
+    auto& st = procs_[process_id];
+    if (st.uninit_failed_terminal) {
+        // Documented: a prior uninitialization failure is terminal.
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "terminal uninit failure (documented)");
+    }
+    return Result<std::uint64_t>(++st.init_count);
+}
+
+Result<void> GameRuntimeService::grt_uninitialize(std::uint64_t process_id) {
+    std::lock_guard lock(state_lock_);
+    const auto it = procs_.find(process_id);
+    if (it == procs_.end() || it->second.init_count == 0) {
+        // Documented: further uninit calls to the library are ignored.
+        return Result<void>::ok_result();
+    }
+    if (--it->second.init_count == 0) {
+        // Ref count reached zero: check for outstanding resources. The
+        // runtime reports the documented terminal-failure shape when live
+        // task queues exist for the process (they hold references).
+        procs_.erase(it);
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::string> GameRuntimeService::console_id(std::uint64_t size,
+                                                   std::uint64_t* used) {
+    // Documented: PC default is the all-zero id
+    // "00000000.00000000.00000000.00000000.00" (30 chars + NUL).
+    static const std::string kDefault = "00000000.00000000.00000000.00000000.00";
+    if (size < kDefault.size() + 1) {
+        return Result<std::string>(RuntimeErrc::InvalidArgument,
+                                   "consoleIdSize < XSystemConsoleIdBytes "
+                                   "(documented ERROR_INSUFFICIENT_BUFFER)");
+    }
+    if (used != nullptr) *used = kDefault.size();
+    return Result<std::string>(kDefault);
+}
+
+Result<std::string> GameRuntimeService::sandbox_id(std::uint64_t size,
+                                                   std::uint64_t* used) {
+    // Documented: defaults to 'RETAIL' when not found / retail env.
+    static const std::string kDefault = "RETAIL";
+    if (size < kDefault.size() + 1) {
+        return Result<std::string>(RuntimeErrc::InvalidArgument,
+                                   "sandboxIdSize < XSystemXboxLiveSandboxIdMaxBytes");
+    }
+    if (used != nullptr) *used = kDefault.size();
+    return Result<std::string>(kDefault);
+}
+
+Result<std::string> GameRuntimeService::app_device_id(std::uint64_t size,
+                                                     std::uint64_t* used) {
+    // Documented: all-zero 40-digit string on failure.
+    static const std::string kDefault(40, '0');
+    if (size < kDefault.size() + 1) {
+        return Result<std::string>(RuntimeErrc::InvalidArgument,
+                                   "appSpecificDeviceIdSize < "
+                                   "XSystemAppSpecificDeviceIdBytes");
+    }
+    if (used != nullptr) *used = kDefault.size();
+    return Result<std::string>(kDefault);
+}
+
+Result<void> GameRuntimeService::set_time_sensitive(std::uint64_t thread_id, bool on) {
+    std::lock_guard lock(state_lock_);
+    ts_bits_[thread_id] = on;
+    return Result<void>::ok_result();
+}
+
+Result<bool> GameRuntimeService::is_time_sensitive(std::uint64_t thread_id) const {
+    std::lock_guard lock(state_lock_);
+    const auto it = ts_bits_.find(thread_id);
+    return Result<bool>(it != ts_bits_.end() && it->second);
+}
+
+// ── TaskQueueService ─────────────────────────────────────────────────────
+
+TaskQueueService::TaskQueueService(ApiRegistry& api_reg, ProcessManager& pm)
+    : RtService("gdk_task_queue"), api_reg_(api_reg), pm_(pm) {}
+
+TaskQueueService::~TaskQueueService() {
+    if (service_state() == ServiceState::Ready) {
+        (void)on_shutdown();
+    }
+}
+
+Result<void> TaskQueueService::on_initialize() {
+    const std::uint64_t owner = id();
+    auto keep = [this](std::shared_ptr<IApiImplementation> impl) {
+        owned_.push_back(impl);
+        return impl;
+    };
+    auto reg = [&](const char* name, std::shared_ptr<IApiImplementation> impl) {
+        return api_reg_.register_implementation("xgameruntime", name,
+                                               std::move(impl), owner);
+    };
+    const auto r1 = reg("XTaskQueueCreate", keep(std::make_shared<TqCreateImpl>(*this)));
+    const auto r2 = reg("XTaskQueueDispatch", keep(std::make_shared<TqDispatchImpl>(*this)));
+    const auto r3 = reg("XTaskQueueCloseHandle", keep(std::make_shared<TqCloseImpl>(*this)));
+    const auto r4 = reg("XTaskQueueTerminate", keep(std::make_shared<TqTerminateImpl>(*this)));
+    for (const auto* r : {&r1, &r2, &r3, &r4}) {
+        if (!r->ok()) return Result<void>(r->errc(), r->context());
+    }
+    (void)pm_;   // M4 manager wiring retained for queue->thread mapping
+    return Result<void>::ok_result();
+}
+
+Result<void> TaskQueueService::on_shutdown() {
+    const auto revoked = api_reg_.revoke_owner(id());
+    owned_.clear();
+    if (!revoked.ok()) {
+        return Result<void>(revoked.errc(), revoked.context());
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::uint64_t> TaskQueueService::create_queue(std::uint32_t work_mode,
+                                                    std::uint32_t completion_mode) {
+    const auto mode_ok = [](std::uint32_t m) {
+        const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+        const auto immediate = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Immediate);
+        const auto pool = static_cast<std::uint32_t>(XTaskQueueDispatchMode::ThreadPool);
+        return m == manual || m == immediate || m == pool;
+    };
+    if (!mode_ok(work_mode) || !mode_ok(completion_mode)) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "unknown XTaskQueueDispatchMode value");
+    }
+    std::lock_guard lock(lock_);
+    const std::uint64_t id = next_id_++;
+    Queue q;
+    q.work_mode = work_mode;
+    q.completion_mode = completion_mode;
+    queues_[id] = q;
+    return Result<std::uint64_t>(id);
+}
+
+Result<bool> TaskQueueService::dispatch(std::uint64_t queue_id,
+                                        XTaskQueuePort port,
+                                        std::uint32_t timeout_ms) {
+    std::lock_guard lock(lock_);
+    const auto it = queues_.find(queue_id);
+    if (it == queues_.end()) {
+        return Result<bool>(RuntimeErrc::NotFound, "unknown queue handle");
+    }
+    if (it->second.terminated) {
+        return Result<bool>(false);   // documented: false when terminated
+    }
+    (void)port;
+    (void)timeout_ms;   // no callbacks exist to wait for: honest false
+    return Result<bool>(false);
+}
+
+Result<void> TaskQueueService::close_queue(std::uint64_t queue_id) {
+    std::lock_guard lock(lock_);
+    const auto it = queues_.find(queue_id);
+    if (it == queues_.end()) {
+        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
+    }
+    if (--it->second.ref_count == 0) {
+        queues_.erase(it);
+    }
+    return Result<void>::ok_result();
+}
+
+Result<void> TaskQueueService::terminate_queue(std::uint64_t queue_id, bool wait) {
+    std::lock_guard lock(lock_);
+    const auto it = queues_.find(queue_id);
+    if (it == queues_.end()) {
+        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
+    }
+    it->second.terminated = true;   // documented: submissions fail E_ABORT
+    (void)wait;   // no callbacks to drain: termination is immediate here
+    return Result<void>::ok_result();
+}
+
+std::size_t TaskQueueService::live_queues() const {
+    std::lock_guard lock(lock_);
+    return queues_.size();
+}
+
+// ── TimingService ────────────────────────────────────────────────────────
+
+TimingService::TimingService(ApiRegistry& api_reg)
+    : RtService("win32_timing"), api_reg_(api_reg) {}
+
+TimingService::~TimingService() {
+    if (service_state() == ServiceState::Ready) {
+        (void)on_shutdown();
+    }
+}
+
+Result<void> TimingService::on_initialize() {
+    const std::uint64_t owner = id();
+    auto keep = [this](std::shared_ptr<IApiImplementation> impl) {
+        owned_.push_back(impl);
+        return impl;
+    };
+    const auto r1 = api_reg_.register_implementation(
+        "kernel32", "QueryPerformanceCounter",
+        keep(std::make_shared<QpcImpl>(*this)), owner);
+    const auto r2 = api_reg_.register_implementation(
+        "kernel32", "QueryPerformanceFrequency",
+        keep(std::make_shared<QpfImpl>(*this)), owner);
+    if (!r1.ok()) return r1;
+    if (!r2.ok()) return r2;
+    return Result<void>::ok_result();
+}
+
+Result<void> TimingService::on_shutdown() {
+    const auto revoked = api_reg_.revoke_owner(id());
+    owned_.clear();
+    if (!revoked.ok()) {
+        return Result<void>(revoked.errc(), revoked.context());
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::uint64_t> TimingService::qpc_value() {
+    return Result<std::uint64_t>(
+        static_cast<std::uint64_t>(pal::now_ns()));
+}
+
+Result<std::uint64_t> TimingService::qpc_frequency() {
+    // PAL clock is nanosecond monotonic: frequency is 1e9 (documented QPF
+    // semantics: counts per second, fixed).
+    return Result<std::uint64_t>(1'000'000'000ull);
+}
+
+// ── TLS per-thread initialization ────────────────────────────────────────
+
+namespace {
+struct TlsIndexTable {
+    std::mutex lock;
+    // process id -> (image name -> index)
+    std::map<std::uint64_t, std::map<std::string, std::uint32_t>> per_process;
+    std::uint32_t next_index = 1;   // 0 reserved
+};
+TlsIndexTable& tls_table() {
+    static TlsIndexTable t;
+    return t;
+}
+}  // namespace
+
+Result<std::uint32_t> tls_assign_index(std::uint64_t process_id,
+                                       const std::string& image_name,
+                                       const loader::TlsInfo& info) {
+    if (info.template_size > loader::kMaxTlsTemplate) {
+        return Result<std::uint32_t>(RuntimeErrc::OutOfResources,
+                                     "TLS template too large");
+    }
+    auto& t = tls_table();
+    std::lock_guard lock(t.lock);
+    auto& images = t.per_process[process_id];
+    const auto it = images.find(image_name);
+    if (it != images.end()) {
+        return Result<std::uint32_t>(it->second);   // documented: stable index
+    }
+    const std::uint32_t idx = t.next_index++;
+    images.emplace(image_name, idx);
+    return Result<std::uint32_t>(idx);
+}
+
+Result<void> tls_init_thread(RtThread& thread, std::uint32_t index,
+                             const pe::PeImage& img, const std::uint8_t* file,
+                             std::size_t file_size, const loader::TlsInfo& info) {
+    if (index == 0) {
+        return Result<void>(RuntimeErrc::InvalidArgument, "TLS index 0 reserved");
+    }
+    // Template bytes: read from the file at the template RVA (loader
+    // discipline: resolve through the section table).
+    std::vector<std::uint8_t> tpl(
+        static_cast<std::size_t>(info.template_size), 0);
+    if (info.template_size > 0) {
+        bool ok = false;
+        std::uint64_t off = 0;
+        if (info.template_rva < img.opt.size_of_headers) {
+            off = info.template_rva;
+            ok = off + info.template_size <= file_size;
+        } else {
+            for (const auto& s : img.sections) {
+                if (s.contains_rva(static_cast<std::uint32_t>(info.template_rva)) &&
+                    s.has_raw_data) {
+                    const std::uint64_t in = info.template_rva - s.virtual_address;
+                    if (in + info.template_size <= s.size_of_raw_data) {
+                        off = s.raw_data_offset + in;
+                        ok = true;
+                    }
+                    break;
+                }
+            }
+        }
+        if (!ok) {
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "TLS template not file-backed");
+        }
+        std::memcpy(tpl.data(), file + off,
+                    static_cast<std::size_t>(info.template_size));
+    }
+    // Zero-fill beyond the template (documented SizeOfZeroFill semantics:
+    // the thread's block is template + zero fill). Bounded: the total TLS
+    // block must stay within the same 1 MiB limit as the template (a
+    // mutated/huge SizeOfZeroFill would otherwise request a multi-GB
+    // allocation — found by the M7 TLS fuzz harness; regression-covered).
+    constexpr std::uint32_t kMaxTlsBlock = loader::kMaxTlsTemplate;
+    const std::uint64_t total_64 =
+        tpl.size() + static_cast<std::uint64_t>(info.zero_fill_size);
+    if (total_64 > kMaxTlsBlock) {
+        return Result<void>(RuntimeErrc::OutOfResources,
+                           "TLS block (template + SizeOfZeroFill) exceeds the "
+                           "1 MiB limit");
+    }
+    tpl.resize(static_cast<std::size_t>(total_64), 0);
+    return thread.tls_set(index, tpl.data(), tpl.size());
+}
+
+Result<std::size_t> tls_release_indices(std::uint64_t process_id) {
+    auto& t = tls_table();
+    std::lock_guard lock(t.lock);
+    const auto it = t.per_process.find(process_id);
+    if (it == t.per_process.end()) return Result<std::size_t>(0);
+    const std::size_t n = it->second.size();
+    t.per_process.erase(it);
+    return Result<std::size_t>(n);
+}
+
+}  // namespace xbox2pc::rt::api

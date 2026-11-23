@@ -37,6 +37,13 @@ std::uint64_t ByteBuf::cstr(const std::string& s) {
     return off;
 }
 
+void ByteBuf::put_bytes(std::uint64_t off, const std::vector<std::uint8_t>& v) {
+    if (off + v.size() > buf_.size()) {
+        buf_.resize(static_cast<std::size_t>(off + v.size()), 0);
+    }
+    std::memcpy(buf_.data() + static_cast<std::size_t>(off), v.data(), v.size());
+}
+
 std::uint64_t ByteBuf::bytes(const std::vector<std::uint8_t>& v) {
     const std::uint64_t off = buf_.size();
     buf_.insert(buf_.end(), v.begin(), v.end());
@@ -71,6 +78,16 @@ PeBuilder::Layout PeBuilder::plan() const {
     // coarsely then finalized after materialization (we do two passes:
     // first compute sizes by simulating writes into throwaway buffers).
     std::uint32_t text_used = 0x10;  // entry point marker
+
+    // M8: raw payload extent (explicit .text RVAs; build plants the bytes).
+    for (const auto& [rva, blob] : spec.text_payloads) {
+        if (rva < l.text_rva || blob.empty()) continue;
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(rva) + blob.size();
+        text_used = std::max<std::uint32_t>(
+            text_used,
+            static_cast<std::uint32_t>(end - l.text_rva));
+    }
 
     // Import descriptors: 20 bytes each + terminator.
     const std::size_t n_dlls = spec.imports.size();
@@ -130,6 +147,19 @@ std::vector<std::uint8_t> PeBuilder::build() const {
     {
         std::vector<std::uint8_t> marker(0x10, 0xCC);
         text.bytes(marker);
+    }
+
+    // M8: raw code payloads at explicit RVAs (zero-fill growth; a payload
+    // at rva < text_rva is skipped). The .text size below derives from the
+    // buffer length, so payload bytes extend the section automatically.
+    for (const auto& [rva, blob] : spec.text_payloads) {
+        if (rva < text_rva || blob.empty()) continue;
+        const std::uint64_t need_end =
+            static_cast<std::uint64_t>(rva) + blob.size();
+        if (need_end > text.size()) {
+            text.resize(static_cast<std::size_t>(need_end));
+        }
+        text.put_bytes(static_cast<std::uint64_t>(rva - text_rva), blob);
     }
 
     // Import thunk machinery, then descriptors.

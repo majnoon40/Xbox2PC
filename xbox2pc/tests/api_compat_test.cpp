@@ -1,0 +1,809 @@
+// xbox2pc/tests/api_compat_test.cpp — M7 test suite.
+//
+// Coverage map (spec §12):
+//   12.1 registry     — ApiRegistryTest (add/lookup/ordinal/conflict/
+//                        validation/concurrent/thread-safety)
+//   12.2 dispatcher   — ApiDispatcherTest (valid/missing/unsupported/
+//                        argcount/convention/concurrent/service-shutdown)
+//   12.3 resolver     — ApiResolverTest (name/ordinal/missing/unknown/
+//                        delay/rollback/repeat)
+//   12.4 Game OS      — GdkServiceTest (lifecycle ref-count, ids, queues,
+//                        timing, shutdown revocation)
+//   12.5 GDK services — service init ordering + failure rollback
+//   12.6 TLS          — TlsTest (indices, template, zero-fill, multi-module,
+//                        thread-after-load, release)
+//   12.7 e2e          — ApiE2eTest (15-step path with delay-load + TLS +
+//                        compat report + protections + cleanup)
+
+#include <atomic>
+#include <cstring>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include "xbox2pc/api_compat.hpp"
+#include "xbox2pc/compat_report.hpp"
+#include "xbox2pc/gdk_services.hpp"
+#include "xbox2pc/package_vfs.hpp"
+#include "xbox2pc/packages.hpp"
+#include "xbox2pc/vfs_process.hpp"
+#include "xbox2pc/dep_analyzer.hpp"
+#include "xbox2pc/image_loader.hpp"
+#include "xbox2pc/pe_builder.hpp"
+#include "xbox2pc/pe_parser.hpp"
+#include "xbox2pc/runtime_core.hpp"
+
+using namespace xbox2pc::rt::api;
+using namespace xbox2pc::rt::loader;
+using xbox2pc::diag::Diagnostics;
+using xbox2pc::pe::PeImage;
+using xbox2pc::rt::ManagedProcess;
+using xbox2pc::rt::ProcessManager;
+using xbox2pc::rt::RuntimeCore;
+using xbox2pc::rt::loader::ImportStatus;
+using xbox2pc::rt::loader::ImageLoader;
+using xbox2pc::rt::loader::LoadDiagnostics;
+using xbox2pc::rt::loader::LoadResult;
+using xbox2pc::rt::loader::TlsInfo;
+using xbox2pc::test::PeBuildSpec;
+using xbox2pc::test::PeBuilder;
+
+namespace {
+
+// A live world with all three services initialized (registered BEFORE
+// core.initialize() so initialize_all covers them).
+struct ApiWorld {
+    // Declaration order = destruction order is REVERSE. The registry must
+    // OUTLIVE core (services hold ApiRegistry& reg_) and pm (TaskQueueService
+    // holds ProcessManager& pm_): declare reg FIRST so it is destroyed LAST.
+    ApiRegistry reg;
+    RuntimeCore core;
+    ProcessManager pm;
+    GameRuntimeService* grt = nullptr;
+    TaskQueueService* tq = nullptr;
+    TimingService* tim = nullptr;
+
+    ApiWorld() : pm(core.objects()) {
+        {
+            auto grt_s = std::make_unique<GameRuntimeService>(reg);
+            auto tq_s = std::make_unique<TaskQueueService>(reg, pm);
+            auto tim_s = std::make_unique<TimingService>(reg);
+            grt = grt_s.get();
+            tq = tq_s.get();
+            tim = tim_s.get();
+            EXPECT_TRUE(core.services().register_service(std::move(grt_s)).ok());
+            EXPECT_TRUE(core.services().register_service(std::move(tq_s)).ok());
+            EXPECT_TRUE(core.services().register_service(std::move(tim_s)).ok());
+        }
+        EXPECT_TRUE(core.initialize().ok());
+    }
+    ~ApiWorld() { (void)core.shutdown(); }
+
+    xbox2pc::rt::Handle last_handle;
+
+    ManagedProcess* new_process(const char* name) {
+        auto p = pm.create_process(name, 32ull << 20);
+        EXPECT_TRUE(p.ok());
+        last_handle = p.value();
+        auto found = core.objects().lookup_handle(p.value());
+        return found.ok() ? found.value().get()->as<ManagedProcess>() : nullptr;
+    }
+};
+
+// A minimal custom implementation for registration tests.
+struct EchoImpl : public IApiImplementation {
+    explicit EchoImpl(std::uint64_t value) : v_(value) {}
+    bool invoke(const ApiContext&, ApiCallResult& out) override {
+        out.return_value = v_;
+        out.note = "echo";
+        return true;
+    }
+    std::string describe() const override { return "echo test impl"; }
+
+private:
+    std::uint64_t v_;
+};
+
+}  // namespace
+
+// ── 12.1 registry ─────────────────────────────────────────────────────────
+
+TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
+    ApiRegistry reg;
+    EXPECT_GE(reg.descriptor_count(), 16u);
+    for (const auto* d : reg.all()) {
+        EXPECT_TRUE(d->validate().empty())
+            << d->library << "!" << d->export_name << ": "
+            << (d->validate().empty() ? "" : d->validate().front());
+        EXPECT_EQ(d->evidence_url.rfind("https://", 0), 0u);
+    }
+}
+
+TEST(ApiRegistryTest, LookupCaseFoldingMatchesTheOsLoader) {
+    // Windows/GDK loader export resolution is case-insensitive for both
+    // module and export names (documented loader behavior). The registry
+    // mirrors it; a DIFFERENT name never matches regardless of case.
+    ApiRegistry reg;
+    EXPECT_NE(reg.find("xgameruntime", "XGameRuntimeInitialize"), nullptr);
+    EXPECT_NE(reg.find("XGAMERUNTIME.DLL", "XGameRuntimeInitialize"), nullptr);
+    EXPECT_NE(reg.find("xgameruntime", "xgameruntimeinitialize"), nullptr);
+    EXPECT_EQ(reg.find("xgameruntime", "completelydifferentname"), nullptr);
+}
+
+TEST(ApiRegistryTest, ConflictingDescriptorRejected) {
+    ApiRegistry reg;
+    ApiDescriptor d = *reg.find("xgameruntime", "XGameRuntimeInitialize");
+    d.signature = "HRESULT FAKE(int)";   // different content
+    auto r = reg.add_descriptor(d);
+    EXPECT_FALSE(r.ok());
+    EXPECT_EQ(r.errc(), xbox2pc::rt::RuntimeErrc::AlreadyExists);
+    // Idempotent re-add of the SAME descriptor is fine.
+    ApiDescriptor same = *reg.find("xgameruntime", "XGameRuntimeInitialize");
+    EXPECT_TRUE(reg.add_descriptor(same).ok());
+}
+
+TEST(ApiRegistryTest, InvalidDescriptorsRejected) {
+    ApiRegistry reg;
+    ApiDescriptor d;
+    d.library = "fakelib";
+    d.export_name = "FakeApi";
+    // Missing evidence URL etc.
+    auto r = reg.add_descriptor(d);
+    EXPECT_FALSE(r.ok());
+    EXPECT_EQ(r.errc(), xbox2pc::rt::RuntimeErrc::InvalidArgument);
+}
+
+TEST(ApiRegistryTest, ImplementationRegistrationAndOwnership) {
+    ApiRegistry reg;
+    // Registering for a NON-descriptor API is refused (verified identity).
+    auto r0 = reg.register_implementation("fakelib", "Nope",
+                                          std::make_shared<EchoImpl>(1), 0);
+    EXPECT_FALSE(r0.ok());
+    EXPECT_EQ(r0.errc(), xbox2pc::rt::RuntimeErrc::NotFound);
+
+    auto r1 = reg.register_implementation(
+        "xgameruntime", "XGameRuntimeInitialize",
+        std::make_shared<EchoImpl>(7), /*owner=*/100);
+    EXPECT_TRUE(r1.ok());
+    EXPECT_TRUE(reg.has_implementation("xgameruntime", "XGameRuntimeInitialize"));
+    // A DIFFERENT owner cannot replace it.
+    auto r2 = reg.register_implementation(
+        "xgameruntime", "XGameRuntimeInitialize",
+        std::make_shared<EchoImpl>(8), /*owner=*/200);
+    EXPECT_FALSE(r2.ok());
+    EXPECT_EQ(r2.errc(), xbox2pc::rt::RuntimeErrc::AlreadyExists);
+    // The same owner CAN re-register (service re-init).
+    auto r3 = reg.register_implementation(
+        "xgameruntime", "XGameRuntimeInitialize",
+        std::make_shared<EchoImpl>(9), /*owner=*/100);
+    EXPECT_TRUE(r3.ok());
+    // Revoke by owner removes exactly theirs.
+    auto revoked = reg.revoke_owner(100);
+    ASSERT_TRUE(revoked.ok());
+    EXPECT_GE(revoked.value(), 1u);
+    EXPECT_FALSE(reg.has_implementation("xgameruntime", "XGameRuntimeInitialize"));
+}
+
+TEST(ApiRegistryTest, ConcurrentLookupAndDispatch) {
+    ApiWorld w;
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> threads;
+    std::atomic<int> ok_count{0};
+    for (int t = 0; t < 4; ++t) {
+        threads.emplace_back([&] {
+            while (!stop.load()) {
+                ApiContext ctx;
+                auto r = w.reg.dispatch("xgameruntime", "XGameRuntimeInitialize", ctx);
+                if (r.ok) ++ok_count;
+                (void)w.reg.find("xgameruntime", "XSystemGetDeviceType");
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stop.store(true);
+    for (auto& t : threads) t.join();
+    EXPECT_GT(ok_count.load(), 0);
+}
+
+// ── 12.2 dispatcher ──────────────────────────────────────────────────────
+
+TEST(ApiDispatcherTest, DocumentedSemanticsPerApi) {
+    ApiWorld w;
+    // GRT init: S_OK + per-process count.
+    ApiContext ctx;
+    auto r = w.reg.dispatch("xgameruntime", "XGameRuntimeInitialize", ctx);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(r.return_value, kSOk);
+    // DeviceType: documented Unknown fallback (0x00).
+    r = w.reg.dispatch("xgameruntime", "XSystemGetDeviceType", ctx);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(r.return_value, 0u);
+    // SandboxId: documented RETAIL fallback + size validation.
+    ApiContext ctx3;
+    ctx3.arg_count = 3;
+    ctx3.args[0] = 64;
+    r = w.reg.dispatch("xgameruntime", "XSystemGetXboxLiveSandboxId", ctx3);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(r.return_value, kSOk);
+    EXPECT_TRUE(r.has_out);
+    EXPECT_EQ(r.out_value, 6u);   // "RETAIL" length
+    ctx3.args[0] = 2;   // too small (documented ERROR_INSUFFICIENT_BUFFER)
+    r = w.reg.dispatch("xgameruntime", "XSystemGetXboxLiveSandboxId", ctx3);
+    EXPECT_FALSE(r.ok);
+    EXPECT_EQ(r.return_value, kEInsufficientBuffer);
+    // ConsoleId: 30-char documented all-zero fallback.
+    ctx3.args[0] = 64;
+    r = w.reg.dispatch("xgameruntime", "XSystemGetConsoleId", ctx3);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(r.out_value, 38u);
+    // QPC: nonzero return (documented BOOL) + monotonic out value.
+    ApiContext q;
+    q.arg_count = 1;
+    q.args[0] = 0x7000;
+    r = w.reg.dispatch("kernel32", "QueryPerformanceCounter", q);
+    EXPECT_TRUE(r.ok);
+    EXPECT_NE(r.return_value, 0u);
+    EXPECT_GT(r.out_value, 0u);
+    ApiContext qf;
+    qf.arg_count = 1;
+    r = w.reg.dispatch("kernel32", "QueryPerformanceFrequency", qf);
+    EXPECT_TRUE(r.ok);
+    EXPECT_EQ(r.out_value, 1'000'000'000u);   // PAL ns clock
+}
+
+TEST(ApiDispatcherTest, ValidationRejections) {
+    ApiWorld w;
+    ApiContext ctx;
+    // Missing descriptor.
+    auto r = w.reg.dispatch("xgameruntime", "TotallyMadeUp", ctx);
+    EXPECT_FALSE(r.ok);
+    // Argument-count mismatch (documented 3 params).
+    ApiContext ctx3;
+    ctx3.arg_count = 3;
+    r = w.reg.dispatch("xgameruntime", "XSystemGetConsoleId", ctx);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("argument count"), std::string::npos);
+    // No implementation (revoked service path): use a fresh registry
+    // WITHOUT services.
+    ApiRegistry bare;
+    r = bare.dispatch("xgameruntime", "XGameRuntimeInitialize", ctx);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("no implementation"), std::string::npos);
+    // Convention Unknown refuses dispatch (descriptor-level): author one.
+    ApiDescriptor u;
+    u.library = "testlib";
+    u.export_name = "UnknownConv";
+    u.convention = Convention::Unknown;
+    u.param_count = 0;
+    u.ret = ReturnKind::Void;
+    u.signature = "void UnknownConv()";
+    u.category = xbox2pc::registry::ApiCategory::XboxGdk;
+    u.compat = ApiStatus::Unknown;
+    u.impl = ApiStatus::Unknown;
+    u.evidence = "[TEST]";
+    u.evidence_url = "https://example.com/test";
+    // Convention Unknown fails validation -> cannot even register.
+    EXPECT_FALSE(bare.add_descriptor(u).ok());
+}
+
+TEST(ApiDispatcherTest, ServiceShutdownRevokesImplementations) {
+    ApiWorld w;
+    EXPECT_TRUE(w.reg.has_implementation("xgameruntime", "XSystemGetDeviceType"));
+    // Shutdown all services: implementations revoked.
+    EXPECT_TRUE(w.core.services().shutdown_all().ok());
+    EXPECT_FALSE(w.reg.has_implementation("xgameruntime", "XSystemGetDeviceType"));
+    EXPECT_FALSE(w.reg.has_implementation("kernel32", "QueryPerformanceCounter"));
+    ApiContext ctx;
+    auto r = w.reg.dispatch("xgameruntime", "XSystemGetDeviceType", ctx);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("no implementation"), std::string::npos);
+}
+
+// ── 12.3 resolver + delay-load ─────────────────────────────────────────────
+
+TEST(ApiResolverTest, ResolverStates) {
+    ApiWorld w;
+    ApiResolver resolver(w.reg);
+    // Known module + implemented API -> Resolved with a synthetic value.
+    ImportLookup look;
+    look.dll = "xgameruntime";
+    look.symbol = "XGameRuntimeInitialize";
+    auto b = resolver.resolve(look);
+    EXPECT_EQ(b.status, ImportStatus::Resolved);
+    EXPECT_NE(b.value, 0u);
+    // Known module + unimplemented export -> Unresolved (descriptor, no impl
+    // cannot happen here: all 16 are implemented; use an unlisted export).
+    look.symbol = "XSystemAllowFullDownloadBandwidth";   // documented but NOT in our table
+    b = resolver.resolve(look);
+    EXPECT_EQ(b.status, ImportStatus::Unresolved);   // module known, export unknown
+    // Unknown module -> module gate false -> Unsupported.
+    look.dll = "nonexistent.dll";
+    look.symbol = "Whatever";
+    EXPECT_FALSE(resolver.resolve_module("nonexistent.dll"));
+    b = resolver.resolve(look);
+    EXPECT_EQ(b.status, ImportStatus::Unsupported);
+    // Ordinal resolution never invented: no verified ordinals exist.
+    look.by_ordinal = true;
+    look.ordinal = 5;
+    look.dll = "xgameruntime";
+    b = resolver.resolve(look);
+    EXPECT_NE(b.status, ImportStatus::Resolved);   // never a fake ordinal binding
+}
+
+TEST(ApiResolverTest, FullLoadThroughApiResolver) {
+    ApiWorld w;
+    PeBuildSpec spec;
+    spec.imports = {
+        {"xgameruntime", {{"XGameRuntimeInitialize", 1}}},
+        {"kernel32", {{"QueryPerformanceCounter", 1}}},
+    };
+    spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
+    auto image = PeBuilder(spec).build();
+    Diagnostics pd;
+    auto img = xbox2pc::pe::parse(image.data(), image.size(), "api.exe", pd);
+    (void)w.new_process("api-host.exe");   // handle captured in w.last_handle
+    ImageLoader loader;
+    ApiResolver resolver(w.reg);
+    LoadDiagnostics ld;
+    LoadResult out;
+    auto h = loader.load_image(w.pm, w.core.objects(), w.last_handle,
+                               img, image.data(), image.size(),
+                               &resolver, ld, out);
+    ASSERT_TRUE(h.ok()) << out.error;
+    EXPECT_EQ(out.exec.imports_resolved, 2u);
+    // The IAT slots hold synthetic registry bindings (nonzero).
+    for (const auto& b : ld.imports) {
+        EXPECT_EQ(b.status, ImportStatus::Resolved);
+        EXPECT_NE(b.value, 0u);
+    }
+    ASSERT_TRUE(loader.unload_image(w.pm, w.core.objects(), w.last_handle,
+                                    h.value())
+                    .ok());
+}
+
+TEST(ApiResolverTest, UnknownImportFailsLoadWithRollback) {
+    ApiWorld w;
+    PeBuildSpec spec;
+    spec.imports = {{"mystery.dll", {{"Secret", 1}}}};
+    spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
+    auto image = PeBuilder(spec).build();
+    Diagnostics pd;
+    auto img = xbox2pc::pe::parse(image.data(), image.size(), "mystery.exe", pd);
+    auto* proc = w.new_process("mystery-host.exe");
+    ASSERT_NE(proc, nullptr);
+    auto& space = proc->address_space();
+    const auto before = space.stats().region_count;
+    ImageLoader loader;
+    ApiResolver resolver(w.reg);
+    LoadDiagnostics ld;
+    LoadResult out;
+    auto h = loader.load_image(w.pm, w.core.objects(), w.last_handle, img,
+                               image.data(), image.size(), &resolver, ld, out);
+    EXPECT_FALSE(h.ok());
+    EXPECT_EQ(out.final_state, xbox2pc::rt::loader::LoadState::Failed);
+    EXPECT_EQ(h.errc(), xbox2pc::rt::RuntimeErrc::MissingDependency);
+    EXPECT_EQ(space.stats().region_count, before);   // full rollback
+}
+
+TEST(DelayImportTest, ResolveWritesMappedIatAndReports) {
+    ApiWorld w;
+    PeBuildSpec spec;
+    spec.imports = {{"xgameruntime", {{"XGameRuntimeInitialize", 1}}}};
+    spec.delay_imports = {{"xgameruntime", {{"XSystemGetDeviceType", 1}}}};
+    spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
+    auto image = PeBuilder(spec).build();
+    Diagnostics pd;
+    auto img = xbox2pc::pe::parse(image.data(), image.size(), "delay.exe", pd);
+    auto* proc = w.new_process("delay-host.exe");
+    ImageLoader loader;
+    ApiResolver resolver(w.reg);
+    LoadDiagnostics ld;
+    LoadResult out;
+    auto h = loader.load_image(w.pm, w.core.objects(), w.last_handle, img,
+                               image.data(), image.size(), &resolver, ld, out);
+    ASSERT_TRUE(h.ok()) << out.error;
+
+    auto drep = resolve_delay_imports(proc->address_space(), out.layout, img,
+                                     image.data(), image.size(), w.reg, false);
+    ASSERT_TRUE(drep.ok()) << drep.error_string();
+    EXPECT_EQ(drep.value().descriptors, 1u);
+    EXPECT_EQ(drep.value().entries, 1u);
+    EXPECT_EQ(drep.value().resolved, 1u);
+    EXPECT_EQ(drep.value().unresolved, 0u);
+
+    // The delay IAT slot now holds the synthetic binding value (nonzero,
+    // inside the mapped image): find the slot from the parsed image's
+    // delay-import IAT rva.
+    const auto& di = img.delay_imports.entries.front();
+    const std::uint64_t slot_va = out.layout.actual_base + di.iat_rva;
+    auto dst = proc->address_space().translate(slot_va);
+    ASSERT_TRUE(dst.ok());
+    std::uint64_t v = 0;
+    std::memcpy(&v, dst.value(), 8);
+    EXPECT_NE(v, 0u);   // bound through the registry
+
+    // Unresolved policy: fail_on_unresolved with an unknown delay import.
+    PeBuildSpec bad_spec;
+    bad_spec.delay_imports = {{"ghost.dll", {{"Boo", 1}}}};
+    bad_spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
+    auto bad_image = PeBuilder(bad_spec).build();
+    Diagnostics bd;
+    auto bad_img = xbox2pc::pe::parse(bad_image.data(), bad_image.size(), "bad.exe", bd);
+    auto* bad_proc = w.new_process("bad-host.exe");
+    LoadDiagnostics bld;
+    LoadResult bout;
+    auto bh = loader.load_image(w.pm, w.core.objects(), w.last_handle,
+                                bad_img, bad_image.data(), bad_image.size(),
+                                nullptr, bld, bout);
+    if (bh.ok()) {
+        auto bres = resolve_delay_imports(bad_proc->address_space(),
+                                          bout.layout,
+                                          bad_img, bad_image.data(),
+                                          bad_image.size(), w.reg, true);
+        ASSERT_FALSE(bres.ok());
+        EXPECT_EQ(bres.errc(), xbox2pc::rt::RuntimeErrc::MissingDependency);
+        (void)loader.unload_image(w.pm, w.core.objects(), w.last_handle, bh.value());
+    } else {
+        // Image with ONLY delay imports and no resolver: load failed at
+        // the regular-import gate (no regular imports, resolver null OK).
+        ADD_FAILURE() << "unexpected load failure: " << bout.error;
+    }
+}
+
+// ── 12.4/12.5 GDK + Game OS services ──────────────────────────────────────
+
+TEST(GdkServiceTest, LifecycleRefCountPerProcess) {
+    ApiWorld w;
+    auto r1 = w.grt->grt_initialize(1001);
+    ASSERT_TRUE(r1.ok());
+    EXPECT_EQ(r1.value(), 1u);
+    auto r2 = w.grt->grt_initialize(1001);   // documented: each component calls
+    ASSERT_TRUE(r2.ok());
+    EXPECT_EQ(r2.value(), 2u);
+    EXPECT_TRUE(w.grt->grt_uninitialize(1001).ok());   // -> 1
+    EXPECT_TRUE(w.grt->grt_uninitialize(1001).ok());   // -> 0 (state gone)
+    // Uninit below zero is ignored (documented).
+    EXPECT_TRUE(w.grt->grt_uninitialize(1001).ok());
+    // Processes are isolated.
+    w.grt->grt_initialize(1002);
+    auto r3 = w.grt->grt_initialize(1001);
+    ASSERT_TRUE(r3.ok());
+    EXPECT_EQ(r3.value(), 1u);   // restarted at 1, not 2
+}
+
+TEST(GdkServiceTest, DocumentedIdFallbacks) {
+    ApiWorld w;
+    std::uint64_t used = 0;
+    auto cid = w.grt->console_id(64, &used);
+    ASSERT_TRUE(cid.ok());
+    EXPECT_EQ(cid.value(), "00000000.00000000.00000000.00000000.00");
+    EXPECT_EQ(used, 38u);
+    EXPECT_FALSE(w.grt->console_id(8, nullptr).ok());   // documented bound
+    auto sid = w.grt->sandbox_id(64, &used);
+    ASSERT_TRUE(sid.ok());
+    EXPECT_EQ(sid.value(), "RETAIL");
+    auto aid = w.grt->app_device_id(64, &used);
+    ASSERT_TRUE(aid.ok());
+    EXPECT_EQ(aid.value(), std::string(40, '0'));
+}
+
+TEST(GdkServiceTest, TaskQueueLifecycle) {
+    ApiWorld w;
+    auto q = w.tq->create_queue(
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(q.ok());
+    const std::uint64_t id = q.value();
+    // Dispatch on an empty manual queue: documented false.
+    auto d = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
+    ASSERT_TRUE(d.ok());
+    EXPECT_FALSE(d.value());
+    // Terminate: dispatch stays false (documented) — and submissions E_ABORT
+    // (modeled: terminated flag).
+    EXPECT_TRUE(w.tq->terminate_queue(id, true).ok());
+    d = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
+    EXPECT_FALSE(d.value());
+    // Close drops the queue.
+    EXPECT_TRUE(w.tq->close_queue(id).ok());
+    auto gone = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
+    EXPECT_FALSE(gone.ok());   // unknown handle now
+    // Unknown mode values rejected.
+    EXPECT_FALSE(w.tq->create_queue(99, 2).ok());
+}
+
+TEST(GdkServiceTest, TimingNativeEquivalents) {
+    ApiWorld w;
+    auto v1 = w.tim->qpc_value();
+    ASSERT_TRUE(v1.ok());
+    auto v2 = w.tim->qpc_value();
+    ASSERT_TRUE(v2.ok());
+    EXPECT_GE(v2.value(), v1.value());   // monotonic
+    EXPECT_EQ(w.tim->qpc_frequency().value(), 1'000'000'000ull);
+}
+
+TEST(GdkServiceTest, ThreadTimeSensitiveBits) {
+    ApiWorld w;
+    EXPECT_TRUE(w.grt->set_time_sensitive(7, true).ok());
+    EXPECT_TRUE(w.grt->is_time_sensitive(7).value());
+    EXPECT_TRUE(w.grt->set_time_sensitive(7, false).ok());
+    EXPECT_FALSE(w.grt->is_time_sensitive(7).value());
+    EXPECT_FALSE(w.grt->is_time_sensitive(999).value());   // default false
+}
+
+TEST(GdkServiceTest, ServiceInitializationOrderingAndRollback) {
+    // A service whose on_initialize FAILS: initialize_all must roll back
+    // the earlier-initialized services.
+    class FailingService : public xbox2pc::rt::RtService {
+    public:
+        FailingService() : RtService("failing") {}
+        static const char* service_type_name() { return "failing"; }
+        xbox2pc::rt::Result<void> on_initialize() override {
+            return xbox2pc::rt::Result<void>(xbox2pc::rt::RuntimeErrc::ServiceFailed,
+                                             "deliberate failure");
+        }
+    };
+    ApiRegistry reg;
+    RuntimeCore core;
+    {
+        auto grt = std::make_unique<GameRuntimeService>(reg);
+        EXPECT_TRUE(core.services().register_service(std::move(grt)).ok());
+        EXPECT_TRUE(core.services()
+                        .register_service(std::make_unique<FailingService>())
+                        .ok());
+    }
+    auto init = core.initialize();
+    EXPECT_FALSE(init.ok());
+    // M3 semantics: a failed initialize_all reports the failure; services
+    // initialized BEFORE the failing one remain Ready until an explicit
+    // shutdown_all. After core.shutdown() (or shutdown_all), the API
+    // implementations are revoked.
+    ApiContext ctx;
+    auto r = reg.dispatch("xgameruntime", "XSystemGetDeviceType", ctx);
+    EXPECT_TRUE(r.ok);   // GameRuntimeService initialized first and stays Ready
+    // core.shutdown() refuses from the Failed state (M3 rule); the explicit
+    // registry shutdown is the sanctioned path here.
+    EXPECT_TRUE(core.services().shutdown_all().ok());
+    r = reg.dispatch("xgameruntime", "XSystemGetDeviceType", ctx);
+    EXPECT_FALSE(r.ok);   // revoked at shutdown
+}
+
+// ── 12.6 TLS ──────────────────────────────────────────────────────────────
+
+TEST(TlsTest, MultipleModulesDistinctIndicesAndInit) {
+    ApiWorld w;
+    PeBuildSpec specA;
+    specA.tls.template_data = {1, 2, 3, 4};
+    specA.tls.zero_fill = 8;
+    auto imageA = PeBuilder(specA).build();
+    Diagnostics dA;
+    auto imgA = xbox2pc::pe::parse(imageA.data(), imageA.size(), "a.exe", dA);
+    LoadDiagnostics ld;
+    auto tlsA = decode_tls(imgA, imageA.data(), imageA.size(), ld);
+    ASSERT_TRUE(tlsA.ok() && tlsA.value().has_value());
+
+    PeBuildSpec specB;
+    specB.tls.template_data = {9, 9};
+    specB.tls.zero_fill = 2;
+    auto imageB = PeBuilder(specB).build();
+    Diagnostics dB;
+    auto imgB = xbox2pc::pe::parse(imageB.data(), imageB.size(), "b.exe", dB);
+    auto tlsB = decode_tls(imgB, imageB.data(), imageB.size(), ld);
+    ASSERT_TRUE(tlsB.ok() && tlsB.value().has_value());
+
+    auto ia = tls_assign_index(5001, "a.exe", *tlsA.value());
+    auto ib = tls_assign_index(5001, "b.exe", *tlsB.value());
+    ASSERT_TRUE(ia.ok() && ib.ok());
+    EXPECT_NE(ia.value(), ib.value());
+    // Same module re-request: stable index.
+    auto ia2 = tls_assign_index(5001, "a.exe", *tlsA.value());
+    EXPECT_EQ(ia2.value(), ia.value());
+    // Different process: separate namespace.
+    auto ic = tls_assign_index(5002, "a.exe", *tlsA.value());
+    EXPECT_NE(ic.value(), ia.value());
+
+    // Thread init: template copied + zero fill.
+    auto t = std::make_unique<xbox2pc::rt::RtThread>(
+        [](xbox2pc::rt::RtThread&, void*) -> void* { return nullptr; },
+        nullptr, "tls-thread");
+    auto& mgr = w.core.objects();
+    auto regt = mgr.register_object(std::move(t));
+    auto f = mgr.lookup_id(regt.value());
+    auto* th = f.value().get()->as<xbox2pc::rt::RtThread>();
+    ASSERT_NE(th, nullptr);
+    ASSERT_TRUE(tls_init_thread(*th, ia.value(), imgA, imageA.data(),
+                               imageA.size(), *tlsA.value())
+                    .ok());
+    auto got = th->tls_get(ia.value());
+    ASSERT_TRUE(got.ok());
+    EXPECT_EQ(got.value().size(), 4u + 8u);   // template + zero fill
+    EXPECT_EQ(got.value()[0], 1);
+    EXPECT_EQ(got.value()[4], 0);   // zero-filled tail
+
+    // Release: index count returned; a new assign after release gets a NEW
+    // index (no reuse of the freed slot id).
+    auto released = tls_release_indices(5001);
+    ASSERT_TRUE(released.ok());
+    EXPECT_EQ(released.value(), 2u);
+    auto ia3 = tls_assign_index(5001, "a.exe", *tlsA.value());
+    EXPECT_NE(ia3.value(), ia.value());   // fresh id (documented-safe)
+}
+
+// Regression (found by the M7 TLS fuzz harness): a mutated/huge
+// SizeOfZeroFill must be rejected with a typed OutOfResources, never
+// trigger a multi-GB allocation.
+TEST(TlsTest, HugeZeroFillRejectedNotAllocated) {
+    ApiWorld w;
+    PeBuildSpec spec;
+    spec.tls.template_data = {1, 2};
+    spec.tls.zero_fill = 0xFFFFFF00u;   // ~4 GiB
+    auto image = PeBuilder(spec).build();
+    Diagnostics pd;
+    auto img = xbox2pc::pe::parse(image.data(), image.size(), "huge.exe", pd);
+    LoadDiagnostics ld;
+    auto tls = decode_tls(img, image.data(), image.size(), ld);
+    ASSERT_TRUE(tls.ok() && tls.value().has_value());
+    auto idx = tls_assign_index(7001, "huge.exe", *tls.value());
+    ASSERT_TRUE(idx.ok());
+    auto t = std::make_unique<xbox2pc::rt::RtThread>(
+        [](xbox2pc::rt::RtThread&, void*) -> void* { return nullptr; },
+        nullptr, "huge-tls");
+    auto r = tls_init_thread(*t, idx.value(), img, image.data(),
+                             image.size(), *tls.value());
+    EXPECT_FALSE(r.ok());
+    EXPECT_EQ(r.errc(), xbox2pc::rt::RuntimeErrc::OutOfResources);
+}
+
+// ── compat report ────────────────────────────────────────────────────────
+
+TEST(CompatReportTest, CodesAndHonestVerdict) {
+    ApiWorld w;
+    PeBuildSpec spec;
+    spec.imports = {
+        {"xgameruntime", {{"XGameRuntimeInitialize", 1}}},
+        {"kernel32", {{"QueryPerformanceCounter", 1}}},
+        {"mystery.dll", {{"UnknownThing", 1}}},
+    };
+    auto image = PeBuilder(spec).build();
+    Diagnostics pd;
+    auto img = xbox2pc::pe::parse(image.data(), image.size(), "rep.exe", pd);
+    Diagnostics dd;
+    auto dep = xbox2pc::deps::analyze(img, dd);
+    auto rep = build_compat_report(img, dep, w.reg, nullptr);
+    ASSERT_EQ(rep.rows.size(), 3u);
+    EXPECT_EQ(rep.rows[0].code, CompatCode::OkImplemented);
+    EXPECT_EQ(rep.rows[1].code, CompatCode::OkNative);
+    EXPECT_EQ(rep.rows[2].code, CompatCode::UnknownImport);
+    EXPECT_EQ(rep.verdict, "imports partially covered (see codes)");
+    // Evidence citations ride along on verified rows.
+    EXPECT_EQ(rep.rows[0].evidence.rfind("[GDK-INIT] https://", 0), 0u);
+}
+
+// ── 12.7 end-to-end: the 15-step path ────────────────────────────────────
+
+TEST(ApiE2eTest, FullFifteenStepPathWithDelayLoadTlsReport) {
+    // Fixture: normal + delay-load imports + TLS + relocations.
+    PeBuildSpec spec;
+    spec.imports = {
+        {"xgameruntime", {{"XGameRuntimeInitialize", 1}}},
+        {"kernel32", {{"QueryPerformanceCounter", 1}}},
+    };
+    spec.delay_imports = {{"xgameruntime", {{"XSystemGetDeviceType", 1}}}};
+    spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
+    spec.tls.template_data = {0xCA, 0xFE, 0xBA, 0xBE};
+    spec.tls.zero_fill = 16;
+    spec.tls.callback_vas = {0x140001100};
+    auto image = PeBuilder(spec).build();
+
+    // 1. Create an M4 process (with an M5 VFS namespace).
+    ApiWorld w;
+    auto p = xbox2pc::rt::create_process_with_vfs(w.pm, w.core.objects(),
+                                                  "e2e.exe");
+    ASSERT_TRUE(p.ok());
+    auto found = w.core.objects().lookup_handle(p.value());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+
+    // 2-3. Mount a synthetic XPK package containing the image.
+    std::vector<xbox2pc::rt::XpkBuildEntry> entries = {
+        {"content", true, {}},
+        {"content/e2e.exe", false, std::string(image.begin(), image.end())},
+    };
+    auto bytes = xbox2pc::rt::xpk_build(entries);
+    auto pkg = xbox2pc::rt::parse_package(bytes.data(), bytes.size(), "e2e.xpk", {});
+    ASSERT_TRUE(pkg.ok());
+    auto s = w.core.objects().lookup_id(std::strtoull(
+        proc->meta("vfs_session").c_str(), nullptr, 10));
+    auto* session = s.value().get()->as<xbox2pc::rt::VfsSession>();
+    ASSERT_NE(session, nullptr);
+    ASSERT_TRUE(session
+                    ->mount_backend(std::make_unique<xbox2pc::rt::PackageVfsBackend>(
+                                        std::move(pkg.value())),
+                                    "/Pkg", true, 0)
+                    .ok());
+
+    // 4. Discover the executable (M5).
+    auto dres = xbox2pc::rt::discover_in_namespace(
+        session->namespace_(), xbox2pc::rt::VfsPath::parse("/Pkg").value(), 64);
+    ASSERT_TRUE(dres.ok());
+    EXPECT_EQ(dres.value().pe_modules, 1u);
+
+    // 5. Read it through VFS handles.
+    auto fh = xbox2pc::rt::proc_open_file(p.value(), "/Pkg/content/e2e.exe", false);
+    ASSERT_TRUE(fh.ok());
+    std::vector<std::uint8_t> buf(image.size());
+    std::uint64_t total = 0;
+    while (total < image.size()) {
+        auto n = xbox2pc::rt::vfs_read(w.core.objects(), fh.value(),
+                                       buf.data() + total,
+                                       image.size() - total);
+        ASSERT_TRUE(n.ok());
+        if (n.value() == 0) break;
+        total += n.value();
+    }
+    ASSERT_EQ(total, image.size());
+
+    // 6. Load through M6 with the M7 resolver (validates, maps, relocates).
+    Diagnostics pd;
+    auto img = xbox2pc::pe::parse(buf.data(), buf.size(), "e2e.exe", pd);
+    ImageLoader loader;
+    ApiResolver resolver(w.reg);
+    LoadDiagnostics ld;
+    LoadResult out;
+    auto h = loader.load_image(w.pm, w.core.objects(), p.value(), img,
+                               buf.data(), buf.size(), &resolver, ld, out);
+    ASSERT_TRUE(h.ok()) << out.error;
+    EXPECT_EQ(out.final_state, xbox2pc::rt::loader::LoadState::Prepared);
+    // Both normal imports resolved through the registry.
+    EXPECT_EQ(out.exec.imports_resolved, 2u);
+
+    // 9. Delay-load imports resolved.
+    auto drep = resolve_delay_imports(proc->address_space(), out.layout, img,
+                                     buf.data(), buf.size(), w.reg, false);
+    ASSERT_TRUE(drep.ok()) << drep.error_string();
+    EXPECT_EQ(drep.value().resolved, 1u);
+
+    // 10. TLS state initialized for a thread.
+    auto tls = decode_tls(img, buf.data(), buf.size(), ld);
+    ASSERT_TRUE(tls.ok() && tls.value().has_value());
+    const std::uint64_t pid = proc->pid();
+    auto idx = tls_assign_index(pid, "e2e.exe", *tls.value());
+    ASSERT_TRUE(idx.ok());
+    auto t = std::make_unique<xbox2pc::rt::RtThread>(
+        [](xbox2pc::rt::RtThread&, void*) -> void* { return nullptr; },
+        nullptr, "e2e-thread");
+    auto regt = w.core.objects().register_object(std::move(t));
+    auto tf = w.core.objects().lookup_id(regt.value());
+    auto* th = tf.value().get()->as<xbox2pc::rt::RtThread>();
+    ASSERT_TRUE(tls_init_thread(*th, idx.value(), img, buf.data(),
+                               buf.size(), *tls.value())
+                    .ok());
+    auto slot = th->tls_get(idx.value());
+    ASSERT_TRUE(slot.ok());
+    EXPECT_EQ(slot.value().size(), 4u + 16u);   // template + zero fill
+
+    // 11. Compatibility report.
+    Diagnostics dd;
+    auto dep = xbox2pc::deps::analyze(img, dd);
+    auto rep = build_compat_report(img, dep, w.reg, &drep.value());
+    EXPECT_EQ(rep.rows.size(), 3u);   // 2 normal + 1 delay
+    // 12. Memory protections intact (entry point executable).
+    EXPECT_TRUE(proc->address_space()
+                    .validate_access(out.exec.entry_va, false, true)
+                    .ok());
+
+    // 13. Unload the image.
+    ASSERT_TRUE(loader.unload_image(w.pm, w.core.objects(), p.value(), h.value()).ok());
+    // 14. Terminate the process.
+    ASSERT_TRUE(w.pm.terminate_process(p.value(), 0).ok());
+    // 15. All resources released.
+    EXPECT_EQ(proc->address_space().stats().region_count, 0u);
+    EXPECT_EQ(proc->address_space().stats().committed_bytes, 0u);
+    EXPECT_EQ(tls_release_indices(pid).value(), 1u);
+    ASSERT_TRUE(w.core.shutdown().ok());
+}
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

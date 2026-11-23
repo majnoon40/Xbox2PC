@@ -92,6 +92,18 @@ void usage() {
                  "       xbox2pc load-image <pe-file> [--json <out>]\n"
                  "       xbox2pc unload-image <pe-file>\n"
                  "       xbox2pc image-info <pe-file> [--json <out>]\n"
+                 "       xbox2pc cpu-state [--json <out>]\n"
+                 "       xbox2pc abi-info [--json <out>]\n"
+                 "       xbox2pc execution-info [--json <out>]\n"
+                 "       xbox2pc tls-info [--json <out>]\n"
+                 "       xbox2pc execute-test [--json <out>]\n"
+                 "       xbox2pc api-list [--json <out>]\n"
+                 "       xbox2pc api-info <library!name> [--json <out>]\n"
+                 "       xbox2pc api-status [--json <out>]\n"
+                 "       xbox2pc dispatch-test <library!name> [--json <out>]\n"
+                 "       xbox2pc compat-report <pe-file> [--json <out>]\n"
+                 "       xbox2pc gdk-services [--json <out>]\n"
+                 "       xbox2pc gameos-services [--json <out>]\n"
                  "       xbox2pc --version\n");
 }
 
@@ -2049,6 +2061,708 @@ int cmd_image_info(const std::string& path,
     return 0;
 }
 
+
+// ── M7: API compatibility CLI commands ─────────────────────────────────────
+//
+// Every command boots a LIVE runtime with the three M7 services
+// initialized (GameRuntime/TaskQueue/Timing registered before
+// core.initialize() so initialize_all covers them). Outputs report
+// evidence, statuses, and limitations honestly; nothing is faked.
+
+#include "xbox2pc/gdk_services.hpp"
+#include "xbox2pc/compat_report.hpp"
+#include "xbox2pc/dep_analyzer.hpp"
+
+// A live world with M7 services (declared so the registry outlives core).
+namespace {
+struct M7World {
+    xbox2pc::rt::api::ApiRegistry reg;
+    xbox2pc::rt::RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm;
+    xbox2pc::rt::api::GameRuntimeService* grt = nullptr;
+    xbox2pc::rt::api::TaskQueueService* tq = nullptr;
+    xbox2pc::rt::api::TimingService* tim = nullptr;
+
+    M7World() : pm(core.objects()) {
+        {
+            auto grt_s = std::make_unique<xbox2pc::rt::api::GameRuntimeService>(reg);
+            auto tq_s = std::make_unique<xbox2pc::rt::api::TaskQueueService>(reg, pm);
+            auto tim_s = std::make_unique<xbox2pc::rt::api::TimingService>(reg);
+            grt = grt_s.get();
+            tq = tq_s.get();
+            tim = tim_s.get();
+            (void)core.services().register_service(std::move(grt_s));
+            (void)core.services().register_service(std::move(tq_s));
+            (void)core.services().register_service(std::move(tim_s));
+        }
+        if (!core.initialize().ok()) return;
+    }
+    ~M7World() { (void)core.shutdown(); }
+};
+}  // namespace
+
+int cmd_api_list(const std::optional<std::string>& json_out) {
+    M7World w;
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("descriptors", static_cast<std::uint64_t>(w.reg.descriptor_count()));
+        j.set("implementations", static_cast<std::uint64_t>(w.reg.implementation_count()));
+        Json arr = Json::array();
+        for (const auto* d : w.reg.all()) {
+            Json dj = Json::object();
+            dj.set("library", d->library);
+            dj.set("export", d->export_name);
+            dj.set("signature", d->signature);
+            dj.set("convention", xbox2pc::rt::api::convention_to_name(d->convention));
+            dj.set("params", static_cast<std::uint64_t>(d->param_count));
+            dj.set("return", xbox2pc::rt::api::return_kind_to_name(d->ret));
+            dj.set("compat", xbox2pc::rt::api::api_status_to_name(d->compat));
+            dj.set("impl", xbox2pc::rt::api::api_status_to_name(d->impl));
+            dj.set("evidence", d->evidence + " " + d->evidence_url);
+            dj.set("implemented", w.reg.has_implementation(d->library, d->export_name));
+            arr.push_back(std::move(dj));
+        }
+        j.set("apis", std::move(arr));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc api-list (%zu descriptors, %zu implementations)\n",
+                w.reg.descriptor_count(), w.reg.implementation_count());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto* d : w.reg.all()) {
+        const bool has_impl = w.reg.has_implementation(d->library, d->export_name);
+        std::printf("  %-24s %-34s %s/%s%s\n",
+                    (d->library + "!" + d->export_name).c_str(),
+                    d->signature.c_str(),
+                    xbox2pc::rt::api::api_status_to_name(d->compat),
+                    xbox2pc::rt::api::api_status_to_name(d->impl),
+                    has_impl ? "" : " [no impl]");
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_api_info(const std::string& api,
+                 const std::optional<std::string>& json_out) {
+    M7World w;
+    // api is "library!export" (or just "export" -> search all).
+    std::string lib, name;
+    const auto sep = api.find('!');
+    if (sep != std::string::npos) {
+        lib = api.substr(0, sep);
+        name = api.substr(sep + 1);
+    } else {
+        name = api;
+    }
+    const xbox2pc::rt::api::ApiDescriptor* d =
+        lib.empty() ? nullptr : w.reg.find(lib, name);
+    if (d == nullptr) {
+        // Search by export name across libraries.
+        for (const auto* cand : w.reg.all()) {
+            if (cand->export_name == name) {
+                d = cand;
+                break;
+            }
+        }
+    }
+    if (d == nullptr) {
+        std::fprintf(stderr, "error: no verified descriptor for '%s'\n",
+                     api.c_str());
+        return 1;
+    }
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("library", d->library);
+        j.set("export", d->export_name);
+        j.set("signature", d->signature);
+        j.set("convention", xbox2pc::rt::api::convention_to_name(d->convention));
+        j.set("params", static_cast<std::uint64_t>(d->param_count));
+        j.set("return", xbox2pc::rt::api::return_kind_to_name(d->ret));
+        j.set("compat", xbox2pc::rt::api::api_status_to_name(d->compat));
+        j.set("impl", xbox2pc::rt::api::api_status_to_name(d->impl));
+        j.set("evidence", d->evidence);
+        j.set("url", d->evidence_url);
+        j.set("notes", d->notes);
+        j.set("implemented", w.reg.has_implementation(d->library, d->export_name));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc api-info %s!%s\n", d->library.c_str(),
+                d->export_name.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("signature:  %s\n", d->signature.c_str());
+    std::printf("convention: %s (%u documented params, return %s)\n",
+                xbox2pc::rt::api::convention_to_name(d->convention), d->param_count,
+                xbox2pc::rt::api::return_kind_to_name(d->ret));
+    std::printf("status:     compat=%s impl=%s registered=%s\n",
+                xbox2pc::rt::api::api_status_to_name(d->compat),
+                xbox2pc::rt::api::api_status_to_name(d->impl),
+                w.reg.has_implementation(d->library, d->export_name) ? "yes" : "NO");
+    std::printf("evidence:   %s\n              %s\n", d->evidence.c_str(),
+                d->evidence_url.c_str());
+    std::printf("notes:      %s\n", d->notes.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_api_status(const std::optional<std::string>& json_out) {
+    M7World w;
+    std::uint64_t by_status[6] = {0};
+    for (const auto* d : w.reg.all()) {
+        by_status[static_cast<std::size_t>(d->compat)]++;
+    }
+    const char* names[6] = {"native-equivalent", "fully-implemented",
+                            "partially-implemented", "stubbed",
+                            "unsupported", "unknown"};
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("descriptors", static_cast<std::uint64_t>(w.reg.descriptor_count()));
+        j.set("implementations", static_cast<std::uint64_t>(w.reg.implementation_count()));
+        Json st = Json::object();
+        for (int i = 0; i < 6; ++i) {
+            st.set(names[i], by_status[static_cast<std::size_t>(i)]);
+        }
+        j.set("by_status", std::move(st));
+        Json regs = Json::array();
+        for (const auto& r : w.reg.registrations()) {
+            Json rj = Json::object();
+            rj.set("library", r.library);
+            rj.set("export", r.export_name);
+            rj.set("owner", r.owner);
+            rj.set("test_only", r.test_only);
+            rj.set("implementation", r.describe);
+            regs.push_back(std::move(rj));
+        }
+        j.set("registrations", std::move(regs));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc api-status (live registry)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (int i = 0; i < 6; ++i) {
+        std::printf("  %-22s %llu\n", names[i],
+                    static_cast<unsigned long long>(by_status[static_cast<std::size_t>(i)]));
+    }
+    std::printf("implementations: %zu of %zu descriptors\n",
+                w.reg.implementation_count(), w.reg.descriptor_count());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_dispatch_test(const std::string& api,
+                      const std::optional<std::string>& json_out) {
+    M7World w;
+    std::string lib, name;
+    const auto sep = api.find('!');
+    if (sep != std::string::npos) {
+        lib = api.substr(0, sep);
+        name = api.substr(sep + 1);
+    } else {
+        name = api;
+        for (const auto* cand : w.reg.all()) {
+            if (cand->export_name == name) {
+                lib = cand->library;
+                break;
+            }
+        }
+    }
+    if (lib.empty()) {
+        std::fprintf(stderr, "error: unknown api '%s' (use library!name)\n",
+                     api.c_str());
+        return 1;
+    }
+    // Zero-arg dispatch (the controlled interface: no guest code runs).
+    xbox2pc::rt::api::ApiContext ctx;
+    const auto* d = w.reg.find(lib, name);
+    if (d != nullptr && d->param_count != 0) {
+        // Arguments default to zero-filled slots matching the documented
+        // count (e.g. size=0 probes the validation path honestly).
+        ctx.arg_count = d->param_count;
+    }
+    const auto r = w.reg.dispatch(lib, name, ctx);
+    const bool ok = r.ok;
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("api", lib + "!" + name);
+        j.set("dispatched", ok);
+        j.set("return_value", r.return_value);
+        j.set("error", r.error);
+        j.set("note", r.note);
+        j.set("has_out", r.has_out);
+        j.set("out_value", r.out_value);
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return ok ? 0 : 1;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc dispatch-test %s!%s (controlled interface; no guest code)\n",
+                lib.c_str(), name.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  dispatched: %s\n", ok ? "yes" : "NO");
+    std::printf("  return:    %s (0x%llX)\n",
+                ok ? "success" : "error",
+                static_cast<unsigned long long>(r.return_value));
+    if (!r.error.empty()) std::printf("  error:     %s\n", r.error.c_str());
+    if (!r.note.empty()) std::printf("  note:      %s\n", r.note.c_str());
+    if (r.has_out) {
+        std::printf("  out:       %llu (0x%llX)\n",
+                    static_cast<unsigned long long>(r.out_value),
+                    static_cast<unsigned long long>(r.out_value));
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return ok ? 0 : 1;
+}
+
+int cmd_gdk_services(const std::optional<std::string>& json_out) {
+    M7World w;
+    auto list = w.core.services().list_services();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        Json arr = Json::array();
+        for (const auto& s : list) {
+            Json sj = Json::object();
+            sj.set("name", s.name);
+            sj.set("state", xbox2pc::rt::service_state_to_name(s.state));
+            sj.set("dependencies", static_cast<std::uint64_t>(s.dependencies.size()));
+            sj.set("last_error", s.last_error);
+            arr.push_back(std::move(sj));
+        }
+        j.set("services", std::move(arr));
+        j.set("implementations", static_cast<std::uint64_t>(w.reg.implementation_count()));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc gdk-services (live service registry)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& s : list) {
+        std::printf("  %-22s %-12s deps=%zu%s\n", s.name.c_str(),
+                    xbox2pc::rt::service_state_to_name(s.state),
+                    s.dependencies.size(),
+                    s.last_error.empty() ? "" : (" err=" + s.last_error).c_str());
+    }
+    std::printf("API implementations registered: %zu\n",
+                w.reg.implementation_count());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_gameos_services(const std::optional<std::string>& json_out) {
+    // The Game OS surface in M7 is the M4-backed runtime surface exposed
+    // through the GameRuntimeService (per-process lifecycle state) plus
+    // the timing/taskqueue services: report them as the honest Game OS
+    // compatibility foundation.
+    M7World w;
+    auto p = w.pm.create_process("gameos-probe.exe", 16ull << 20);
+    std::string pid_note;
+    if (p.ok()) {
+        auto r1 = w.grt->grt_initialize(1);
+        pid_note = r1.ok() ? "per-process GRT state tracked" : "init refused";
+        (void)w.pm.terminate_process(p.value(), 0);
+    }
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("surface", "game-os foundation via M4-backed services");
+        j.set("lifecycle_state", pid_note);
+        j.set("services", static_cast<std::uint64_t>(w.core.services().service_count()));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc gameos-services (M4-backed Game OS foundation)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  surface:    process lifecycle, threads, sync, memory,\n"
+                "              handles, VFS, loader — all M3..M6 subsystems\n"
+                "              exposed through documented GDK-facing APIs\n");
+    std::printf("  lifecycle: %s\n", pid_note.c_str());
+    std::printf("  services:  %zu registered, %zu API implementations\n",
+                w.core.services().service_count(),
+                w.reg.implementation_count());
+    std::printf("NOTE: this is the COMPATIBILITY FOUNDATION, not a Game OS\n"
+                "implementation. No kernel emulation is claimed.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_compat_report(const std::string& path,
+                      const std::optional<std::string>& json_out) {
+    auto bytes = read_pe_bytes(path);
+    if (!bytes.has_value()) {
+        std::fprintf(stderr, "error: cannot read '%s'\n", path.c_str());
+        return 1;
+    }
+    xbox2pc::diag::Diagnostics diags;
+    xbox2pc::pe::PeImage img;
+    try {
+        img = xbox2pc::pe::parse(bytes->data(), bytes->size(), path, diags);
+    } catch (const xbox2pc::pe::ParseError& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+    M7World w;
+    // Delay-load resolution into a scratch mapped image (best effort;
+    // unresolved entries are reported, never hidden).
+    std::optional<xbox2pc::rt::api::DelayLoadReport> delay;
+    {
+        auto p = w.pm.create_process("compat-probe.exe", 32ull << 20);
+        if (p.ok()) {
+            auto found = w.core.objects().lookup_handle(p.value());
+            auto* proc = found.value().get()->as<xbox2pc::rt::ManagedProcess>();
+            xbox2pc::rt::loader::ImageLoader loader;
+            xbox2pc::rt::loader::LoadDiagnostics ld;
+            auto lay = loader.map_image(proc->address_space(), img,
+                                        bytes->data(), bytes->size(), 0, ld);
+            if (lay.ok()) {
+                auto d = xbox2pc::rt::api::resolve_delay_imports(
+                    proc->address_space(), lay.value(), img, bytes->data(),
+                    bytes->size(), w.reg, false);
+                if (d.ok()) delay = d.value();
+            }
+            (void)w.pm.terminate_process(p.value(), 0);
+        }
+    }
+    xbox2pc::diag::Diagnostics dd;
+    auto dep = xbox2pc::deps::analyze(img, dd);
+    auto rep = xbox2pc::rt::api::build_compat_report(
+        img, dep, w.reg, delay.has_value() ? &delay.value() : nullptr);
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("source", rep.source);
+        Json arr = Json::array();
+        for (const auto& row : rep.rows) {
+            Json rj = Json::object();
+            rj.set("dll", row.dll);
+            rj.set("name", row.name);
+            rj.set("by_ordinal", row.by_ordinal);
+            rj.set("delay_load", row.delay_load);
+            rj.set("code", xbox2pc::rt::api::compat_code_to_name(row.code));
+            rj.set("verified", row.verified);
+            rj.set("compat", xbox2pc::rt::api::api_status_to_name(row.compat));
+            rj.set("evidence", row.evidence);
+            rj.set("signature", row.signature);
+            rj.set("note", row.note);
+            arr.push_back(std::move(rj));
+        }
+        j.set("imports", std::move(arr));
+        j.set("delay_entries", static_cast<std::uint64_t>(rep.delay_entries));
+        j.set("delay_resolved", static_cast<std::uint64_t>(rep.delay_resolved));
+        j.set("verdict", rep.verdict);
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc compat-report %s\n", path.c_str());
+    std::printf("%s\n", std::string(64, '=').c_str());
+    for (const auto& row : rep.rows) {
+        std::printf("  %-16s %s!%s%s\n",
+                    xbox2pc::rt::api::compat_code_to_name(row.code),
+                    row.dll.c_str(), row.name.c_str(),
+                    row.delay_load ? " [delay]" : "");
+        if (row.verified) {
+            std::printf("      %s\n      evidence: %s\n",
+                        row.signature.c_str(), row.evidence.c_str());
+        } else if (!row.note.empty()) {
+            std::printf("      %s\n", row.note.c_str());
+        }
+    }
+    std::printf("delay-load: %zu entries, %zu resolved\n", rep.delay_entries,
+                rep.delay_resolved);
+    std::printf("verdict: %s\n", rep.verdict.c_str());
+    std::printf("NOTE: import coverage is NOT game compatibility.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+
+// ── M8: execution CLI commands ──────────────────────────────────────────────
+
+#include "xbox2pc/execution_context.hpp"
+#include "xbox2pc/pe_builder.hpp"
+#include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/guest_cpu_state.hpp"
+#include "xbox2pc/guest_memory.hpp"
+#include "xbox2pc/xbox_abi.hpp"
+
+namespace {
+struct M8World {
+    xbox2pc::rt::api::ApiRegistry reg;
+    xbox2pc::rt::RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm;
+    M8World() : pm(core.objects()) {
+        {
+            auto grt = std::make_unique<xbox2pc::rt::api::GameRuntimeService>(reg);
+            (void)core.services().register_service(std::move(grt));
+        }
+        (void)core.initialize();
+    }
+    ~M8World() { (void)core.shutdown(); }
+};
+}  // namespace
+
+int cmd_cpu_state(const std::optional<std::string>& json_out) {
+    xbox2pc::rt::cpu::CpuState c;
+    c.reset();
+    // A representative initialized state.
+    c.set_reg(xbox2pc::rt::cpu::Gpr::Sp, 0x20040000);
+    c.set_reg(xbox2pc::rt::cpu::Gpr::Rax, 0x42);
+    c.rip = 0x20001000;
+    xbox2pc::rt::cpu::CpuSnapshot snap;
+    (void)xbox2pc::rt::cpu::snapshot_into(c, snap);
+    const auto bytes = snap.serialize();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        Json g = Json::object();
+        const char* names[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                                 "r8","r9","r10","r11","r12","r13","r14","r15"};
+        for (int i = 0; i < 16; ++i) g.set(names[i], c.gprs[i]);
+        j.set("gprs", std::move(g));
+        j.set("rip", c.rip);
+        j.set("rflags", c.rflags);
+        j.set("rflags_hex", "0x" + [&] { char b[20]; std::snprintf(b, sizeof b, "%llx",
+                (unsigned long long)c.rflags); return std::string(b); }());
+        j.set("mxcsr", static_cast<std::uint64_t>(c.mxcsr));
+        j.set("fcw", static_cast<std::uint64_t>(c.fcw));
+        j.set("xmm_count", 16u);
+        j.set("validate_problems", static_cast<std::uint64_t>(c.validate().size()));
+        j.set("snapshot_bytes", static_cast<std::uint64_t>(bytes.size()));
+        j.set("roundtrip", xbox2pc::rt::cpu::CpuSnapshot::deserialize(bytes.data(), bytes.size()).ok());
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc cpu-state (deterministic model; NO instruction-set claim)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    const char* names[16] = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                             "r8","r9","r10","r11","r12","r13","r14","r15"};
+    for (int i = 0; i < 16; ++i) {
+        std::printf("  %-4s 0x%016llx\n", names[i],
+                    (unsigned long long)c.gprs[i]);
+    }
+    std::printf("  rip  0x%016llx\n  rflags 0x%llx (bit1 fixed, IF=1)\n",
+                (unsigned long long)c.rip, (unsigned long long)c.rflags);
+    std::printf("  mxcsr 0x%x (documented 0x1F80)  fcw 0x%x (documented 0x027F)\n",
+                c.mxcsr, c.fcw);
+    std::printf("  xmm0-15: 128-bit storage (YMM/ZMM deliberately NOT modeled)\n");
+    std::printf("  validate: %zu problems; snapshot %zu bytes; roundtrip %s\n",
+                c.validate().size(), bytes.size(),
+                xbox2pc::rt::cpu::CpuSnapshot::deserialize(bytes.data(), bytes.size()).ok() ? "ok" : "FAIL");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_abi_info(const std::optional<std::string>& json_out) {
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("convention", "x64-microsoft");
+        j.set("doc", xbox2pc::rt::abi::abi_doc_summary());
+        j.set("shadow_space_bytes", 32u);
+        j.set("stack_alignment", 16u);
+        Json gp = Json::array();
+        for (const char* r : {"rcx","rdx","r8","r9"}) gp.push_back(std::string(r));
+        j.set("gp_arg_regs", std::move(gp));
+        Json fp = Json::array();
+        for (const char* r : {"xmm0","xmm1","xmm2","xmm3"}) fp.push_back(std::string(r));
+        j.set("fp_arg_regs", std::move(fp));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc abi-info (Microsoft x64; evidence [MS-X64CC][MS-X64STACK])\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  %s\n", xbox2pc::rt::abi::abi_doc_summary());
+    std::printf("  int/ptr args 1-4: RCX RDX R8 R9; 5+ on stack (8B slots)\n");
+    std::printf("  fp args 1-4:    XMM0-3 by POSITION; 5+ on stack\n");
+    std::printf("  shadow space:  32 bytes always reserved by the caller\n");
+    std::printf("  alignment:     16-byte; return address at [RSP] on entry\n");
+    std::printf("  returns:       scalars<=64b in RAX; fp/__m128 in XMM0;\n");
+    std::printf("                 aggregates>64b: hidden ptr in RCX, ret in RAX\n");
+    std::printf("  volatile:      RAX RCX RDX R8-R11 XMM0-5\n");
+    std::printf("  nonvolatile:   RBX RBP RDI RSI R12-R15 XMM6-15\n");
+    std::printf("  varargs:       fp values duplicated into GP registers\n");
+    std::printf("  unsupported (typed rejects): __m128 by value, varargs>4,\n");
+    std::printf("                 aggregates not in {1,2,4,8} bytes\n");
+    std::printf("  Xbox-specific deviations: none documented; none invented\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_execution_info(const std::optional<std::string>& json_out) {
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("interface", "IExecutionEngine");
+        j.set("backend", "deterministic-test");
+        j.set("backend_desc",
+              "bounded-subset x86-64 interpreter (test backend; NOT a general emulator)");
+        Json sup = Json::array();
+        const char* insns[] = {"mov r64,imm64","mov r64,r64","mov r64,[r64+disp8]",
+                               "mov [r64+disp8],r64","add r64,imm32","sub r64,imm32",
+                               "xor r64,r64","cmp r64,imm32","push r64","pop r64",
+                               "call rel32","jmp rel32","ret","nop"};
+        for (const char* i : insns) sup.push_back(std::string(i));
+        j.set("supported_instructions", std::move(sup));
+        j.set("single_step", true);
+        Json outs = Json::array();
+        for (const char* o : {"completed","returned","interrupted","terminated","faulted"}) {
+            outs.push_back(std::string(o));
+        }
+        j.set("outcomes", std::move(outs));
+        Json fl = Json::array();
+        for (int i = 0; i < 12; ++i) {
+            fl.push_back(std::string(xbox2pc::rt::exec::guest_fault_to_name(
+                static_cast<xbox2pc::rt::exec::GuestFault>(i))));
+        }
+        j.set("faults", std::move(fl));
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc execution-info (interface + backend HONESTLY labeled)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  engine kind: deterministic-test\n");
+    std::printf("  %s\n",
+                "bounded-subset x86-64 interpreter (test backend; NOT a general emulator)");
+    std::printf("  subset: MOV r64,imm64/r64/mem(disp8) (both forms), ADD/SUB/\n");
+    std::printf("          CMP r64,imm32 (flags), XOR r64,r64, PUSH/POP r64,\n");
+    std::printf("          CALL/JMP rel32, RET, NOP\n");
+    std::printf("  single-step: yes (budget==1 is the step itself)\n");
+    std::printf("  outcomes: completed returned interrupted terminated faulted\n");
+    std::printf("  faults:   invalid-access permission-r/w/x invalid-instruction\n");
+    std::printf("            unsupported-instruction stack-overflow invalid-state\n");
+    std::printf("            marshal-failure guest-terminated budget-exceeded internal\n");
+    std::printf("  Imported APIs land in the marshalling bridge (M7 registry).\n");
+    std::printf("  Execution of arbitrary Xbox titles is NOT claimed.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_tls_info(const std::optional<std::string>& json_out) {
+    auto cfg = xbox2pc::rt::exec::ExecutionConfig::default_validated().value();
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("max_callbacks", static_cast<std::uint64_t>(cfg.max_tls_callbacks));
+        j.set("callback_abi", "RCX=DllHandle RDX=Reason(DLL_PROCESS_ATTACH=1) R8=Reserved");
+        j.set("execution", "through IExecutionEngine only (never host pointers)");
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return 0;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc tls-info (M7 init + M8 callback scheduling)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  template copy + SizeOfZeroFill: M7 (bounded 1 MiB)\n");
+    std::printf("  callbacks: validated (mapped RX VAs, array bounds, order),\n");
+    std::printf("             limit %u, executed through the ENGINE only\n",
+                cfg.max_tls_callbacks);
+    std::printf("  callback ABI: RCX=DllHandle RDX=Reason R8=Reserved\n");
+    std::printf("  failures REPORTED; partial-init cleanup completes\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return 0;
+}
+
+int cmd_execute_test(const std::optional<std::string>& json_out) {
+    // Full in-runtime test: M4 process -> M6 load (M7 resolver) -> M8
+    // context -> prepare -> deterministic-backend execution. The guest
+    // program is REAL x64 subset code: RAX = 20; RAX += 22; RET -> 42.
+    M8World w;
+    std::vector<std::uint8_t> code;
+    std::vector<std::uint8_t> mov{0x48, 0xB8, 20, 0, 0, 0, 0, 0, 0, 0};
+    code.insert(code.end(), mov.begin(), mov.end());
+    const std::uint8_t add[] = {0x48, 0x81, 0xC0, 0x16, 0, 0, 0};
+    code.insert(code.end(), add, add + sizeof add);
+    code.push_back(0xC3);
+    xbox2pc::test::PeBuildSpec spec;
+    spec.text_payloads.push_back({0x1000, code});
+    spec.imports = {{"xgameruntime", {{"XGameRuntimeInitialize", 1}}}};
+    spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
+    auto image = xbox2pc::test::PeBuilder(spec).build();
+    xbox2pc::diag::Diagnostics pd;
+    auto img = xbox2pc::pe::parse(image.data(), image.size(), "exec-demo.exe", pd);
+    auto ph = w.pm.create_process("exec-host.exe", 64ull << 20);
+    if (!ph.ok()) return 1;
+    auto pr = w.core.objects().lookup_handle(ph.value());
+    auto* proc = pr.value().get()->as<xbox2pc::rt::ManagedProcess>();
+    xbox2pc::rt::loader::ImageLoader loader;
+    xbox2pc::rt::api::ApiResolver resolver(w.reg);
+    xbox2pc::rt::loader::LoadDiagnostics ld;
+    xbox2pc::rt::loader::LoadResult out;
+    auto h = loader.load_image(w.pm, w.core.objects(), ph.value(), img,
+                               image.data(), image.size(), &resolver, ld, out);
+    if (!h.ok()) {
+        std::fprintf(stderr, "error: load failed: %s\n", out.error.c_str());
+        return 1;
+    }
+    auto cfg = xbox2pc::rt::exec::ExecutionConfig::default_validated().value();
+    xbox2pc::rt::exec::ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg,
+                                "cli-exec");
+    auto ini = ctx.initialize();
+    if (!ini.ok()) return 1;
+    xbox2pc::rt::loader::LoadedImageObject* loaded = nullptr;
+    {
+        auto lr = proc->handle_table().lookup(h.value());
+        loaded = lr.value().get()->as<xbox2pc::rt::loader::LoadedImageObject>();
+    }   // guard released before teardown (pin-drain contract)
+    xbox2pc::rt::abi::CallSpec cspec;
+    cspec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
+    auto req = ctx.prepare_entry(*loaded, 0, {}, cspec);
+    if (!req.ok()) {
+        std::fprintf(stderr, "error: prepare failed: %s\n",
+                     req.error_string().c_str());
+        return 1;
+    }
+    xbox2pc::rt::exec::DeterministicBackend engine(w.reg, cfg);
+    engine.bind_space(proc->address_space());
+    engine.bind_process(1, 1);
+    std::atomic<bool> stop{false};
+    auto res = ctx.invoke(req.value(), engine, stop);
+    const bool ok = res.ok() && res.value().outcome == xbox2pc::rt::exec::Outcome::Returned;
+    const auto st = proc->address_space().stats();
+    (void)ctx.destroy();
+    (void)loader.unload_image(w.pm, w.core.objects(), ph.value(), h.value());
+    (void)w.pm.terminate_process(ph.value(), 0);
+    if (json_out.has_value()) {
+        Json j = Json::object();
+        j.set("backend", "deterministic-test");
+        j.set("outcome", ok ? "returned" : "other");
+        j.set("instructions", res.ok() ? res.value().instructions_executed : 0);
+        j.set("return_value", res.ok() ? res.value().return_value : 0);
+        j.set("expected", 42u);
+        j.set("regions_after_terminate", static_cast<std::uint64_t>(st.region_count));
+        j.set("api_calls", res.ok() ? res.value().api_calls : 0);
+        if (!write_file(*json_out, j.serialize() + "\n")) return 1;
+        std::printf("wrote %s\n", json_out->c_str());
+        return ok ? 0 : 1;
+    }
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("xbox2pc execute-test (DETERMINISTIC TEST BACKEND; real subset insns)\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    std::printf("  program: MOV RAX,20; ADD RAX,22; RET\n");
+    std::printf("  load:    %s (M6+M7 resolver)\n", "ok");
+    std::printf("  context: %s\n", "initialized");
+    if (res.ok()) {
+        std::printf("  outcome: %s  instructions=%llu  RAX=%llu (expect 42)\n",
+                    xbox2pc::rt::exec::outcome_to_name(res.value().outcome),
+                    (unsigned long long)res.value().instructions_executed,
+                    (unsigned long long)res.value().return_value);
+    }
+    std::printf("  teardown: regions after terminate = %u\n", st.region_count);
+    std::printf("  NOTE: subset interpreter execution — NOT a general emulator,\n");
+    std::printf("        NOT a claim of Xbox-title compatibility.\n");
+    std::printf("%s\n", std::string(64, '=').c_str());
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     if (argc >= 2 && (std::strcmp(argv[1], "--version") == 0 || std::strcmp(argv[1], "-v") == 0)) {
         std::printf("xbox2pc 0.3.0 (M1: PE32+ inspection; M2: dependency "
@@ -2110,6 +2824,83 @@ int main(int argc, char** argv) {
             if (early_cmd == "load-image") return cmd_load_image(file, json_out);
             if (early_cmd == "unload-image") return cmd_unload_image(file);
             return cmd_image_info(file, json_out);
+        }
+        const bool m8_noarg = early_cmd == "cpu-state" || early_cmd == "abi-info" ||
+                              early_cmd == "execution-info" || early_cmd == "tls-info" ||
+                              early_cmd == "execute-test";
+        if (m8_noarg) {
+            std::optional<std::string> json_out;
+            for (int i = 2; i < argc; ++i) {
+                if (std::strcmp(argv[i], "--json") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --json requires an output path\n");
+                        return 2;
+                    }
+                    json_out = argv[i + 1];
+                    ++i;
+                } else {
+                    std::fprintf(stderr, "error: unexpected argument '%s'\n", argv[i]);
+                    return 2;
+                }
+            }
+            if (early_cmd == "cpu-state") return cmd_cpu_state(json_out);
+            if (early_cmd == "abi-info") return cmd_abi_info(json_out);
+            if (early_cmd == "execution-info") return cmd_execution_info(json_out);
+            if (early_cmd == "tls-info") return cmd_tls_info(json_out);
+            return cmd_execute_test(json_out);
+        }
+        const bool m7_noarg = early_cmd == "api-list" || early_cmd == "api-status" ||
+                              early_cmd == "gdk-services" || early_cmd == "gameos-services";
+        if (m7_noarg) {
+            std::optional<std::string> json_out;
+            for (int i = 2; i < argc; ++i) {
+                if (std::strcmp(argv[i], "--json") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --json requires an output path\n");
+                        return 2;
+                    }
+                    json_out = argv[i + 1];
+                    ++i;
+                } else {
+                    std::fprintf(stderr, "error: unexpected argument '%s'\n", argv[i]);
+                    return 2;
+                }
+            }
+            if (early_cmd == "api-list") return cmd_api_list(json_out);
+            if (early_cmd == "api-status") return cmd_api_status(json_out);
+            if (early_cmd == "gdk-services") return cmd_gdk_services(json_out);
+            return cmd_gameos_services(json_out);
+        }
+        const bool m7_arg = early_cmd == "api-info" || early_cmd == "dispatch-test" ||
+                            early_cmd == "compat-report";
+        if (m7_arg) {
+            std::string arg;
+            std::optional<std::string> json_out;
+            bool have_arg = false;
+            for (int i = 2; i < argc; ++i) {
+                if (std::strcmp(argv[i], "--json") == 0) {
+                    if (i + 1 >= argc) {
+                        std::fprintf(stderr, "error: --json requires an output path\n");
+                        return 2;
+                    }
+                    json_out = argv[i + 1];
+                    ++i;
+                } else if (!have_arg) {
+                    arg = argv[i];
+                    have_arg = true;
+                } else {
+                    std::fprintf(stderr, "error: unexpected argument '%s'\n", argv[i]);
+                    return 2;
+                }
+            }
+            if (!have_arg) {
+                std::fprintf(stderr, "error: %s requires an argument\n",
+                             early_cmd.c_str());
+                return 2;
+            }
+            if (early_cmd == "api-info") return cmd_api_info(arg, json_out);
+            if (early_cmd == "dispatch-test") return cmd_dispatch_test(arg, json_out);
+            return cmd_compat_report(arg, json_out);
         }
         if (early_cmd == "runtime-info" || early_cmd == "runtime-objects" ||
             early_cmd == "runtime-services" || m4_cmd) {

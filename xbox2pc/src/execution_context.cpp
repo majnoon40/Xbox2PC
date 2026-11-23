@@ -1,0 +1,425 @@
+// xbox2pc/src/execution_context.cpp — M8 execution context lifecycle + M6
+// integration + TLS callback scheduling implementation.
+
+#include "xbox2pc/execution_context.hpp"
+
+#include <cstring>
+
+namespace xbox2pc::rt::exec {
+
+using cpu::CpuState;
+using cpu::Gpr;
+
+// ── names ────────────────────────────────────────────────────────────────
+
+const char* context_state_to_name(ContextState s) {
+    switch (s) {
+        case ContextState::Created: return "created";
+        case ContextState::Initialized: return "initialized";
+        case ContextState::Executing: return "executing";
+        case ContextState::Stopped: return "stopped";
+        case ContextState::Destroyed: return "destroyed";
+    }
+    return "?";
+}
+
+// ── context limiter ──────────────────────────────────────────────────────
+
+namespace {
+std::atomic<std::uint32_t> g_live_contexts{0};
+constexpr std::uint32_t kHardContextCap = 4096;
+}  // namespace
+
+Result<void> ContextLimiter::acquire() {
+    std::uint32_t now = g_live_contexts.fetch_add(1);
+    if (now + 1 > kHardContextCap) {
+        g_live_contexts.fetch_sub(1);
+        return Result<void>(RuntimeErrc::OutOfResources,
+                            "runtime-wide execution context cap reached");
+    }
+    return Result<void>::ok_result();
+}
+
+void ContextLimiter::release() { g_live_contexts.fetch_sub(1); }
+
+std::uint32_t ContextLimiter::live() { return g_live_contexts.load(); }
+
+// ── context lifecycle ────────────────────────────────────────────────────
+
+ExecutionContext::ExecutionContext(std::uint64_t process_id,
+                                   std::uint64_t thread_id,
+                                   AddressSpace& space,
+                                   api::ApiRegistry& api_reg,
+                                   ExecutionConfig cfg, std::string name)
+    : RuntimeObject(static_type_id()),
+      process_id_(process_id),
+      thread_id_(thread_id),
+      space_(space),
+      api_reg_(api_reg),
+      cfg_(cfg),
+      mem_(space),
+      ctx_name_(std::move(name)) {}
+
+ExecutionContext::~ExecutionContext() {
+    (void)destroy();
+    // M9 fix (audit A3): initialize() acquires the limiter slot; the
+    // destructor releases ONLY when the context actually counted (a
+    // never-initialized context must not underflow the global counter).
+    if (counted_) {
+        ContextLimiter::release();
+        counted_ = false;
+    }
+}
+
+Result<void> ExecutionContext::initialize() {
+    // M9 fix (audit A3): the limiter slot is acquired at initialization.
+    auto slot = ContextLimiter::acquire();
+    if (!slot.ok()) {
+        return slot;
+    }
+    std::lock_guard lock(lock_);
+    if (state_ == ContextState::Destroyed) {
+        ContextLimiter::release();   // failed init: give the slot back
+        return Result<void>(RuntimeErrc::InvalidState, "context destroyed");
+    }
+    if (state_ != ContextState::Created) {
+        ContextLimiter::release();   // failed init: give the slot back
+        return Result<void>(RuntimeErrc::InvalidState,
+                            std::string("initialize from state ") +
+                                context_state_to_name(state_));
+    }
+    auto cfg_ok = cfg_.validate();
+    if (!cfg_ok.ok()) {
+        ContextLimiter::release();   // failed init: give the slot back
+        return cfg_ok;
+    }
+    // Guest stack: an M4 region INSIDE the process space (RW, capped).
+    // Auto-placed (first-fit above the image; M4's per-process base and
+    // capacity make a fixed VA wrong). Top at the region's high end;
+    // guard floor = top - size.
+    auto r = space_.reserve_region_auto(cfg_.max_stack_bytes, "guest-stack");
+    if (!r.ok()) {
+        ContextLimiter::release();   // failed init: give the slot back
+        return Result<void>(r.errc(),
+                            std::string("stack reserve: ") + r.error_string());
+    }
+    const std::uint64_t stack_va = r.value();
+    auto c = space_.commit_region(stack_va);
+    if (!c.ok()) {
+        (void)space_.release_region(stack_va);
+        ContextLimiter::release();   // failed init: give the slot back
+        return Result<void>(c.errc(),
+                            std::string("stack commit: ") + c.error_string());
+    }
+    // Committed regions default RW (M4 discipline) — exactly the stack's
+    // required protection; no W^X exception needed.
+    stack_region_va_ = stack_va;
+    info_.stack_top = stack_va + cfg_.max_stack_bytes - 64;   // usable top
+    info_.stack_size = cfg_.max_stack_bytes;
+    // Align the top 16 [MS-X64STACK].
+    info_.stack_top &= ~0xFull;
+    cpu_.reset();
+    cpu_.set_reg(Gpr::Sp, info_.stack_top);
+    state_ = ContextState::Initialized;
+    counted_ = true;   // the destructor now releases this slot (M9 A3)
+    info_.process_id = process_id_;
+    info_.thread_id = thread_id_;
+    return Result<void>::ok_result();
+}
+
+Result<ExecutionRequest> ExecutionContext::prepare_entry(
+    const loader::LoadedImageObject& image, std::uint32_t tls_index,
+    const std::vector<abi::ArgValue>& args, const abi::CallSpec& spec) {
+    using Ret = Result<ExecutionRequest>;
+    std::lock_guard lock(lock_);
+    if (state_ == ContextState::Destroyed) {
+        return Ret(RuntimeErrc::InvalidState, "context destroyed");
+    }
+    if (state_ == ContextState::Executing) {
+        return Ret(RuntimeErrc::InvalidState, "context is executing");
+    }
+    if (!image.exec().prepared) {
+        return Ret(RuntimeErrc::InvalidState,
+                   "image is not Prepared (M6 requires Prepared state)");
+    }
+    const auto& exec = image.exec();
+    // Entry validation: inside the image extent + executable region.
+    {
+        auto v = validate_entry_point(exec, space_);
+        if (!v.ok()) return Ret(v.errc(), v.context());
+    }
+    // Reset CPU per preparation; stack discipline [MS-X64STACK].
+    // The ENTRY call's return address is the COMPLETION SENTINEL: the
+    // engine's RET on the sentinel completes the run (documented
+    // contract; prepare_call would otherwise capture the pre-call RIP —
+    // zero at reset — as the resume target).
+    cpu_.reset();
+    cpu_.set_reg(Gpr::Sp, info_.stack_top);
+    cpu_.rip = exec::kCompletionSentinel;   // prepare_call captures THIS
+    // Argument preparation through the ABI with a writer bound to the
+    // guest stack (validated RW through GuestMemory).
+    struct W { guest::GuestMemory* m; };
+    W wctx{&mem_};
+    abi::StackWriter writer;
+    writer.ctx = &wctx;
+    writer.write = [](void* c, std::uint64_t va, const void* src,
+                      std::size_t len) -> Result<void> {
+        return static_cast<W*>(c)->m->write(va, src, len);
+    };
+    auto prep = abi::prepare_call(cpu_, exec.entry_va, spec, args, writer);
+    if (!prep.ok()) return Ret(prep.errc(), prep.context());
+    cpu_.rip = exec.entry_va;   // execution starts at the entry point
+    // (tls_index association is recorded; the M7 TLS state rides the
+    // process's threads, not this context.)
+    ExecutionRequest req;
+    req.entry_va = exec.entry_va;
+    req.stack_top_va = info_.stack_top;
+    req.stack_size = info_.stack_size;
+    req.completion_va = exec::kCompletionSentinel;
+    req.entry_args = args;
+    req.entry_spec = spec;
+    // API bindings: the image's IAT values in binding range (M7).
+    // (LoadedImageObject exposes its layout; binding values were
+    // written by the M6 loader from the resolver's ImportBinding list
+    // — the loader recorded them in LoadDiagnostics. The context takes
+    // them from the exec description's import counters + the image's
+    // actual IAT — read them from guest memory now: walk the import
+    // descriptors? For M8's contract the bindings matter only when
+    // guest code calls an import; the engine resolves the landing VA
+    // through the REQUEST's list, which the caller fills from its own
+    // resolver session. Provide the documented hook: IAT binding values
+    // in range are collected by scanning the image's first import IAT.)
+    req.api_binding_values.clear();
+    // Deterministic: scan the mapped IAT of each import descriptor's
+    // IAT within the image extent (bounded: imports_resolved*8 bytes at
+    // the documented IAT location is not tracked here — the engine
+    // treats ANY binding-range VA as an API call, so an explicit list
+    // is advisory only; leave it to the caller (tests fill it).
+    (void)tls_index;
+    return Ret(req);
+}
+
+Result<ExecutionResult> ExecutionContext::invoke(
+    const ExecutionRequest& req, IExecutionEngine& engine,
+    const std::atomic<bool>& interrupted) {
+    using Ret = Result<ExecutionResult>;
+    std::lock_guard lock(lock_);
+    if (state_ == ContextState::Destroyed) {
+        return Ret(RuntimeErrc::InvalidState, "context destroyed");
+    }
+    if (state_ == ContextState::Executing) {
+        return Ret(RuntimeErrc::InvalidState, "context already executing");
+    }
+    if (state_ != ContextState::Initialized && state_ != ContextState::Stopped) {
+        return Ret(RuntimeErrc::InvalidState,
+                   std::string("invoke from state ") + context_state_to_name(state_));
+    }
+    // Engine must be bound to the same address space: verify through
+    // the request's stack (a canary validate).
+    {
+        auto rng = mem_.validate(req.stack_top_va - 16, 16, true, false);
+        if (!rng.ok()) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                        "request stack not usable in this context's space");
+        }
+    }
+    state_ = ContextState::Executing;
+    auto res = engine.run(req, cpu_, interrupted);
+    state_ = ContextState::Stopped;
+    ++runs_;
+    return Ret(res);
+}
+
+Result<std::uint64_t> ExecutionContext::step(const ExecutionRequest& req,
+                                            IExecutionEngine& engine) {
+    using Ret = Result<std::uint64_t>;
+    std::lock_guard lock(lock_);
+    if (state_ != ContextState::Initialized && state_ != ContextState::Stopped) {
+        return Ret(RuntimeErrc::InvalidState,
+                   std::string("step from state ") + context_state_to_name(state_));
+    }
+    if (!engine.supports_single_step()) {
+        return Ret(RuntimeErrc::PlatformUnsupported, "engine cannot single-step");
+    }
+    return engine.single_step(cpu_, req);
+}
+
+Result<void> ExecutionContext::destroy() {
+    std::lock_guard lock(lock_);
+    if (state_ == ContextState::Destroyed) {
+        return Result<void>::ok_result();   // idempotent
+    }
+    if (state_ == ContextState::Executing) {
+        // A run holds the lock; destruction happens after it releases.
+        return Result<void>(RuntimeErrc::InvalidState,
+                            "cannot destroy while executing");
+    }
+    if (stack_region_va_ != 0) {
+        auto r = space_.release_region(stack_region_va_);
+        if (!r.ok()) {
+            // Region already gone with the process: still destroy.
+            (void)r;
+        }
+        stack_region_va_ = 0;
+    }
+    state_ = ContextState::Destroyed;
+    return Result<void>::ok_result();
+}
+
+// ── M6 entry validation ──────────────────────────────────────────────────
+
+Result<std::uint64_t> validate_entry_point(const loader::ExecDescription& exec,
+                                            AddressSpace& space) {
+    if (!exec.prepared) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "image not prepared");
+    }
+    if (exec.entry_va == 0) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "entry VA is zero");
+    }
+    if (exec.image_size == 0) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "image size is zero");
+    }
+    // Inside the mapped image extent.
+    if (exec.entry_va < exec.image_base ||
+        exec.entry_va >= exec.image_base + exec.image_size) {
+        return Result<std::uint64_t>(
+            RuntimeErrc::InvalidArgument,
+            "entry VA outside the mapped image extent");
+    }
+    // Executable region check (RX/Full).
+    auto v = space.validate_access(exec.entry_va, false, true);
+    if (!v.ok()) {
+        return Result<std::uint64_t>(
+            v.errc() == RuntimeErrc::NotFound
+                ? RuntimeErrc::InvalidArgument
+                : RuntimeErrc::PlatformError,
+            "entry point not executable: " + v.error_string());
+    }
+    return Result<std::uint64_t>(exec.entry_va);
+}
+
+// ── TLS callback scheduling ──────────────────────────────────────────────
+
+Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
+                                          const loader::TlsInfo& tls,
+                                          const ExecutionConfig& cfg) {
+    using Ret = Result<TlsCallbackPlan>;
+    TlsCallbackPlan plan;
+    if (!tls.present) {
+        plan.note = "no TLS directory";
+        return Ret(plan);
+    }
+    if (tls.callback_count > cfg.max_tls_callbacks) {
+        return Ret(RuntimeErrc::OutOfResources,
+                   "callback count " + std::to_string(tls.callback_count) +
+                       " above the limit " +
+                       std::to_string(cfg.max_tls_callbacks));
+    }
+    if (tls.callbacks_va == 0) {
+        if (tls.callback_count == 0) {
+            plan.note = "no callbacks";
+            return Ret(plan);
+        }
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "callback count nonzero with no array VA");
+    }
+    // Read the callback VA array from guest memory (each 8 bytes).
+    for (std::uint32_t i = 0; i < tls.callback_count; ++i) {
+        const std::uint64_t slot = tls.callbacks_va + static_cast<std::uint64_t>(i) * 8;
+        auto va = mem.read_u64(slot);
+        if (!va.ok()) {
+            // Unreadable array slot: reject the ENTRY (not the plan).
+            ++plan.rejected_count;
+            continue;
+        }
+        if (va.value() == 0) {
+            // Terminating NULL or padding: stop at the documented
+            // array semantics (null entry = end).
+            break;
+        }
+        TlsCallback cb;
+        cb.va = va.value();
+        cb.order = i;
+        // Validate executable + mapped: the callback must live in an
+        // RX region (mapped image .text).
+        auto x = mem.validate_exec(cb.va);
+        if (!x.ok()) {
+            ++plan.rejected_count;
+            continue;
+        }
+        plan.callbacks.push_back(cb);
+    }
+    plan.note = "validated " + std::to_string(plan.callbacks.size()) +
+                " callbacks (" + std::to_string(plan.rejected_count) +
+                " rejected)";
+    return Ret(plan);
+}
+
+Result<TlsCallbackResult> execute_tls_callbacks(
+    ExecutionContext& ctx, const TlsCallbackPlan& plan,
+    IExecutionEngine& engine, std::uint64_t image_handle_va) {
+    using Ret = Result<TlsCallbackResult>;
+    TlsCallbackResult out;
+    // Documented callback ABI: RCX=DllHandle, RDX=Reason
+    // (DLL_PROCESS_ATTACH=1), R8=Reserved.
+    for (const auto& cb : plan.callbacks) {
+        // Prepare the callback frame on the context's CPU state.
+        CpuState call = ctx.cpu();
+        call.set_reg(Gpr::Sp, ctx.info().stack_top);
+        abi::CallSpec spec;
+        spec.args.resize(3);
+        spec.args[0].kind = abi::ArgKind::Int;
+        spec.args[1].kind = abi::ArgKind::Int;
+        spec.args[2].kind = abi::ArgKind::Int;
+        spec.ret = abi::CallSpec::ReturnKind::Void;
+        std::vector<abi::ArgValue> vals(3);
+        vals[0].int_v = image_handle_va;
+        vals[1].int_v = 1;   // DLL_PROCESS_ATTACH
+        vals[2].int_v = 0;
+        // Write the frame via the context's guest memory.
+        struct W { guest::GuestMemory* m; };
+        W wctx{&ctx.memory()};
+        abi::StackWriter writer;
+        writer.ctx = &wctx;
+        writer.write = [](void* c, std::uint64_t va, const void* src,
+                          std::size_t len) -> Result<void> {
+            return static_cast<W*>(c)->m->write(va, src, len);
+        };
+        auto prep = abi::prepare_call(call, cb.va, spec, vals, writer);
+        if (!prep.ok()) {
+            ++out.failed;
+            if (!out.first_failure.has_value()) {
+                GuestException e;
+                e.fault = GuestFault::MarshalFailure;
+                e.rip = cb.va;
+                e.process_id = ctx.info().process_id;
+                e.thread_id = ctx.info().thread_id;
+                e.recoverability = Recoverability::Recoverable;
+                e.detail = "callback frame preparation: " + prep.error_string();
+                out.first_failure = e;
+            }
+            continue;
+        }
+        ExecutionRequest req;
+        req.entry_va = cb.va;
+        req.stack_top_va = ctx.info().stack_top;
+        req.stack_size = ctx.info().stack_size;
+        req.completion_va = kCompletionSentinel;
+        std::atomic<bool> stop{false};
+        auto res = engine.run(req, call, stop);
+        if (res.outcome == Outcome::Faulted) {
+            ++out.failed;
+            if (!out.first_failure.has_value() && res.exception.has_value()) {
+                out.first_failure = res.exception;
+            }
+            continue;   // report + keep going: partial-init cleanup rule
+        }
+        ++out.executed;
+    }
+    return Ret(out);
+}
+
+}  // namespace xbox2pc::rt::exec

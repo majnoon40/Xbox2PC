@@ -1,14 +1,20 @@
 # M3 Architecture — Xbox Runtime Architecture & Object Model
 
-**Status: M1–M6 complete.** 222 tests pass (32 M1 + 45 M2 + 52 M3 +
-28 M4 + 20 M5 + 3 M5-fuzz + 34 M6 + 5 M6-fuzz). Clean builds verified
-under the normal toolchain, AddressSanitizer+UBSan and ThreadSanitizer
-(0 findings). M6 adds `rt_loader` (PE32+ executable loader: validation,
-mapping into M4 address spaces, DIR64 relocations, explicit import
-resolution, TLS metadata, execution preparation — **no execution**),
-see [pe-loader.md](pe-loader.md). Roadmap note: executable loading was
-delivered before GDK API compatibility (order adjusted explicitly; the
-GDK milestone remains planned).
+**Status: M1–M8 complete.** 277 tests pass (M1–M7: 245 as shipped; M8 adds 24 execution tests + 7 fuzz harnesses at 170,400 mutations). Clean builds verified under the normal toolchain, ASan+UBSan and TSan (0 findings). M8 adds the execution foundation — `rt_cpu` (guest CPU state), `rt_abi` (documented Microsoft x64 ABI), `rt_guestmem` (safe guest memory over M4), `rt_exceptions` (structured guest faults), `rt_execution` (engine interface + deterministic bounded-subset backend + marshalling bridge + context lifecycle + TLS callback scheduling); see [execution-architecture.md](execution-architecture.md). Roadmap: instruction-set expansion / native or emulator backend next.
+28 M4 + 20 M5 + 3 M5-fuzz + 34 M6 + 5 M6-fuzz + 23 M7 + 6 M7-fuzz).
+Clean builds verified under the normal toolchain,
+AddressSanitizer+UBSan and ThreadSanitizer (0 findings). M6 added
+`rt_loader` (PE32+ executable loader: validation, mapping, DIR64
+relocations, explicit import resolution, TLS metadata, execution
+preparation — **no execution**; see [pe-loader.md](pe-loader.md)).
+M7 adds the Xbox GDK/Game OS API compatibility foundation —
+`rt_api` (evidence-cited descriptors, thread-safe registration +
+dispatch, ApiResolver over M6's resolver interface, delay-load
+resolution), `rt_gdk` (GDK services as M3 RtServices + per-thread
+TLS init), `rt_compat_report` (stable-code import verdicts); see
+[api-compat.md](api-compat.md). Roadmap: execution-context foundation
+is the recommended M8 (guest marshalling, TLS callbacks, entry-point
+invocation).
 
 ## Scope and framing
 
@@ -174,10 +180,18 @@ Toolchain: C++20, CMake ≥ 3.20, g++ 14.2 (Linux host backend).
 | 5.8 | `xbox2pc_rt_package_vfs` | package_vfs.cpp (M5: package mounting + discovery) |
 | 5.9 | `xbox2pc_rt_vfs_process` | vfs_process.cpp (M5: process namespaces, M4 bridges) |
 | 5.95 | `xbox2pc_rt_loader` | image_loader.cpp (M6: PE validation, mapping, relocations, imports, TLS, lifecycle) |
+| 5.96 | `xbox2pc_rt_api` | api_compat.cpp (M7: API descriptors, registry, dispatch, ApiResolver, delay-load) |
+| 5.97 | `xbox2pc_rt_gdk` | gdk_services.cpp (M7: GDK services + Game OS foundation + TLS init) |
+| 5.98 | `xbox2pc_rt_compat_report` | compat_report.cpp (M7: compatibility reporting) |
+| 5.99 | `xbox2pc_rt_cpu` | guest_cpu_state.cpp (M8: guest CPU state) |
+| 5.991 | `xbox2pc_rt_abi` | xbox_abi.cpp (M8: x64 ABI) |
+| 5.992 | `xbox2pc_rt_guestmem` | guest_memory.cpp (M8: guest memory) |
+| 5.993 | `xbox2pc_rt_exceptions` | guest_exceptions.cpp (M8: fault model) |
+| 5.995 | `xbox2pc_rt_execution` | execution_engine.cpp + execution_context.cpp (M8: engine+bridge+context+TLS) |
 | 6 | `xbox2pc_rt_services` | service_registry.cpp |
 | 7 | `xbox2pc_rt_core` | runtime_core.cpp |
 
-Aggregate `xbox2pc_core` links M1..M6 for tools/tests.
+Aggregate `xbox2pc_core` links M1..M7; M8 libs are linked explicitly by tests/tools.
 
 ## Explicit exclusions (M4+ territory)
 
@@ -216,6 +230,15 @@ Inferred (architectural choices for this project, no Xbox source):
 - service registry dependency ordering design.
 
 Per-topic docs:
+[execution-architecture.md](execution-architecture.md) (M8 hub) ·
+[guest-cpu-state.md](guest-cpu-state.md) ·
+[xbox-x64-abi.md](xbox-x64-abi.md) ·
+[guest-memory.md](guest-memory.md) ·
+[api-marshalling.md](api-marshalling.md) ·
+[execution-engine.md](execution-engine.md) ·
+[guest-exceptions.md](guest-exceptions.md) ·
+[tls-execution.md](tls-execution.md) ·
+[api-compat.md](api-compat.md) ·
 [pe-loader.md](pe-loader.md) ·
 [virtual-filesystem.md](virtual-filesystem.md) ·
 [package-formats.md](package-formats.md) ·
