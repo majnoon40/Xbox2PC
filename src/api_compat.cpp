@@ -385,9 +385,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ]";
         a.evidence_url = kTqDispatchUrl;
-        a.notes = "waits up to timeoutInMs for manual-port work; false when no callback is dispatched or the queue is terminated; manual "
-                  "ports only (ThreadPool ports auto-dispatch — modeled "
-                  "unsupported)";
+        a.notes = "waits up to timeoutInMs for one manual-port callback; false when no callback is dispatched; terminated queues deliver pending callbacks with canceled=true; ThreadPool/Immediate modes unsupported";
         add(a);
     }
     {
@@ -422,8 +420,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ]";
         a.evidence_url = kTqTermUrl;
-        a.notes = "cancel callbacks + E_ABORT submissions documented; "
-                  "wait=true on a dispatching thread deadlocks (doc)";
+        a.notes = "prevents new submissions and marks pending callbacks canceled for manual dispatch; termination callback and wait=true draining are not implemented";
         add(a);
     }
 
@@ -476,7 +473,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ-Duplicate]";
         a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueueduplicatehandle?view=gdk-2604";
-        a.notes = "same-process duplicate handles share queue state and retain the queue until the final handle closes; callback references and callback execution are not implemented";
+        a.notes = "same-process duplicate handles share queue state; queued and in-flight callbacks retain the queue after the final public handle closes until drained or process teardown";
         add(a);
     }
 
