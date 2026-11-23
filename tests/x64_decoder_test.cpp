@@ -761,7 +761,10 @@ TEST(X64Decoder, FifteenByteLimit) {
     const auto final_opcode = ok({0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
                                   0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x90});
     EXPECT_EQ(final_opcode.length, 15);
-    EXPECT_EQ(final_opcode.mnem, x64::Mnemonic::Nop);
+    // Repeated 66 prefixes leave 90 as XCHG AX, AX internally;
+    // the formatter canonicalizes this identity exchange as NOP.
+    EXPECT_EQ(final_opcode.mnem, x64::Mnemonic::Xchg);
+    EXPECT_EQ(x64::format_instruction(final_opcode), "nop");
     // 15 prefixes + NOP is 16 bytes and must be rejected.
     bad({0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
          0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x90},
