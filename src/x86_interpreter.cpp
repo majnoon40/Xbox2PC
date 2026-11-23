@@ -1380,7 +1380,7 @@ StepResult Interpreter::step(const Decoded& ins) {
                 default: break;
             }
             if (ins.mnem != Mnemonic::Bt) {
-                if (!write_operand(cx, ins.ops[0], result)) {
+                if (!write_operand(cx, dst_operand, result)) {
                     return StepResult::failed(cx.fail);
                 }
             }
