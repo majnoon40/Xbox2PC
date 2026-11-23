@@ -61,6 +61,7 @@ The M10 tests cover the implemented event, mutex, and semaphore slices, includin
 - Supported page protections are PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, and policy-gated PAGE_EXECUTE_READWRITE. Unsupported constants fail closed.
 - Partial-region MEM_COMMIT/MEM_DECOMMIT and partial-region protection remain unsupported. Fixed-address reservations use 64-KiB allocation-granularity rounding; initial allocation-protection metadata is retained and reported by VirtualQuery.
 - Committed PAGE_NOACCESS is represented as committed but inaccessible memory, distinct from releasing a region.
+- Reservation quotas count the full reserved virtual-address span even after pages are committed. Region growth must satisfy both the reservation quota and, for committed regions, the committed-byte quota.
 
 - Extended the virtual-memory slice with exact-region MEM_COMMIT at an existing reservation address and exact-region MEM_DECOMMIT. Decommit marks the region Reserved and protects the host subrange as inaccessible; partial ranges and physical-page discard fidelity remain unsupported.
 
