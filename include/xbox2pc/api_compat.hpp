@@ -277,11 +277,11 @@ public:
     bool resolve_module(const std::string& dll) override;
 
     // Number of bindings issued (deterministic counter).
-    std::uint64_t bindings_issued() const { return next_id_; }
+    std::uint64_t bindings_issued() const { return bindings_issued_; }
 
 private:
     ApiRegistry& reg_;
-    std::uint64_t next_id_ = 1;
+    std::uint64_t bindings_issued_ = 0;
 };
 
 // ── delay-load imports ────────────────────────────────────────────────────
