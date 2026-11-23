@@ -67,6 +67,72 @@ target_compile_features(loader_test PRIVATE cxx_std_20)
 
 add_test(NAME loader_test COMMAND loader_test)
 
+# M7: API compatibility suite.
+add_executable(api_compat_test api_compat_test.cpp)
+target_link_libraries(api_compat_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    xbox2pc_rt_compat_report
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(api_compat_test PRIVATE cxx_std_20)
+
+add_test(NAME api_compat_test COMMAND api_compat_test)
+
+# M8: execution subsystem suite.
+add_executable(execution_test execution_test.cpp)
+target_link_libraries(execution_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_gdk
+    xbox2pc_rt_compat_report
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(execution_test PRIVATE cxx_std_20)
+
+add_test(NAME execution_test COMMAND execution_test)
+
+# M8: execution benchmarks (manual; not a ctest target).
+add_executable(execution_bench execution_bench.cpp)
+target_link_libraries(execution_bench PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_gdk
+    xbox2pc_pe_builder)
+target_compile_features(execution_bench PRIVATE cxx_std_20)
+
+# M8: deterministic execution fuzz harnesses.
+add_executable(execution_fuzz_test execution_fuzz.cpp)
+target_link_libraries(execution_fuzz_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_gdk
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(execution_fuzz_test PRIVATE cxx_std_20)
+
+add_test(NAME execution_fuzz_test COMMAND execution_fuzz_test)
+
+# M7: deterministic API-compat fuzz harnesses.
+add_executable(api_compat_fuzz_test api_compat_fuzz.cpp)
+target_link_libraries(api_compat_fuzz_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(api_compat_fuzz_test PRIVATE cxx_std_20)
+
+add_test(NAME api_compat_fuzz_test COMMAND api_compat_fuzz_test)
+
+# M7: API-path benchmarks (not a ctest; run manually).
+add_executable(api_compat_bench api_compat_bench.cpp)
+target_link_libraries(api_compat_bench PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    xbox2pc_rt_compat_report
+    xbox2pc_pe_builder)
+target_compile_features(api_compat_bench PRIVATE cxx_std_20)
+
 # M6: deterministic loader fuzz harnesses (seeded mutation).
 add_executable(loader_fuzz_test loader_fuzz.cpp)
 target_link_libraries(loader_fuzz_test PRIVATE
@@ -83,6 +149,67 @@ target_link_libraries(loader_bench PRIVATE
     xbox2pc_core
     xbox2pc_pe_builder)
 target_compile_features(loader_bench PRIVATE cxx_std_20)
+
+# M9: structured instruction decoder suite.
+add_executable(x64_decoder_test x64_decoder_test.cpp)
+target_link_libraries(x64_decoder_test PRIVATE xbox2pc_rt_x64_decoder gtest)
+target_compile_features(x64_decoder_test PRIVATE cxx_std_20)
+
+add_test(NAME x64_decoder_test COMMAND x64_decoder_test)
+
+# M9: interpreter arithmetic/logic semantics suite (§3B).
+add_executable(x86_interpreter_test x86_interpreter_test.cpp)
+target_link_libraries(x86_interpreter_test PRIVATE
+    xbox2pc_rt_x86_interpreter gtest)
+target_compile_features(x86_interpreter_test PRIVATE cxx_std_20)
+
+add_test(NAME x86_interpreter_test COMMAND x86_interpreter_test)
+
+# M9: control-flow semantics suite (§3A).
+add_executable(x86_control_flow_test x86_control_flow_test.cpp)
+target_link_libraries(x86_control_flow_test PRIVATE
+    xbox2pc_rt_x86_interpreter gtest)
+target_compile_features(x86_control_flow_test PRIVATE cxx_std_20)
+
+add_test(NAME x86_control_flow_test COMMAND x86_control_flow_test)
+
+# M9: data movement + shifts/bit ops suite (§3C/§3D/§3E).
+add_executable(x86_data_movement_test x86_data_movement_test.cpp)
+target_link_libraries(x86_data_movement_test PRIVATE
+    xbox2pc_rt_x86_interpreter gtest)
+target_compile_features(x86_data_movement_test PRIVATE cxx_std_20)
+
+add_test(NAME x86_data_movement_test COMMAND x86_data_movement_test)
+
+# M9: stack/flags/conversions + extended-state matrix suite (§5).
+add_executable(x86_stack_flags_test x86_stack_flags_test.cpp)
+target_link_libraries(x86_stack_flags_test PRIVATE
+    xbox2pc_rt_x86_interpreter gtest)
+target_compile_features(x86_stack_flags_test PRIVATE cxx_std_20)
+
+add_test(NAME x86_stack_flags_test COMMAND x86_stack_flags_test)
+
+# M9: differential instruction testing (native hardware reference + spec
+# cases; the native reference degrades to a documented skip off x86-64).
+add_executable(x86_differential_test x86_differential_test.cpp)
+target_link_libraries(x86_differential_test PRIVATE
+    xbox2pc_rt_x86_interpreter gtest)
+target_compile_features(x86_differential_test PRIVATE cxx_std_20)
+
+add_test(NAME x86_differential_test COMMAND x86_differential_test)
+
+# M9: advanced Xbox x64 ABI validation suite (§6).
+add_executable(x86_abi_advanced_test x86_abi_advanced_test.cpp)
+target_link_libraries(x86_abi_advanced_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_gdk
+    xbox2pc_rt_compat_report
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(x86_abi_advanced_test PRIVATE cxx_std_20)
+
+add_test(NAME x86_abi_advanced_test COMMAND x86_abi_advanced_test)
 
 # M5: deterministic fuzz harnesses (no libFuzzer; seeded mutation fuzz).
 add_executable(vfs_fuzz_test vfs_fuzz.cpp)

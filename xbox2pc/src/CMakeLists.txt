@@ -173,6 +173,94 @@ target_link_libraries(xbox2pc_rt_loader PUBLIC
     xbox2pc_pe_parser xbox2pc_diagnostics)
 target_compile_features(xbox2pc_rt_loader PUBLIC cxx_std_20)
 
+# ── M8: execution foundation ─────────────────────────────────────────────────
+#
+# rt_cpu (guest state) -> nothing below rt_error; rt_abi -> rt_cpu;
+# rt_guestmem -> rt_memman (M4). The execution engine + context libs come
+# later in the milestone and layer on top of these three.
+
+add_library(xbox2pc_rt_cpu STATIC guest_cpu_state.cpp)
+target_include_directories(xbox2pc_rt_cpu PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_cpu PUBLIC xbox2pc_rt_error)
+target_compile_features(xbox2pc_rt_cpu PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_abi STATIC xbox_abi.cpp)
+target_include_directories(xbox2pc_rt_abi PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_abi PUBLIC xbox2pc_rt_cpu)
+target_compile_features(xbox2pc_rt_abi PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_guestmem STATIC guest_memory.cpp)
+target_include_directories(xbox2pc_rt_guestmem PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_guestmem PUBLIC xbox2pc_rt_memory)
+target_compile_features(xbox2pc_rt_guestmem PUBLIC cxx_std_20)
+
+# ── M9: structured x86-64 instruction decoder (pure) ────────────────────────
+#
+# No runtime dependencies: bytes in -> a structured instruction out (or a
+# typed reject). Shared by the interpreter (rt_execution), static analysis,
+# binary validation and the CLI.
+
+add_library(xbox2pc_rt_x64_decoder STATIC x64_decoder.cpp)
+target_include_directories(xbox2pc_rt_x64_decoder PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_compile_features(xbox2pc_rt_x64_decoder PUBLIC cxx_std_20)
+
+# ── M9: instruction semantics engine (arithmetic/logic first) ───────────────
+#
+# rt_x86_interpreter executes one decoded instruction against CpuState +
+# GuestMemory (sub-register rules, flags per the SDM, typed faults).
+# Layers on rt_x64_decoder + rt_cpu + rt_guestmem/rt_exceptions.
+
+add_library(xbox2pc_rt_x86_interpreter STATIC x86_interpreter.cpp)
+target_include_directories(xbox2pc_rt_x86_interpreter PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_x86_interpreter PUBLIC
+    xbox2pc_rt_x64_decoder xbox2pc_rt_cpu xbox2pc_rt_guestmem xbox2pc_rt_exceptions)
+target_compile_features(xbox2pc_rt_x86_interpreter PUBLIC cxx_std_20)
+
+# ── M8: execution engine + exceptions ────────────────────────────────────────
+#
+# rt_exceptions -> rt_error only; rt_execution -> rt_cpu/rt_abi/rt_guestmem
+# + M7 rt_api (marshalling bridge) — the top of the M8 stack.
+
+add_library(xbox2pc_rt_exceptions STATIC guest_exceptions.cpp)
+target_include_directories(xbox2pc_rt_exceptions PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_exceptions PUBLIC xbox2pc_rt_error)
+target_compile_features(xbox2pc_rt_exceptions PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_execution STATIC execution_engine.cpp execution_context.cpp)
+target_include_directories(xbox2pc_rt_execution PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_execution PUBLIC
+    xbox2pc_rt_cpu xbox2pc_rt_abi xbox2pc_rt_guestmem
+    xbox2pc_rt_exceptions xbox2pc_rt_api xbox2pc_rt_loader
+    xbox2pc_rt_x86_interpreter)
+target_compile_features(xbox2pc_rt_execution PUBLIC cxx_std_20)
+
+# ── M7: API compatibility layer ─────────────────────────────────────────────
+#
+# rt_api (api_compat) = descriptors + registry + dispatcher + ApiResolver +
+# delay-load resolution; rt_gdk (gdk_services) = the RtService
+# implementations (lifecycle/XSystem/XThread/XTaskQueue/timing + TLS init);
+# rt_compat_report joins M1/M2/M6/M7 data into the compatibility report.
+# Layering: rt_gdk -> rt_api -> (M2 registries, M6 loader); none of them
+# link upward into rt_core.
+
+add_library(xbox2pc_rt_api STATIC api_compat.cpp)
+target_include_directories(xbox2pc_rt_api PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_api PUBLIC
+    xbox2pc_rt_loader xbox2pc_rt_services xbox2pc_api_registry xbox2pc_compat_db)
+target_compile_features(xbox2pc_rt_api PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_gdk STATIC gdk_services.cpp)
+target_include_directories(xbox2pc_rt_gdk PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_gdk PUBLIC
+    xbox2pc_rt_api xbox2pc_rt_procman xbox2pc_rt_thread xbox2pc_rt_pal)
+target_compile_features(xbox2pc_rt_gdk PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_compat_report STATIC compat_report.cpp)
+target_include_directories(xbox2pc_rt_compat_report PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_compat_report PUBLIC
+    xbox2pc_rt_api xbox2pc_dep_analyzer)
+target_compile_features(xbox2pc_rt_compat_report PUBLIC cxx_std_20)
+
 add_library(xbox2pc_rt_core STATIC runtime_core.cpp)
 target_include_directories(xbox2pc_rt_core PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_core PUBLIC
@@ -193,4 +281,7 @@ target_link_libraries(xbox2pc_core INTERFACE
     xbox2pc_compat_db
     xbox2pc_dep_analyzer
     xbox2pc_dep_graph
-    xbox2pc_rt_core)
+    xbox2pc_rt_core
+    xbox2pc_rt_api
+    xbox2pc_rt_gdk
+    xbox2pc_rt_compat_report)

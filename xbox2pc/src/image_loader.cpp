@@ -1401,8 +1401,8 @@ Result<void> ImageLoader::unload_image(ProcessManager& pm, ObjectManager& mgr,
         auto* obj = guard.get()->as<LoadedImageObject>();
         if (obj == nullptr) return kNoImageId;
         const std::uint64_t id = obj->id();
-        auto un = obj->unload(proc->address_space());
-        return un.ok() ? id : kErrSentinel;
+            auto un = obj->unload(proc->address_space());
+            return un.ok() ? id : kErrSentinel;
     }();
     if (obj_id == kNoImageId) {
         return Result<void>(RuntimeErrc::ObjectTypeMismatch, "not a loaded image");

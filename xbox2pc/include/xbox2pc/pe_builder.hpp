@@ -75,6 +75,10 @@ struct PeBuildSpec {
     bool export_with_forwarder_chain = false;   // M2: ForwarderChain != 0 metadata
     std::vector<RelocBlockSpec> reloc_blocks;    // M6: directory 5 content
     TlsSpec tls;                                 // M6: directory 9 (when template non-empty)
+    // M8: raw code bytes planted at an explicit .text RVA (synthetic guest
+    // programs for the execution tests). Empty rva/bytes = no payload (the
+    // existing marker-only behavior is unchanged).
+    std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> text_payloads;
     std::uint16_t number_of_sections_override = 0;   // 0 = actual count
     std::uint32_t size_of_optional_override = 0;     // 0 = real size
     std::uint32_t number_of_rva_override = 0;        // 0 = 16
@@ -121,6 +125,9 @@ public:
     std::uint64_t cstr(const std::string& s);
     // Append raw bytes; returns start offset.
     std::uint64_t bytes(const std::vector<std::uint8_t>& v);
+    // M8: write raw bytes at an absolute offset (zero-fill growth) for
+    // explicit-RVA code payloads.
+    void put_bytes(std::uint64_t off, const std::vector<std::uint8_t>& v);
     std::uint64_t size() const { return buf_.size(); }
     const std::vector<std::uint8_t>& data() const { return buf_; }
     void resize(std::uint64_t n) { buf_.resize(static_cast<std::size_t>(n), 0); }
