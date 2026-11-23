@@ -27,7 +27,6 @@
 #include "xbox2pc/process_management.hpp"
 #include "xbox2pc/sync_objects.hpp"
 #include "xbox2pc/service_registry.hpp"
-#include "xbox2pc/sync_objects.hpp"
 #include "xbox2pc/thread_model.hpp"
 
 namespace xbox2pc::rt::api {

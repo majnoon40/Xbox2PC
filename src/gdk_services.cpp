@@ -1011,26 +1011,68 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
     const pal::MonotonicNs timeout_ns = timeout_ms == 0xFFFFFFFFu
         ? pal::kInfiniteTimeout
         : static_cast<pal::MonotonicNs>(timeout_ms) * 1'000'000LL;
+
+    // Keep the runtime thread pinned while observing its cooperative stop
+    // flag. Process teardown requests stop before joining owned threads.
+    RefGuard guest_thread;
+    if (tid != 0) {
+        auto process = process_manager_.find_process_by_pid(pid);
+        if (process.ok()) {
+            if (auto* managed = process.value().get()->as<ManagedProcess>()) {
+                for (const auto object_id : managed->thread_ids()) {
+                    auto candidate = process_manager_.objects().lookup_id(object_id);
+                    if (!candidate.ok()) continue;
+                    auto* thread = candidate.value().get()->as<RtThread>();
+                    if (thread != nullptr && thread->thread_id() == tid) {
+                        guest_thread = std::move(candidate.value());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    const auto cancelled = [&guest_thread]() {
+        auto* object = guest_thread.get();
+        auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
+        return thread != nullptr && thread->stop_requested();
+    };
+
     auto* value = object.value().get();
     if (auto* event = value->as<RtEvent>()) {
-        auto waited = event->wait_ns(timeout_ns);
-        if (waited.ok()) return Result<std::uint32_t>(0u);
-        if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
-        return Result<std::uint32_t>(waited.errc(), waited.context());
+        const auto start_ns = pal::now_ns();
+        const auto deadline = timeout_ns < 0 || timeout_ns > INT64_MAX - start_ns
+            ? INT64_MAX : start_ns + timeout_ns;
+        for (;;) {
+            if (cancelled())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "event wait cancelled by guest thread stop");
+            const auto now = pal::now_ns();
+            const auto remaining = deadline == INT64_MAX
+                ? pal::MonotonicNs(2'000'000)
+                : std::max<pal::MonotonicNs>(0, deadline - now);
+            const auto slice = std::min<pal::MonotonicNs>(2'000'000, remaining);
+            auto waited = event->wait_ns(slice);
+            if (waited.ok()) return Result<std::uint32_t>(0u);
+            if (waited.errc() != RuntimeErrc::Timeout)
+                return Result<std::uint32_t>(waited.errc(), waited.context());
+            if (deadline != INT64_MAX && pal::now_ns() >= deadline)
+                return Result<std::uint32_t>(0x102u);
+        }
     }
     if (auto* mutex = value->as<RtGuestMutex>()) {
-        auto waited = mutex->acquire(tid, timeout_ns);
+        auto waited = mutex->acquire(tid, timeout_ns, cancelled);
         if (waited.ok()) return Result<std::uint32_t>(waited.value() ? 0x80u : 0u);
         if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
         return Result<std::uint32_t>(waited.errc(), waited.context());
     }
     if (auto* semaphore = value->as<RtGuestSemaphore>()) {
-        auto waited = semaphore->acquire(timeout_ns);
+        auto waited = semaphore->acquire(timeout_ns, cancelled);
         if (waited.ok()) return Result<std::uint32_t>(0u);
         if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
         return Result<std::uint32_t>(waited.errc(), waited.context());
     }
-    return Result<std::uint32_t>(RuntimeErrc::ObjectTypeMismatch, "unsupported waitable object");
+    return Result<std::uint32_t>(RuntimeErrc::ObjectTypeMismatch,
+                                 "unsupported waitable object");
 }
 
 Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
