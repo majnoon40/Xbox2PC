@@ -861,9 +861,25 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     ASSERT_TRUE(timed_dispatch.ok());
     EXPECT_FALSE(timed_dispatch.value());
     EXPECT_GE(dispatch_elapsed, std::chrono::milliseconds(10));
-    // Terminate: dispatch stays false (documented) — and submissions E_ABORT
-    // (modeled: terminated flag).
+    // An infinite manual dispatch must wake when the queue is terminated.
+    std::atomic<bool> dispatch_done{false};
+    std::atomic<bool> dispatch_ok{false};
+    std::atomic<bool> dispatch_value{true};
+    std::thread blocked_dispatch([&] {
+        const auto result = w.tq->dispatch(
+            owner_pid, id, XTaskQueuePort::Completion, 0xFFFFFFFFu);
+        dispatch_ok.store(result.ok(), std::memory_order_release);
+        dispatch_value.store(result.ok() && result.value(), std::memory_order_release);
+        dispatch_done.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(dispatch_done.load(std::memory_order_acquire));
+    // Terminate: pending dispatch wakes, returns false; no callbacks exist.
     EXPECT_TRUE(w.tq->terminate_queue(owner_pid, id, true).ok());
+    blocked_dispatch.join();
+    EXPECT_TRUE(dispatch_done.load(std::memory_order_acquire));
+    EXPECT_TRUE(dispatch_ok.load(std::memory_order_acquire));
+    EXPECT_FALSE(dispatch_value.load(std::memory_order_acquire));
     d = w.tq->dispatch(owner_pid, id, XTaskQueuePort::Work, 0);
     EXPECT_FALSE(d.value());
     // Close drops the queue.
