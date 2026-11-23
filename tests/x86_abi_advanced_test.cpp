@@ -500,10 +500,8 @@ TEST_F(AbiAdvancedTest, NestedGuestCallThroughEngine) {
     auto res = ctx.invoke(req.value(), engine, stop);
     ASSERT_TRUE(res.ok());
     EXPECT_EQ(res.value().outcome, exec::Outcome::Returned);
-    // NOTE: the deep-call chain exercises CALL/RET nesting; the observed
-    // result is 8 (main's 1 + 4 and one helper add); the second helper's
-    // contribution needs a follow-up (tracked in docs/known-limitations).
-    EXPECT_EQ(res.value().return_value, 8u);
+    // helper2 returns 5; helper1 adds 3; main adds 4.
+    EXPECT_EQ(res.value().return_value, 12u);
     (void)ctx.destroy();
     (void)loader.unload_image(*pm_, core_.objects(), ph_, h.value());
     (void)pm_->terminate_process(ph_, 0);
