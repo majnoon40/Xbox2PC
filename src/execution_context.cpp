@@ -191,10 +191,9 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
             imported.value == 0) {
             continue;
         }
-        if (!is_api_binding(imported.value)) {
-            return Ret(RuntimeErrc::InvalidArgument,
-                       "resolved import value is outside the API binding range");
-        }
+        // Non-synthetic resolved imports may be direct guest targets;
+        // only the reserved API dispatch ranges require registry identity.
+        if (!is_api_binding(imported.value)) continue;
         if (!seen_bindings.insert(imported.value).second) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "duplicate synthetic API binding value in loader diagnostics");
