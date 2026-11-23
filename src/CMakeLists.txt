@@ -99,7 +99,8 @@ target_compile_features(xbox2pc_rt_sync PUBLIC cxx_std_20)
 
 add_library(xbox2pc_rt_thread STATIC thread_model.cpp)
 target_include_directories(xbox2pc_rt_thread PUBLIC ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(xbox2pc_rt_thread PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_link_libraries(xbox2pc_rt_thread PUBLIC
+    xbox2pc_rt_handles xbox2pc_rt_pal xbox2pc_rt_sync)
 target_compile_features(xbox2pc_rt_thread PUBLIC cxx_std_20)
 
 add_library(xbox2pc_rt_io STATIC io_objects.cpp)
