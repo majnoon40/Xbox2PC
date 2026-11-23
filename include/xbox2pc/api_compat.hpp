@@ -81,6 +81,7 @@ enum class ReturnKind : std::uint8_t {
     Void,
     HResult,     // HRESULT: 0x00000000 S_OK / 0x8007.... errors
     Bool,        // Win32 BOOL (0 = failure)
+    Uint32,      // DWORD / uint32_t scalar
     Uint32Enum,  // enum class ... : uint32_t (e.g. XSystemDeviceType)
     Pointer,     // _Out_ pointer params; return is an out-param status
     Unknown,
