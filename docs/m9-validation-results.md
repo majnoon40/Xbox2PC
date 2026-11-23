@@ -27,8 +27,7 @@ ASan + UBSan and TSan jobs were still in progress when this document was updated
 
 ## Remaining verification gates
 
-- ASan + UBSan result for the latest commit.
-- TSan result for the latest commit.
+- TSan result for the latest source commit.
 - Adversarial source audit and regression tests for any reproducible defects.
 - Confirm the existing M4-M8 benchmark outputs if they are to be included in the M9 performance report.
 - Verify the scope of M4-M9 end-to-end lifecycle/cleanup coverage and add any missing integration cases.
