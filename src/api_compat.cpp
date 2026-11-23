@@ -441,7 +441,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.compat = ApiStatus::PartiallyImplemented;
         a.impl = ApiStatus::Unsupported;
         a.evidence = "[GDK-TQ]";
-        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/xtaskqueue_members?view=gdk-2604";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueuesubmitcallback?view=gdk-2604";
         a.notes = "documented callback submission API; guest callback invocation, queue-held callback references, cancellation delivery, and dispatch scheduling are not implemented";
         add(a);
     }
@@ -457,7 +457,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.compat = ApiStatus::PartiallyImplemented;
         a.impl = ApiStatus::Unsupported;
         a.evidence = "[GDK-TQ]";
-        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/xtaskqueue_members?view=gdk-2604";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueuesubmitdelayedcallback?view=gdk-2604";
         a.notes = "documented delayed callback API; timer scheduling and guest callback invocation are not implemented";
         add(a);
     }
