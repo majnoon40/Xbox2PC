@@ -121,7 +121,7 @@ This does not imply that the execution engine automatically supplies a calling-t
 
 Added the documented Win32 VirtualQuery descriptor and x64 marshalling plan. ProcessManager supports a pinned lookup by stable PID, and GameRuntimeService queries the authoritative M4 AddressSpace. The implementation emits the 48-byte x64 MEMORY_BASIC_INFORMATION layout for tracked committed/reserved regions. Tests cover a committed RW region, output fields, an untracked address, and a short output buffer.
 
-Partial behavior: free gaps are not enumerated as MEM_FREE; original allocation protection is not retained, so current protection is reported; memory type is reported as MEM_PRIVATE. This is not complete Win32 or Xbox memory-query behavior.
+Partial behavior: free gaps are enumerated only inside the modeled process address-space reservation; tracked private regions report MEM_PRIVATE; image/mapped/shared region types and addresses outside the modeled reservation are not represented. Initial AllocationProtect is retained separately from current Protect for tracked allocations. This is not complete Win32 or Xbox memory-query behavior.
 
 Evidence: https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery and https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information
 
@@ -149,9 +149,9 @@ for unallocated gaps within that modeled guest address-space reservation,
 including the next allocation boundary, and derives page alignment from the
 guest address space rather than assuming a 4096-byte host page. The x64
 MEMORY_BASIC_INFORMATION output is populated field-by-field with explicit
-padding. Original allocation protection and non-private mapped memory types
-remain unavailable, and addresses outside the modeled reservation still
-return zero; this is a bounded partial Win32 implementation.
+padding. Non-private mapped memory types remain unavailable, and addresses outside
+the modeled reservation still return zero; this is a bounded partial Win32
+implementation.
 
 
 ## M10.6 — Win32 event synchronization vertical slice
@@ -174,3 +174,12 @@ Evidence:
 - https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent
 - https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
 - https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
+
+
+## M10.7 — allocation-protection metadata and fixed-address VirtualAlloc
+
+`VmRegion` now retains the original allocation protection separately from current protection. Win32 `VirtualAlloc` records the requested protection when creating a reservation; `VirtualProtect` changes only current protection. `VirtualQuery` returns both values in the x64 `MEMORY_BASIC_INFORMATION` fields, and returns zero `AllocationProtect` for `MEM_FREE` gaps. Generic M4 reservations use the runtime's default PAGE_READWRITE allocation protection.
+
+`VirtualAlloc` supports fixed-address MEM_RESERVE and MEM_RESERVE|MEM_COMMIT. The requested address is rounded down to the Windows 64-KiB allocation-granularity boundary, with overlap, capacity, and global reservation-limit checks. MEM_COMMIT on an existing reservation remains limited to a complete tracked reservation; partial commit/decommit/protection ranges remain unsupported.
+
+Regression tests cover reserve-only protection metadata, protection changes without losing the original value, fixed-address rounding, overlap rejection, combined reserve-and-commit, and free-region metadata.
