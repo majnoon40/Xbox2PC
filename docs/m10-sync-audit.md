@@ -82,7 +82,7 @@ VmRegion keeps allocation_protection independently from current protection. Win3
 - `XTaskQueueDuplicateHandle` is registered as partially implemented and exposed through the guest marshalling bridge. It creates a distinct same-process handle ID referencing the same queue object and writes the duplicated 64-bit handle through the documented output pointer.
 - Closing one alias removes only that handle. Active dispatch waits retain the underlying queue while any duplicate alias remains; closing the final alias wakes blocked dispatch. Process exit removes every alias owned by that process.
 - `live_queues()` counts unique queue objects rather than aliases. Tests cover alias lifetime, process isolation, duplicate API output, closing the original handle while dispatch is blocked, and waking dispatch when the final alias closes.
-- Callback submission, callback invocation, callback-reference lifetime, automatic dispatch modes, and actual work/completion scheduling remain unsupported. Manual dispatch on an empty queue returns false after the requested timeout or when terminated/closed.
+- `XTaskQueueSubmitCallback` stores bounded guest callback records per work/completion port. `XTaskQueueDispatch` invokes one callback on the calling guest thread through the deterministic backend, passing `(context, canceled)` in RCX/RDX. Queue termination marks pending callbacks canceled; a later manual dispatch delivers them with `canceled=true`. Delayed callbacks, automatic/thread-pool/immediate modes, monitors, waiters, and termination callbacks remain unsupported.
 
 
 ## Managed-thread suspension continuation
