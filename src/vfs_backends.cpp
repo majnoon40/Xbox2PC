@@ -121,21 +121,39 @@ Result<std::unique_ptr<IVfsFileHandle>> HostDirBackend::open(const VfsPath& rel,
         explicit PalVfsFileHandle(std::unique_ptr<pal::PalFile> f)
             : pal_(std::move(f)) {}
         Result<std::uint64_t> read(void* buf, std::uint64_t len) override {
-            return pal_->read(buf, len);
+            std::lock_guard lock(lock_);
+            auto r = pal_->read(buf, len);
+            if (r.ok()) pos_ += r.value();
+            return r;
         }
         Result<std::uint64_t> write(const void* buf, std::uint64_t len) override {
-            return pal_->write(buf, len);
+            std::lock_guard lock(lock_);
+            auto r = pal_->write(buf, len);
+            if (r.ok()) pos_ += r.value();
+            return r;
         }
         Result<std::uint64_t> seek(std::uint64_t position) override {
-            return pal_->seek(static_cast<std::int64_t>(position), false);
+            if (position > static_cast<std::uint64_t>(INT64_MAX)) {
+                return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                             "seek position exceeds PAL range");
+            }
+            std::lock_guard lock(lock_);
+            auto r = pal_->seek(static_cast<std::int64_t>(position), false);
+            if (r.ok()) pos_ = r.value();
+            return r;
         }
-        std::uint64_t position() const override { return pos_; }
+        std::uint64_t position() const override {
+            std::lock_guard lock(lock_);
+            return pos_;
+        }
         std::uint64_t size() const override {
+            std::lock_guard lock(lock_);
             auto s = pal_->size();
             return s.ok() ? s.value() : 0;
         }
     private:
         std::unique_ptr<pal::PalFile> pal_;
+        mutable std::mutex lock_;
         std::uint64_t pos_ = 0;
     };
     // PAL files track position internally (read/write/seek); the wrapper
@@ -486,11 +504,21 @@ MemoryFileHandle::MemoryFileHandle(std::shared_ptr<std::string> payload,
     : data_(std::move(payload)), lock_(std::move(backend_lock)), writable_(writable) {}
 
 Result<std::uint64_t> MemoryFileHandle::read(void* buf, std::uint64_t len) {
+    if (!data_ || !lock_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "memory file handle has no backing storage");
+    }
+    if (len == 0) return Result<std::uint64_t>(0);
+    if (buf == nullptr) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "null read buffer");
+    }
     std::lock_guard lock(*lock_);
     if (pos_ >= data_->size()) return Result<std::uint64_t>(0);
     const std::uint64_t avail =
         std::min<std::uint64_t>(len, data_->size() - pos_);
-    std::memcpy(buf, data_->data() + pos_, static_cast<std::size_t>(avail));
+    std::memcpy(buf, data_->data() + static_cast<std::size_t>(pos_),
+                static_cast<std::size_t>(avail));
     pos_ += avail;
     return Result<std::uint64_t>(avail);
 }
@@ -500,17 +528,39 @@ Result<std::uint64_t> MemoryFileHandle::write(const void* buf, std::uint64_t len
         return Result<std::uint64_t>(RuntimeErrc::LockNotOwned,
                                       "handle opened read-only");
     }
-    std::lock_guard lock(*lock_);
-    const std::size_t new_end = static_cast<std::size_t>(pos_ + len);
-    if (new_end > data_->size()) {
-        data_->resize(new_end, '\0');
+    if (!data_ || !lock_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "memory file handle has no backing storage");
     }
-    std::memcpy(data_->data() + pos_, buf, static_cast<std::size_t>(len));
-    pos_ += len;
+    if (len == 0) return Result<std::uint64_t>(0);
+    if (buf == nullptr) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "null write buffer");
+    }
+    std::lock_guard lock(*lock_);
+    if (pos_ > (~0ull) - len) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "file write offset overflow");
+    }
+    const std::uint64_t end = pos_ + len;
+    if (end > data_->max_size()) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "file write exceeds string capacity");
+    }
+    const std::size_t new_end = static_cast<std::size_t>(end);
+    if (new_end > data_->size()) data_->resize(new_end, '\0');
+    std::memcpy(data_->data() + static_cast<std::size_t>(pos_), buf,
+                static_cast<std::size_t>(len));
+    pos_ = end;
     return Result<std::uint64_t>(len);
 }
 
 Result<std::uint64_t> MemoryFileHandle::seek(std::uint64_t position) {
+    if (!data_ || !lock_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "memory file handle has no backing storage");
+    }
+    std::lock_guard lock(*lock_);
     if (position > data_->size()) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "seek beyond end of file");
@@ -519,6 +569,16 @@ Result<std::uint64_t> MemoryFileHandle::seek(std::uint64_t position) {
     return Result<std::uint64_t>(pos_);
 }
 
-std::uint64_t MemoryFileHandle::size() const { return data_->size(); }
+std::uint64_t MemoryFileHandle::position() const {
+    if (!lock_) return pos_;
+    std::lock_guard lock(*lock_);
+    return pos_;
+}
+
+std::uint64_t MemoryFileHandle::size() const {
+    if (!data_ || !lock_) return 0;
+    std::lock_guard lock(*lock_);
+    return data_->size();
+}
 
 }  // namespace xbox2pc::rt
