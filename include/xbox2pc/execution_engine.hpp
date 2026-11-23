@@ -131,6 +131,14 @@ struct ExecutionResult {
 // A prepared guest call to run (from the execution context). Carries
 // NO raw host pointers: entry + stack are guest VAs; the API side
 // resolves through the registry.
+struct ApiBindingInfo {
+    std::uint64_t value = 0;
+    std::string library;
+    std::string export_name;
+    bool by_ordinal = false;
+    std::uint32_t ordinal = 0;
+};
+
 struct ExecutionRequest {
     std::uint64_t entry_va = 0;
     std::uint64_t stack_top_va = 0;     // 16-aligned free stack top
@@ -139,6 +147,9 @@ struct ExecutionRequest {
     // ApiResolver-issued); landing on one enters the marshalling
     // bridge. The engine treats anything in binding range as a call.
     std::vector<std::uint64_t> api_binding_values;
+    // Exact import identity for every resolved binding. This is the
+    // authoritative dispatch map; binding-range addresses alone are not.
+    std::vector<ApiBindingInfo> api_bindings;
     // Completion sentinel: executing a `RET` with the sentinel address
     // as the return target completes the run (documented contract).
     std::uint64_t completion_va = 0;
@@ -284,7 +295,7 @@ Result<MarshalResult> marshal_and_dispatch(cpu::CpuState& io_cpu,
 // ── completion sentinel + binding range ──────────────────────────────────
 
 inline constexpr std::uint64_t kBindingBase = 0x51000000ull;
-inline constexpr std::uint64_t kBindingRange = 0x00010000ull;
+inline constexpr std::uint64_t kBindingRange = 0x00020000ull;
 inline constexpr std::uint64_t kCompletionSentinel = 0x5100FFFFull;
 inline bool is_api_binding(std::uint64_t va) {
     return va >= kBindingBase && va < kBindingBase + kBindingRange &&
