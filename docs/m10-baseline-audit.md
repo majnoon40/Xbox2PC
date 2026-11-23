@@ -99,3 +99,19 @@ non-throwing, and must not re-enter `ProcessManager`.
 This is not full XTaskQueue compatibility: callback submission, callback
 execution, duplicate handles, and real wait/dispatch scheduling remain outside
 this slice and must stay reported as partial.
+
+
+## M10.3 implementation slice — process/thread identity queries
+
+Added evidence-backed Win32 identity exports to the existing kernel32 registry and service:
+
+- `GetCurrentProcessId()` returns the calling guest process ID from `ApiContext`, rejecting a missing identity or a value outside the documented DWORD range.
+- `GetCurrentThreadId()` returns the calling guest thread ID from `ApiContext`, rejecting a missing identity or a value outside the DWORD range.
+- Descriptor signatures, zero-argument contracts, scalar DWORD return types, and Microsoft Learn evidence URLs are recorded in the built-in descriptor table.
+- Tests cover normal values, absent identities, and DWORD overflow.
+
+Evidence:
+- https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocessid
+- https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentthreadid
+
+This does not imply that the execution engine automatically supplies a calling-thread ID in every execution path. The API is only fully usable where the caller provides a valid guest identity in `ApiContext`.
