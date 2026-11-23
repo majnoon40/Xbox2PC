@@ -2,54 +2,45 @@
 
 Branch: `feature/m9-execution-validation-main`, based directly on `main`.
 
-This file separates source changes from tests that have actually been run.
-
-## Present on the main baseline
-
-- Structured x86-64 decoder and typed reject classes.
-- Decoder-backed instruction interpreter and instruction-focused test suites.
-- Advanced Microsoft x64 ABI coverage and execution-context integration.
-- Existing execution, loader, API-compatibility, memory fuzz, and benchmark
-  harnesses from earlier milestones.
-
 ## Added on this branch
 
-- `xbox2pc_rt_binary_validation`: structural PE validation layered on M1.
-- Staged findings for identification, PE structure, imports, relocations,
-  TLS, and memory layout.
-- Section bounds/overlap checks, entry-point checks, and W+X warnings.
-- Synthetic-input tests for null/empty, truncated, valid AMD64, and I386 PE
-  inputs.
-- A conservative linear instruction scan of file-backed executable sections,
-  with decoder-confirmed records, unsupported encodings, candidate embedded
-  data, uncertain tails, and FS/GS memory-segment reporting.
-- A static-analysis scope document that explicitly disclaims CFG recovery.
-- Scope documentation that distinguishes structural validation from runtime
-  compatibility.
+- Structural PE validation layered on the M1 parser and M6 pre-allocation
+  validation.
+- Regular/delay import parse reporting, relocation-block decoding, and TLS
+  metadata decoding; no relocation application or callback execution.
+- Section bounds/overlap, entry-point, W+X, and parser diagnostic reporting.
+- Conservative static instruction scan of file-backed executable sections.
+- Distinct decoder-unsupported encodings, interpreter-unsupported decoded
+  instructions, candidate embedded-data regions, uncertain tails, and FS/GS
+  segment references.
+- Nine binary CLI commands plus interpreter-info and interpreter-test.
+- Versioned `xbox2pc.binary-compatibility` JSON with explicit status vocabulary
+  and no overall compatibility percentage.
+- Synthetic tests for PE validation, relocations/TLS metadata, static analysis,
+  interpreter support gaps, all binary CLI commands, and deterministic fuzz.
+- A 200,000-case decoder mutation loop and 10,000 mutated synthetic PE cases.
+- A manual decoder/validation/static-analysis benchmark target.
+- M9 documentation covering CLI, compatibility schema, fuzzing, benchmarks,
+  adversarial review, validation status, and execution limitations.
 
 ## Remaining M9 gates
 
-- Complete PE semantic validation for imports, relocation blocks, TLS,
-  exception metadata, and memory protections.
-- Improve static-analysis heuristics and broaden tests for candidate-data and
-  unsupported-instruction classification.
-- Conservative static instruction analysis with confirmed/candidate/data
-  distinctions and explicit uncertainty.
-- `binary-compatibility.json` with the required compatibility statuses.
-- The full 11-command M9 CLI surface and machine-readable output.
-- Expanded synthetic PE corpus and end-to-end M4–M9 coverage.
-- Dedicated fuzz campaigns across PE validation, decoder, ABI, memory,
-  marshalling, and static analysis (target at least 200,000 mutations where
-  practical).
-- Reproducible benchmarks and all eight M9 documents.
-- Fresh Release build, complete CTest regression, ASan, UBSan, TSan, fuzz,
-  and E2E execution.
+- Inspect and fix all current CI build/test failures on the latest commit.
+- Complete Release and Debug builds with GCC and Clang.
+- Complete ASan/UBSan and TSan runs.
+- Run the full CTest suite including the M9 fuzz and CLI integration tests.
+- Run and record the M9 benchmark plus existing execution/loader/API benchmarks.
+- Complete an adversarial source audit of decoder, interpreter, ABI, memory,
+  loader, marshalling, and static-analysis paths.
+- Expand the end-to-end synthetic M4–M9 lifecycle and cleanup matrix.
+- Validate compatibility-report semantics against additional adversarial PE
+  fixtures and ensure all statuses are evidence-backed.
 
 ## Verification truth
 
-GitHub source changes are committed, but no compiler, CTest, sanitizer,
-fuzzer, or benchmark execution has been performed for this increment. Do not
-treat the newly added test cases as passing until run in a build environment.
+CI runs on intermediate commits have exposed linker dependency defects; these
+are being fixed. No claim is made that the latest source has passed its full
+matrix until the corresponding run completes.
 
 `REAL_XBOX_EXECUTABLE_TESTED: NO`
 
