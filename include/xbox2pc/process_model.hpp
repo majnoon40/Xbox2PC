@@ -106,8 +106,8 @@ public:
     Result<void> run();                  // Initializing -> Running
     Result<void> suspend();
     Result<void> resume();
-    Result<void> begin_termination();
-    Result<void> finish_termination(std::uint64_t exit_code);
+    virtual Result<void> begin_termination();
+    virtual Result<void> finish_termination(std::uint64_t exit_code);
     Result<void> terminate(std::uint64_t exit_code);  // -> Terminating/Terminated
     Result<void> fail(std::string reason);
 
