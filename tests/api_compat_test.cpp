@@ -116,6 +116,7 @@ struct GuestWaitThreadArgs {
     std::uint64_t process_id = 0;
     std::uint64_t handle = 0;
     std::atomic<bool> entered{false};
+    std::atomic<bool> completed{false};
     std::atomic<std::uint64_t> wait_result{0};
 };
 void* guest_wait_thread_main(xbox2pc::rt::RtThread& self, void* raw) {
@@ -130,6 +131,7 @@ void* guest_wait_thread_main(xbox2pc::rt::RtThread& self, void* raw) {
     const auto result = args->registry->dispatch("kernel32", "WaitForSingleObject", ctx);
     args->wait_result.store(result.ok ? result.return_value : 0xDEADu,
                             std::memory_order_release);
+    args->completed.store(true, std::memory_order_release);
     return nullptr;
 }
 
@@ -628,6 +630,87 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
 }
 
 
+
+TEST(GdkServiceTest, ProcessSuspendResumesBlockedWin32EventWait) {
+    ApiWorld w;
+    (void)w.new_process("suspend-blocked-wait.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "suspend-blocked-wait.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext create;
+    create.process_id = pid.value();
+    create.arg_count = 4;
+    create.args[0] = 0; create.args[1] = 1;
+    create.args[2] = 0; create.args[3] = 0;
+    const auto event = w.reg.dispatch("kernel32", "CreateEventW", create);
+    ASSERT_TRUE(event.ok); ASSERT_NE(event.return_value, 0u);
+
+    GuestWaitThreadArgs args;
+    args.registry = &w.reg;
+    args.process_id = pid.value();
+    args.handle = event.return_value;
+    auto thread_handle = w.pm.spawn_thread(w.last_handle, guest_wait_thread_main,
+                                           &args, "suspend-blocked-event-wait");
+    ASSERT_TRUE(thread_handle.ok());
+    auto process_ref = w.pm.find_process(w.last_handle);
+    ASSERT_TRUE(process_ref.ok());
+    auto* managed = process_ref.value().get()->as<ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const auto ids = managed->thread_ids();
+    ASSERT_EQ(ids.size(), 1u);
+    auto thread_ref = w.core.objects().lookup_id(ids.front());
+    ASSERT_TRUE(thread_ref.ok());
+    auto* thread = thread_ref.value().get()->as<xbox2pc::rt::RtThread>();
+    ASSERT_NE(thread, nullptr);
+
+    const auto blocked_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(2);
+    while (thread->state() != xbox2pc::rt::ThreadState::Blocked &&
+           std::chrono::steady_clock::now() < blocked_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(args.entered.load(std::memory_order_acquire));
+    ASSERT_EQ(thread->state(), xbox2pc::rt::ThreadState::Blocked);
+
+    ASSERT_TRUE(w.pm.suspend_process(w.last_handle).ok());
+    const auto parked_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (!thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < parked_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(thread->execution_control()->is_parked());
+    EXPECT_FALSE(args.completed.load(std::memory_order_acquire));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(args.completed.load(std::memory_order_acquire));
+
+    ASSERT_TRUE(w.pm.resume_process(w.last_handle).ok());
+    const auto resumed_deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(2);
+    while (thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < resumed_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(thread->execution_control()->is_parked());
+    ASSERT_TRUE(w.grt->set_event(pid.value(), event.return_value).ok());
+
+    const auto completed_deadline = std::chrono::steady_clock::now() +
+                                    std::chrono::seconds(2);
+    while (!args.completed.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < completed_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(args.completed.load(std::memory_order_acquire));
+    EXPECT_EQ(args.wait_result.load(std::memory_order_acquire), 0u);
+    ASSERT_TRUE(thread->join_ns(pal::kInfiniteTimeout).ok());
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+}
 
 TEST(GdkServiceTest, ProcessTerminationCancelsBlockedGuestSyncWait) {
     ApiWorld w;
