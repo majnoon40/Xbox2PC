@@ -135,7 +135,7 @@ public:
     Result<std::uint64_t> read(void* buf, std::uint64_t len) override;
     Result<std::uint64_t> write(const void* buf, std::uint64_t len) override;
     Result<std::uint64_t> seek(std::uint64_t position) override;
-    std::uint64_t position() const override { return pos_; }
+    std::uint64_t position() const override;
     std::uint64_t size() const override;
 
 private:
