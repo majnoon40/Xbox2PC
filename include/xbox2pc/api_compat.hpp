@@ -140,6 +140,8 @@ struct ApiContext {
     static constexpr std::size_t kMaxArgs = 8;
     std::uint64_t args[kMaxArgs] = {0};
     std::size_t arg_count = 0;
+    // Guest arrays decoded by the execution bridge; indexed by pointer argument slot.
+    std::array<std::vector<std::uint64_t>, kMaxArgs> pointer_arrays;
     // Time-sensitive-thread check (XThreadIsTimeSensitive semantics):
     // APIs documented as unsafe on time-sensitive threads refuse when
     // the context thread is marked time-sensitive.
