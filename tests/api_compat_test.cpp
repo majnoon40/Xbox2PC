@@ -589,9 +589,30 @@ TEST(GdkServiceTest, ProcessTerminationCancelsBlockedGuestSyncWait) {
     while (!args.entered.load(std::memory_order_acquire))
         std::this_thread::yield();
 
-    // Process teardown requests cooperative stop; the wait must observe it
-    // and return instead of holding termination until its infinite timeout.
-    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+    auto process_ref = w.pm.find_process(w.last_handle);
+    ASSERT_TRUE(process_ref.ok());
+    auto* managed = process_ref.value().get()->as<ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const auto thread_ids = managed->thread_ids();
+    ASSERT_EQ(thread_ids.size(), 1u);
+    auto thread_ref = w.core.objects().lookup_id(thread_ids.front());
+    ASSERT_TRUE(thread_ref.ok());
+    auto* runtime_thread = thread_ref.value().get()->as<xbox2pc::rt::RtThread>();
+    ASSERT_NE(runtime_thread, nullptr);
+    bool observed_blocked = false;
+    for (int i = 0; i < 1000; ++i) {
+        if (runtime_thread->state() == xbox2pc::rt::ThreadState::Blocked) {
+            observed_blocked = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Process teardown requests cooperative stop; the wait must observe it,
+    // restore the guest thread's lifecycle state, and return from the wait.
+    const auto terminated = w.pm.terminate_process(w.last_handle, 0);
+    EXPECT_TRUE(terminated.ok());
+    EXPECT_TRUE(observed_blocked);
     EXPECT_EQ(args.wait_result.load(std::memory_order_acquire), 0xFFFFFFFFu);
 }
 

@@ -1157,6 +1157,24 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
             }
         }
     }
+    auto* guest_runtime_thread = guest_thread.get() != nullptr
+        ? guest_thread.get()->as<RtThread>() : nullptr;
+    bool marked_blocked = false;
+    if (guest_runtime_thread != nullptr &&
+        guest_runtime_thread->state() == ThreadState::Running) {
+        marked_blocked = guest_runtime_thread->block_note().ok();
+    }
+    struct WaitStateRestore {
+        RtThread* thread;
+        bool blocked;
+        ~WaitStateRestore() {
+            if (thread != nullptr && blocked &&
+                thread->state() == ThreadState::Blocked) {
+                (void)thread->unblock_note();
+            }
+        }
+    } wait_state_restore{guest_runtime_thread, marked_blocked};
+
     const auto cancelled = [&guest_thread]() {
         auto* object = guest_thread.get();
         auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
