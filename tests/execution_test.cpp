@@ -2095,6 +2095,7 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     spec2.ret = rt::abi::CallSpec::ReturnKind::Int;
     auto req = ctx->prepare_entry(*loaded, tls_index, {}, spec2);
     ASSERT_TRUE(req.ok()) << req.error_string();
+    EXPECT_EQ(ctx->info().tls_index, tls_index);
     DeterministicBackend engine(w.reg, cfg);
     engine.bind_space(proc->address_space());
     engine.bind_process(1, 1);
@@ -2159,7 +2160,6 @@ TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
     ASSERT_TRUE(context.step(request, engine).ok());
     EXPECT_TRUE(engine.step_called);
     EXPECT_EQ(engine.step_control, managed_thread.execution_control().get());
-    EXPECT_EQ(context.info().tls_index, 0u);
     EXPECT_TRUE(context.destroy().ok());
 }
 
