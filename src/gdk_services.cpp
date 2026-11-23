@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <thread>
+#include <unordered_set>
 
 namespace xbox2pc::rt::api {
 
@@ -438,6 +439,30 @@ public:
     }
     std::string describe() const override { return "XTaskQueue: create (manual modes)"; }
 
+private:
+    TaskQueueService& svc_;
+};
+
+class TqDuplicateHandleImpl : public IApiImplementation {
+public:
+    explicit TqDuplicateHandleImpl(TaskQueueService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 2) return false;
+        const auto duplicated = svc_.duplicate_queue(ctx.process_id, ctx.args[0]);
+        if (!duplicated.ok()) {
+            out.return_value = kEInvalidArg;
+            out.error = duplicated.error_string();
+            return false;
+        }
+        out.return_value = kSOk;
+        out.has_out = true;
+        out.out_value = duplicated.value();
+        out.note = "same-process queue handle duplicated; shared queue state retained";
+        return true;
+    }
+    std::string describe() const override {
+        return "XTaskQueue: duplicate handle (shared reference)";
+    }
 private:
     TaskQueueService& svc_;
 };
@@ -1458,7 +1483,8 @@ Result<void> TaskQueueService::on_initialize() {
     const auto r2 = reg("XTaskQueueDispatch", keep(std::make_shared<TqDispatchImpl>(*this)));
     const auto r3 = reg("XTaskQueueCloseHandle", keep(std::make_shared<TqCloseImpl>(*this)));
     const auto r4 = reg("XTaskQueueTerminate", keep(std::make_shared<TqTerminateImpl>(*this)));
-    for (const auto* r : {&r1, &r2, &r3, &r4}) {
+    const auto r5 = reg("XTaskQueueDuplicateHandle", keep(std::make_shared<TqDuplicateHandleImpl>(*this)));
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(owner);
             owned_.clear();
