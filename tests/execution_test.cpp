@@ -633,6 +633,16 @@ TEST(BridgeTest, PlanForDescriptorsAndErrors) {
     EXPECT_EQ(multi_plan.value().pointer_array_args[0].count_arg, 0u);
     EXPECT_EQ(multi_plan.value().pointer_array_args[0].max_count, 64u);
     EXPECT_EQ(multi_plan.value().pointer_array_args[0].element_size, 8u);
+    const auto* submit_callback = w.reg.find(
+        "xgameruntime", "XTaskQueueSubmitCallback");
+    ASSERT_NE(submit_callback, nullptr);
+    const auto submit_plan = plan_for_descriptor(*submit_callback);
+    ASSERT_TRUE(submit_plan.ok()) << submit_plan.error_string();
+    ASSERT_EQ(submit_plan.value().call.args.size(), 4u);
+    EXPECT_EQ(submit_plan.value().call.args[0].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(submit_plan.value().call.args[1].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(submit_plan.value().call.args[2].kind, rt::abi::ArgKind::Ptr);
+    EXPECT_EQ(submit_plan.value().call.args[3].kind, rt::abi::ArgKind::Ptr);
     const auto* delayed = w.reg.find("xgameruntime",
                                      "XTaskQueueSubmitDelayedCallback");
     ASSERT_NE(delayed, nullptr);
