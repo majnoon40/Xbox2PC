@@ -303,12 +303,12 @@ TEST(ExecFuzzTest, MarshalPlanFuzz) {
 TEST(ExecFuzzTest, ExecutionRequestFuzz) {
     api::ApiRegistry reg;
     RuntimeCore core;
+    ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<api::GameRuntimeService>(reg);
+        auto grt = std::make_unique<api::GameRuntimeService>(reg, pm);
         core.services().register_service(std::move(grt));
     }
     core.initialize();
-    ProcessManager pm(core.objects());
     auto ph = pm.create_process("rfz.exe", 64ull << 20);
     auto pr = core.objects().lookup_handle(ph.value());
     auto* proc = pr.value().get()->as<ManagedProcess>();
@@ -371,12 +371,12 @@ TEST(ExecFuzzTest, ExecutionRequestFuzz) {
 TEST(ExecFuzzTest, TlsMetadataFuzz) {
     api::ApiRegistry reg;
     RuntimeCore core;
+    ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<api::GameRuntimeService>(reg);
+        auto grt = std::make_unique<api::GameRuntimeService>(reg, pm);
         core.services().register_service(std::move(grt));
     }
     core.initialize();
-    ProcessManager pm(core.objects());
     auto ph = pm.create_process("tfz.exe", 32ull << 20);
     auto pr = core.objects().lookup_handle(ph.value());
     auto* proc = pr.value().get()->as<ManagedProcess>();

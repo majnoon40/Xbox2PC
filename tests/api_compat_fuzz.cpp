@@ -259,8 +259,9 @@ TEST(ApiFuzzTest, RegistryRegisterRevokeRaceTypedResults) {
     // target): every operation returns typed results; no crash.
     ApiRegistry reg;
     RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<GameRuntimeService>(reg);
+        auto grt = std::make_unique<GameRuntimeService>(reg, pm);
         (void)core.services().register_service(std::move(grt));
     }
     (void)core.initialize();

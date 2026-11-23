@@ -601,8 +601,9 @@ TEST(GdkServiceTest, ServiceInitializationOrderingAndRollback) {
     };
     ApiRegistry reg;
     RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<GameRuntimeService>(reg);
+        auto grt = std::make_unique<GameRuntimeService>(reg, pm);
         EXPECT_TRUE(core.services().register_service(std::move(grt)).ok());
         EXPECT_TRUE(core.services()
                         .register_service(std::make_unique<FailingService>())

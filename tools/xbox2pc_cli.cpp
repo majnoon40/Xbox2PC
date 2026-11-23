@@ -2511,7 +2511,7 @@ struct M8World {
     xbox2pc::rt::ProcessManager pm;
     M8World() : pm(core.objects()) {
         {
-            auto grt = std::make_unique<xbox2pc::rt::api::GameRuntimeService>(reg);
+            auto grt = std::make_unique<xbox2pc::rt::api::GameRuntimeService>(reg, pm);
             (void)core.services().register_service(std::move(grt));
         }
         (void)core.initialize();
