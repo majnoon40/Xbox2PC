@@ -15,7 +15,7 @@
 namespace xbox2pc::analysis {
 namespace {
 
-constexpr std::size_t kMaxInstructionRecords = 1'000'000;
+constexpr std::size_t kMaxAnalysisSteps = 1'000'000;
 
 bool fits(std::uint64_t start, std::uint64_t length, std::uint64_t limit) {
     return start <= limit && length <= limit - start;
@@ -79,7 +79,7 @@ AnalysisReport analyze_pe(const std::uint8_t* data, std::size_t size,
         return report;
     }
 
-    std::size_t instruction_count = 0;
+    std::size_t analysis_steps = 0;
     for (const auto& section : image.sections) {
         if ((section.characteristics & xbox2pc::pe::sect_flags::kExecutable) == 0) {
             continue;
@@ -102,7 +102,7 @@ AnalysisReport analyze_pe(const std::uint8_t* data, std::size_t size,
 
         std::uint64_t offset = 0;
         while (offset < section_size) {
-            if (instruction_count >= kMaxInstructionRecords) {
+            if (analysis_steps >= kMaxAnalysisSteps) {
                 append_region(report.uncertain_regions, section.name,
                               static_cast<std::uint64_t>(section.virtual_address) + offset,
                               file_offset + offset, section_size - offset,
@@ -110,6 +110,9 @@ AnalysisReport analyze_pe(const std::uint8_t* data, std::size_t size,
                 report.notes.push_back("analysis stopped at the instruction safety cap");
                 return report;
             }
+            // Bound every decoder attempt, not just successfully decoded instructions.
+            // Malformed or unsupported bytes must not bypass the work/output cap.
+            ++analysis_steps;
 
             const auto remaining = static_cast<std::size_t>(section_size - offset);
             const std::uint64_t rva =
@@ -138,7 +141,6 @@ AnalysisReport analyze_pe(const std::uint8_t* data, std::size_t size,
                                       record.text);
                 }
                 report.confirmed_instructions.push_back(std::move(record));
-                ++instruction_count;
 
                 for (std::uint8_t i = 0; i < decoded.ins.op_count; ++i) {
                     const auto& operand = decoded.ins.ops[i];
