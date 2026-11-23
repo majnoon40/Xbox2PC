@@ -582,7 +582,7 @@ StepResult Interpreter::step(const Decoded& ins) {
                 cx.cpu.set_flag(cpu::kFlagAF, (bits3 & 0x10ull) != 0);
             }
             if (ins.mnem != Mnemonic::Cmp) {
-                if (!write_operand(cx, dst_operand, result)) {
+                if (!write_operand(cx, ins.ops[0], result)) {
                     return StepResult::failed(cx.fail);
                 }
             }
