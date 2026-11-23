@@ -1165,6 +1165,53 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueCallbacksRemainFifoAndPortIsolated) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-port-order.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    const auto queue = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0xA1, 0x140001000).ok());
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0xA2, 0x140002000).ok());
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Completion, 0xB1, 0x140003000).ok());
+
+    std::vector<std::uint64_t> work_contexts;
+    const auto invoke = [&](std::uint64_t, std::uint64_t context, bool) {
+        work_contexts.push_back(context);
+        return xbox2pc::rt::Result<void>::ok_result();
+    };
+    const auto first = w.tq->dispatch(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0, invoke);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    EXPECT_TRUE(first.value());
+    const auto second = w.tq->dispatch(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0, invoke);
+    ASSERT_TRUE(second.ok()) << second.error_string();
+    EXPECT_TRUE(second.value());
+    EXPECT_EQ(work_contexts, (std::vector<std::uint64_t>{0xA1, 0xA2}));
+
+    std::uint64_t completion_context = 0;
+    const auto completion = w.tq->dispatch(
+        pid.value(), queue.value(), XTaskQueuePort::Completion, 0,
+        [&](std::uint64_t, std::uint64_t context, bool) {
+            completion_context = context;
+            return xbox2pc::rt::Result<void>::ok_result();
+        });
+    ASSERT_TRUE(completion.ok()) << completion.error_string();
+    EXPECT_TRUE(completion.value());
+    EXPECT_EQ(completion_context, 0xB1u);
+
+    EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
+}
+
 TEST(GdkServiceTest, TaskQueueCallbackInvokerExceptionDoesNotLeakActiveDispatch) {
     ApiWorld w;
     (void)w.new_process("task-queue-callback-exception.exe");
