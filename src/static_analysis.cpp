@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "xbox2pc/diagnostics.hpp"
 #include "xbox2pc/pe_parser.hpp"
@@ -152,7 +153,9 @@ AnalysisReport analyze_pe(const std::uint8_t* data, std::size_t size,
                 append_region(report.unsupported_instructions, section.name, rva,
                               absolute_file_offset, span,
                               std::string(xbox2pc::rt::x64::reject_class_name(decoded.reject)) +
-                                  ": " + decoded.reason);
+                                  ": " + decoded.reason + " [bytes: " +
+                                  hex_bytes(data + static_cast<std::size_t>(absolute_file_offset),
+                                            static_cast<std::size_t>(span)) + "]");
                 offset += span;
                 continue;
             }
