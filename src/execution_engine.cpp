@@ -127,42 +127,6 @@ DeterministicBackend::DeterministicBackend(api::ApiRegistry& registry,
 
 DeterministicBackend::~DeterministicBackend() = default;
 
-void ExecutionControl::request_suspend() {
-    std::lock_guard guard(mutex_);
-    suspend_requested_ = true;
-}
-
-void ExecutionControl::resume() {
-    {
-        std::lock_guard guard(mutex_);
-        suspend_requested_ = false;
-    }
-    changed_.notify_all();
-}
-
-bool ExecutionControl::is_suspend_requested() const {
-    std::lock_guard guard(mutex_);
-    return suspend_requested_;
-}
-
-bool ExecutionControl::is_parked() const {
-    return parked_.load(std::memory_order_acquire);
-}
-
-bool ExecutionControl::checkpoint(const std::atomic<bool>& interrupted) {
-    std::unique_lock guard(mutex_);
-    if (!suspend_requested_) return !interrupted.load(std::memory_order_acquire);
-    parked_.store(true, std::memory_order_release);
-    while (suspend_requested_ && !interrupted.load(std::memory_order_acquire)) {
-        // The bounded wait observes cancellation even when its owner only
-        // publishes the legacy atomic interruption flag (which cannot notify
-        // this condition variable). Resume itself wakes immediately.
-        changed_.wait_for(guard, std::chrono::milliseconds(2));
-    }
-    parked_.store(false, std::memory_order_release);
-    return !interrupted.load(std::memory_order_acquire);
-}
-
 // ── run ────────────────────────────────────────────────────────────────────
 
 ExecutionResult DeterministicBackend::run(
