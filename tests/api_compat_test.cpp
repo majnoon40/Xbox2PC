@@ -155,11 +155,13 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     const auto* alloc = reg.find("kernel32", "VirtualAlloc");
     const auto* query = reg.find("kernel32", "VirtualQuery");
     const auto* free = reg.find("kernel32", "VirtualFree");
+    const auto* protect = reg.find("kernel32", "VirtualProtect");
     const auto* wait = reg.find("kernel32", "WaitForSingleObject");
     const auto* wait_many = reg.find("kernel32", "WaitForMultipleObjects");
     ASSERT_NE(alloc, nullptr);
     ASSERT_NE(query, nullptr);
     ASSERT_NE(free, nullptr);
+    ASSERT_NE(protect, nullptr);
     ASSERT_NE(wait, nullptr);
     ASSERT_NE(wait_many, nullptr);
     EXPECT_EQ(wait_many->impl, ApiStatus::PartiallyImplemented);
@@ -169,7 +171,8 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     EXPECT_NE(alloc->notes.find("fixed-address"), std::string::npos);
     EXPECT_NE(query->notes.find("MEM_IMAGE"), std::string::npos);
     EXPECT_NE(query->notes.find("allocation protection"), std::string::npos);
-    EXPECT_NE(free->notes.find("exact-region MEM_DECOMMIT"), std::string::npos);
+    EXPECT_NE(free->notes.find("page-range MEM_DECOMMIT"), std::string::npos);
+    EXPECT_NE(protect->notes.find("page-range protection"), std::string::npos);
     EXPECT_NE(wait->notes.find("guest mutex"), std::string::npos);
     EXPECT_NE(wait->notes.find("guest semaphore"), std::string::npos);
     const auto* semaphore = reg.find("kernel32", "ReleaseSemaphore");
