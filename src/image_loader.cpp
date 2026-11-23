@@ -1239,6 +1239,11 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
             return Ret(RuntimeErrc::InvalidArgument,
                        "TLS template VAs are outside the image or reversed");
         }
+        const std::uint64_t raw_template_size = end_va - start_va;
+        if (raw_template_size > kMaxTlsTemplate) {
+            return Ret(RuntimeErrc::OutOfResources,
+                       "TLS raw template exceeds the limit");
+        }
         start_rva = start_va - image_base;
         end_rva = end_va - image_base;
         if (start_rva > image_size || end_rva > image_size) {
@@ -1266,11 +1271,9 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
     }
     info.callbacks_va = cb_va;
     info.zero_fill_size = zero_fill;
-    if (info.template_size > kMaxTlsTemplate ||
-        zero_fill > kMaxTlsTemplate - info.template_size) {
-        return Ret(RuntimeErrc::OutOfResources,
-                   "TLS template plus zero-fill exceeds the limit");
-    }
+    // The raw template is file-backed and decoded here. Zero-fill is
+    // metadata only; enforce the combined allocation limit when a thread's
+    // TLS block is actually created, not while decoding the image.
     if (info.template_size != 0) {
         bool start_ok = false, end_ok = false;
         (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(start_rva),
