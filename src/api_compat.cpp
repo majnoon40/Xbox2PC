@@ -385,7 +385,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ]";
         a.evidence_url = kTqDispatchUrl;
-        a.notes = "false when nothing dispatched / terminated; manual "
+        a.notes = "waits up to timeoutInMs for manual-port work; false when no callback is dispatched or the queue is terminated; manual "
                   "ports only (ThreadPool ports auto-dispatch — modeled "
                   "unsupported)";
         add(a);
