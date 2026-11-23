@@ -59,6 +59,8 @@ private:
     // Symlink check on the final target (PAL stat; detects link targets).
     Result<void> reject_if_symlink(const std::string& host_path,
                                    const std::string& what) const;
+    Result<void> reject_symlink_components(const VfsPath& rel,
+                                           const std::string& what) const;
 
     const std::string root_;
     const bool read_only_;
