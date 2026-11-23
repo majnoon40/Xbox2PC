@@ -954,7 +954,46 @@ TEST(IntegrationM4Test, ParsedImageThroughProcessManager) {
     ASSERT_TRUE(core.shutdown().ok());
 }
 
-int main(int argc, char** argv) {
+
+TEST(GuestSyncTest, MutexTracksGuestOwnershipAndRecursion) {
+    rt::RtGuestMutex m;
+    auto first=m.acquire(101,0); ASSERT_TRUE(first.ok()); EXPECT_FALSE(first.value());
+    auto recursive=m.acquire(101,0); ASSERT_TRUE(recursive.ok()); EXPECT_FALSE(recursive.value());
+    EXPECT_EQ(m.release(202).errc(),RuntimeErrc::LockNotOwned);
+    ASSERT_TRUE(m.release(101).ok()); EXPECT_EQ(m.acquire(202,0).errc(),RuntimeErrc::Timeout);
+    ASSERT_TRUE(m.release(101).ok()); auto second=m.acquire(202,0); ASSERT_TRUE(second.ok());
+    EXPECT_FALSE(second.value()); ASSERT_TRUE(m.release(202).ok());
+}
+TEST(GuestSyncTest, MutexReportsAbandonedOwnership) {
+    rt::RtGuestMutex m; ASSERT_TRUE(m.acquire(11,0).ok()); ASSERT_TRUE(m.abandon_owner(11).ok());
+    auto recovered=m.acquire(22,0); ASSERT_TRUE(recovered.ok()); EXPECT_TRUE(recovered.value());
+    EXPECT_EQ(m.abandon_owner(11).errc(),RuntimeErrc::LockNotOwned); ASSERT_TRUE(m.release(22).ok());
+}
+TEST(GuestSyncTest, MutexTimeoutCancellationAndClose) {
+    rt::RtGuestMutex m; ASSERT_TRUE(m.acquire(1,0).ok());
+    EXPECT_EQ(m.acquire(2,1'000'000).errc(),RuntimeErrc::Timeout);
+    EXPECT_EQ(m.acquire(2,20'000'000,[]{return true;}).errc(),RuntimeErrc::ThreadTerminated);
+    m.close(); EXPECT_EQ(m.acquire(2,-1).errc(),RuntimeErrc::ObjectDestroyed);
+}
+TEST(GuestSyncTest, SemaphoreCountBoundsAndPreviousCount) {
+    rt::RtGuestSemaphore s(1,3); ASSERT_TRUE(s.acquire(0).ok()); EXPECT_EQ(s.value(),0);
+    EXPECT_EQ(s.try_acquire().errc(),RuntimeErrc::Timeout);
+    auto r=s.release(2); ASSERT_TRUE(r.ok()); EXPECT_EQ(r.value(),0); EXPECT_EQ(s.value(),2);
+    EXPECT_EQ(s.release(2).errc(),RuntimeErrc::InvalidState);
+    EXPECT_EQ(s.release(0).errc(),RuntimeErrc::InvalidArgument);
+    ASSERT_TRUE(s.acquire(0).ok()); EXPECT_EQ(s.value(),1);
+}
+TEST(GuestSyncTest, SemaphoreCancellationAndClose) {
+    rt::RtGuestSemaphore s(0,2);
+    EXPECT_EQ(s.acquire(20'000'000,[]{return true;}).errc(),RuntimeErrc::ThreadTerminated);
+    s.close(); EXPECT_EQ(s.acquire(-1).errc(),RuntimeErrc::ObjectDestroyed);
+}
+TEST(GuestSyncTest, SemaphoreRejectsInvalidConstruction) {
+    rt::RtGuestSemaphore a(0,0), b(3,2);
+    EXPECT_EQ(a.acquire(0).errc(),RuntimeErrc::InvalidArgument);
+    EXPECT_EQ(b.release().errc(),RuntimeErrc::InvalidArgument);
+}
+\nint main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
