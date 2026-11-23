@@ -1604,6 +1604,19 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
     LoadedGuest guest(w, code, "import-map.exe", true);
     ASSERT_TRUE(guest.load_ok) << guest.load_error;
 
+    diag::Diagnostics parsed_diags;
+    const auto parsed = pe::parse(guest.bytes.data(), guest.bytes.size(),
+                                  "import-map.exe", parsed_diags);
+    ASSERT_GT(parsed.directories.size(), pe::kDirImport);
+    ASSERT_NE(parsed.directories[pe::kDirImport].rva, 0u);
+    ASSERT_NE(parsed.directories[pe::kDirImport].size, 0u);
+    loader::LoadDiagnostics probe_diagnostics;
+    auto probed_imports = guest.loader.resolve_imports(
+        guest.proc->address_space(), guest.out.layout, parsed,
+        guest.bytes.data(), guest.bytes.size(), guest.resolver, probe_diagnostics);
+    ASSERT_TRUE(probed_imports.ok()) << probed_imports.error_string();
+    ASSERT_EQ(probed_imports.value().size(), 1u);
+
     // Loaded images are owned by the process handle table, not the
     // global object-manager handle table.
     auto loaded_ref = guest.proc->handle_table().lookup(guest.image);
