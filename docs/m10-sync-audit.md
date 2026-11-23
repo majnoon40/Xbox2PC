@@ -91,3 +91,13 @@ VmRegion keeps allocation_protection independently from current protection. Win3
 - `ExecutionRequest::control` accepts that same gate, so the deterministic backend checks it at instruction boundaries. The execution owner must explicitly attach `thread.execution_control()` to the request.
 - `ProcessManager::suspend_process`/`resume_process` now use the thread suspend/resume operations rather than `request_stop` and a later attempt to clear the stop flag. Thread transitions are rolled back if a process-wide operation cannot be applied consistently.
 - A thread must reach an explicit safe point to pause. Native host code or guest paths without a connected execution gate are not asynchronously preempted; a full guest scheduler remains out of scope for this slice.
+
+
+### Page-range virtual memory expansion
+
+The M10 memory slice now supports page-aligned partial commit, decommit,
+and protection within a single tracked reservation. Range boundaries split
+metadata segments while preserving the original allocation base; MEM_RELEASE
+must use that original base and removes all segments. Linux decommit uses
+MADV_DONTNEED after changing the range to PROT_NONE. This is a Linux host
+memory-management behavior, not Xbox physical-memory emulation.
