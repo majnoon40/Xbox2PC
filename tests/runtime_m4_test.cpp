@@ -994,6 +994,76 @@ TEST(GuestSyncTest, SemaphoreRejectsInvalidConstruction) {
     EXPECT_EQ(b.release().errc(),RuntimeErrc::InvalidArgument);
 }
 
+
+TEST(GuestSyncTest, MutexWaiterIsWokenByReleaseAndCancellation) {
+    rt::RtGuestMutex mutex;
+    ASSERT_TRUE(mutex.acquire(1, 0).ok());
+    std::atomic<bool> started{false};
+    std::atomic<bool> cancel{false};
+    std::atomic<int> result{static_cast<int>(RuntimeErrc::Ok)};
+    std::thread waiter([&] {
+        started.store(true, std::memory_order_release);
+        auto r = mutex.acquire(2, -1, [&] { return cancel.load(std::memory_order_acquire); });
+        result.store(static_cast<int>(r.errc()), std::memory_order_release);
+        if (r.ok()) (void)mutex.release(2);
+    });
+    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cancel.store(true, std::memory_order_release);
+    waiter.join();
+    EXPECT_EQ(result.load(std::memory_order_acquire),
+              static_cast<int>(RuntimeErrc::ThreadTerminated));
+    ASSERT_TRUE(mutex.release(1).ok());
+}
+
+TEST(GuestSyncTest, SemaphoreWaiterIsWokenByReleaseAndCancellation) {
+    rt::RtGuestSemaphore semaphore(0, 1);
+    std::atomic<bool> started{false};
+    std::atomic<bool> cancel{false};
+    std::atomic<int> result{static_cast<int>(RuntimeErrc::Ok)};
+    std::thread waiter([&] {
+        started.store(true, std::memory_order_release);
+        auto r = semaphore.acquire(-1, [&] { return cancel.load(std::memory_order_acquire); });
+        result.store(static_cast<int>(r.errc()), std::memory_order_release);
+    });
+    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cancel.store(true, std::memory_order_release);
+    waiter.join();
+    EXPECT_EQ(result.load(std::memory_order_acquire),
+              static_cast<int>(RuntimeErrc::ThreadTerminated));
+}
+
+TEST(GuestSyncTest, MutexReleaseWakesBlockedGuestThread) {
+    rt::RtGuestMutex mutex;
+    ASSERT_TRUE(mutex.acquire(10, 0).ok());
+    std::atomic<bool> acquired{false};
+    std::thread waiter([&] {
+        auto r = mutex.acquire(20, -1);
+        acquired.store(r.ok(), std::memory_order_release);
+        if (r.ok()) (void)mutex.release(20);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_FALSE(acquired.load(std::memory_order_acquire));
+    ASSERT_TRUE(mutex.release(10).ok());
+    waiter.join();
+    EXPECT_TRUE(acquired.load(std::memory_order_acquire));
+}
+
+TEST(GuestSyncTest, SemaphoreReleaseWakesBlockedGuestThread) {
+    rt::RtGuestSemaphore semaphore(0, 1);
+    std::atomic<bool> acquired{false};
+    std::thread waiter([&] {
+        auto r = semaphore.acquire(-1);
+        acquired.store(r.ok(), std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_FALSE(acquired.load(std::memory_order_acquire));
+    ASSERT_TRUE(semaphore.release().ok());
+    waiter.join();
+    EXPECT_TRUE(acquired.load(std::memory_order_acquire));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

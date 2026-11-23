@@ -32,14 +32,21 @@ The current `WaitForSingleObject` event implementation blocks the host execution
 
 The existing `WaitSet` uses polling and has a documented non-transactional wait-all behavior for auto-reset events. Do not map it directly to Win32 `WaitForMultipleObjects` without resolving signal consumption, duplicate objects, ordering, maximum wait count, timeout accounting, and cancellation semantics.
 
-## Recommended implementation order
+## Implemented in the current M10 continuation
 
-1. Establish a runtime-owned guest-thread identity/ownership primitive usable by synchronization objects, independent of host thread IDs.
-2. Add cancellable timed waits with a single monotonic deadline and explicit wake reasons (signaled, timeout, cancelled, object closed).
-3. Add mutex ownership/recursion/abandonment tests and semaphore count/lifetime tests at the generic runtime layer.
-4. Add process-scoped kernel-object handles for mutexes and semaphores, with close and process-exit cleanup.
-5. Extend the Win32 wait API only after the generic object semantics pass adversarial tests.
-6. Connect wait parking to the execution engine only after a backend-level park/resume contract exists.
+- Added `RtGuestMutex`, whose ownership key is an explicit guest thread ID, with recursive acquisition, non-owner release rejection, abandonment recovery, timeout, cancellation predicate, and close wake-up.
+- Added `RtGuestSemaphore` with validated initial/maximum counts, timed/cancellable acquisition, bounded release, previous-count reporting, and close wake-up.
+- Added process-scoped handle-backed `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`, and `ReleaseSemaphore` support. `WaitForSingleObject` now accepts events, mutexes, and semaphores; mutex waits return `WAIT_ABANDONED_0` when ownership was abandoned.
+- Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. These waits still block the host execution thread in short bounded intervals; they are not scheduler-aware park/resume.
+- The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` currently requires a null previous-count pointer. Named objects, security descriptors, duplicate handles, and wait-multiple APIs remain unsupported.
+
+## Remaining implementation order
+
+1. Add deterministic tests for cancellation during a blocked wait, wake-on-release, abandonment, and object-close races; run all sanitizer configurations.
+2. Connect guest wait parking to the execution engine only after a backend-level park/resume contract exists.
+3. Integrate automatic owner abandonment into the managed guest-thread exit path, rather than relying only on the explicit primitive hook.
+4. Expand wait-multiple semantics with correct auto-reset consumption and rollback behavior.
+5. Continue virtual memory, task queue, I/O, and final compatibility audit work.
 
 ## Validation boundary
 
