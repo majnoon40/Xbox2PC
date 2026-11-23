@@ -235,6 +235,7 @@ Result<void> ProcessManager::suspend_process(Handle process) {
     // Suspend each owned live thread through its resumable gate. This is
     // deliberately not request_stop(): stop is terminal cancellation.
     std::vector<RefGuard> suspended;
+    std::vector<std::uint64_t> suspended_ids;
     for (const std::uint64_t tid : proc->thread_ids()) {
         auto t = objects_.lookup_id(tid);
         if (!t.ok() || t.value().get() == nullptr) continue;
@@ -253,7 +254,12 @@ Result<void> ProcessManager::suspend_process(Handle process) {
             return Result<void>(paused.errc(),
                                 "process suspension rolled back: " + paused.context());
         }
+        suspended_ids.push_back(tid);
         suspended.push_back(std::move(t.value()));
+    }
+    {
+        std::lock_guard detail_guard(proc->detail_lock_);
+        proc->process_suspended_threads_ = std::move(suspended_ids);
     }
     return Result<void>::ok_result();
 }
@@ -266,8 +272,13 @@ Result<void> ProcessManager::resume_process(Handle process) {
     }
     auto r = proc->resume();
     if (!r.ok()) return r;
+    std::vector<std::uint64_t> suspended_ids;
+    {
+        std::lock_guard detail_guard(proc->detail_lock_);
+        suspended_ids = proc->process_suspended_threads_;
+    }
     std::vector<RefGuard> resumed;
-    for (const std::uint64_t tid : proc->thread_ids()) {
+    for (const std::uint64_t tid : suspended_ids) {
         auto t = objects_.lookup_id(tid);
         if (!t.ok() || t.value().get() == nullptr) continue;
         auto* thread = t.value().get()->as<RtThread>();
@@ -283,6 +294,10 @@ Result<void> ProcessManager::resume_process(Handle process) {
                                 "process resume rolled back: " + running.context());
         }
         resumed.push_back(std::move(t.value()));
+    }
+    {
+        std::lock_guard detail_guard(proc->detail_lock_);
+        proc->process_suspended_threads_.clear();
     }
     return Result<void>::ok_result();
 }
