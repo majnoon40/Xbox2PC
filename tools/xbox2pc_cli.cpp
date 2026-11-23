@@ -1523,9 +1523,20 @@ struct LoaderWorld {
     xbox2pc::rt::Handle process;
     xbox2pc::rt::loader::ImageLoader loader;
 
-    LoaderWorld() : pm(core.objects()) {
+    // Scratch process for the mapping-bearing commands. The address space
+    // must hold the image being mapped: real Xbox titles ship images far
+    // larger than the old fixed 64 MB demo space (e.g. 176 MB), which made
+    // map/load fail with OutOfResources on files that validate perfectly.
+    // Size the space to the image (rounded up, with the old 64 MB floor).
+    explicit LoaderWorld(std::uint64_t image_bytes) : pm(core.objects()) {
         if (!core.initialize().ok()) return;
-        auto p = pm.create_process("m6-cli.exe", 64ull << 20);
+        constexpr std::uint64_t kFloor = 64ull << 20;          // previous default
+        constexpr std::uint64_t kRound = 16ull << 20;          // 16 MiB granularity
+        std::uint64_t capacity = kFloor;
+        if (image_bytes > kFloor) {
+            capacity = ((image_bytes + kRound - 1) / kRound) * kRound;
+        }
+        auto p = pm.create_process("m6-cli.exe", capacity);
         if (p.ok()) process = p.value();
     }
     ~LoaderWorld() { (void)core.shutdown(); }
@@ -1696,7 +1707,7 @@ int cmd_imports(const std::string& path,
     // Enumerate import bindings with the NullResolver: statuses then are
     // Unsupported (module unknown) — showing exactly what WOULD need a
     // resolver. For by-name listing we mirror M1's decoded view instead.
-    LoaderWorld w;
+    LoaderWorld w(img.opt.size_of_image);
     if (!w.ok()) {
         std::fprintf(stderr, "error: runtime init failed\n");
         return 1;
@@ -1789,7 +1800,7 @@ int cmd_map_image(const std::string& path, std::uint64_t want_base,
             std::fprintf(stderr, "  [%s] %s\n", i.code.c_str(), i.message.c_str());
         return 1;
     }
-    LoaderWorld w;
+    LoaderWorld w(img.opt.size_of_image);
     if (!w.ok()) {
         std::fprintf(stderr, "error: runtime init failed\n");
         return 1;
@@ -1871,7 +1882,7 @@ int cmd_load_image(const std::string& path,
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
-    LoaderWorld w;
+    LoaderWorld w(img.opt.size_of_image);
     if (!w.ok()) {
         std::fprintf(stderr, "error: runtime init failed\n");
         return 1;
@@ -1960,7 +1971,7 @@ int cmd_unload_image(const std::string& path) {
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
-    LoaderWorld w;
+    LoaderWorld w(img.opt.size_of_image);
     if (!w.ok()) return 1;
     xbox2pc::rt::loader::StaticResolver res;
     for (const auto& e : img.imports.entries) res.add_module(e.dll_name, e.functions);
@@ -2003,7 +2014,7 @@ int cmd_image_info(const std::string& path,
         std::fprintf(stderr, "error: %s\n", e.what());
         return 1;
     }
-    LoaderWorld w;
+    LoaderWorld w(img.opt.size_of_image);
     if (!w.ok()) return 1;
     xbox2pc::rt::loader::StaticResolver res;
     for (const auto& e : img.imports.entries) res.add_module(e.dll_name, e.functions);
