@@ -46,10 +46,25 @@ namespace {
 std::atomic<std::uint64_t> g_next_space_id{1};
 
 // Lock-free overlap scan over the (caller-locked) region map.
+bool checked_align_up(std::uint64_t value, std::uint64_t alignment,
+                      std::uint64_t& out) {
+    if (alignment == 0) return false;
+    const std::uint64_t rem = value % alignment;
+    const std::uint64_t delta = rem == 0 ? 0 : alignment - rem;
+    if (value > (~0ull) - delta) return false;
+    out = value + delta;
+    return true;
+}
+
 std::uint64_t overlap_in(const std::map<std::uint64_t, VmRegion>& regions,
                          std::uint64_t xbox_va, std::uint64_t size) {
     for (const auto& [va, r] : regions) {
-        if (va < xbox_va + size && xbox_va < va + r.size) return va;
+        // Compare distances instead of forming potentially wrapping ends.
+        if (va <= xbox_va) {
+            if (xbox_va - va < r.size) return va;
+        } else if (va - xbox_va < size) {
+            return va;
+        }
     }
     return 0;
 }
@@ -89,6 +104,12 @@ AddressSpace::AddressSpace(std::uint64_t host_capacity, std::uint64_t xbox_base,
       page_size_(pal::host_page_size()),
       space_id_(g_next_space_id.fetch_add(1, std::memory_order_acq_rel)),
       name_(std::move(name)) {
+    // Reject coordinate ranges whose exclusive end would wrap. Keep the
+    // backing mapping unavailable so every later operation fails closed.
+    if (xbox_base_ > (~0ull) - capacity_) {
+        capacity_ = 0;
+        return;
+    }
     // Backing host mapping: reserve (PROT_NONE) the whole capacity up
     // front; per-region commit flips subranges to RW via mprotect.
     impl_->host = pal::reserve_memory(host_capacity);
@@ -116,12 +137,18 @@ Result<std::uint64_t> AddressSpace::reserve_region(std::uint64_t xbox_va,
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "xbox_va not page-aligned");
     }
-    if (xbox_va < xbox_base_ || xbox_va - xbox_base_ + page_size_ > capacity_) {
+    if (xbox_base_ > (~0ull) - capacity_ || xbox_va < xbox_base_) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "xbox_va outside space bounds");
     }
-    std::uint64_t aligned_size = (size + page_size_ - 1) / page_size_ * page_size_;
-    if (xbox_va - xbox_base_ + aligned_size > capacity_) {
+    const std::uint64_t offset = xbox_va - xbox_base_;
+    if (offset > capacity_ || page_size_ > capacity_ - offset) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "xbox_va outside space bounds");
+    }
+    std::uint64_t aligned_size = 0;
+    if (!checked_align_up(size, page_size_, aligned_size) ||
+        aligned_size > capacity_ - offset) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "region exceeds space capacity");
     }
@@ -142,7 +169,8 @@ Result<std::uint64_t> AddressSpace::reserve_region(std::uint64_t xbox_va,
         for (const auto& [va, r] : impl_->regions) {
             if (r.state == RegionState::Reserved) current_reserved += r.size;
         }
-        if (current_reserved + aligned_size > limits_.max_reserved_bytes) {
+        if (current_reserved > limits_.max_reserved_bytes ||
+            aligned_size > limits_.max_reserved_bytes - current_reserved) {
             return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                          "reservation limit exceeded");
         }
@@ -175,9 +203,9 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
     if (size == 0) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "zero size");
     }
-    const std::uint64_t aligned =
-        (size + page_size_ - 1) / page_size_ * page_size_;
-    if (aligned > capacity_) {
+    std::uint64_t aligned = 0;
+    if (!checked_align_up(size, page_size_, aligned) ||
+        xbox_base_ > (~0ull) - capacity_ || aligned > capacity_) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "request exceeds space capacity");
     }
@@ -189,27 +217,29 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
         return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                      "space backing mapping failed at construction");
     }
-    // First-fit scan over the sorted map.
-    std::uint64_t candidate = xbox_base_;
+    // First-fit scan using offsets from xbox_base_; all bounds checks are
+    // subtraction-based so hostile sizes cannot wrap address arithmetic.
+    std::uint64_t candidate_off = 0;
     bool found = false;
     for (const auto& [va, r] : impl_->regions) {
-        if (va >= candidate + aligned || va + r.size <= candidate) {
-            found = true;   // gap before this region fits
+        const std::uint64_t region_off = va - xbox_base_;
+        if (region_off >= candidate_off &&
+            aligned <= region_off - candidate_off) {
+            found = true;
             break;
         }
-        candidate = va + r.size;
-        candidate = (candidate + page_size_ - 1) / page_size_ * page_size_;
-    }
-    if (!found) {
-        // Tail: after the last region (or the whole space when empty).
-        if (candidate - xbox_base_ + aligned > capacity_) {
+        const std::uint64_t region_end = region_off + r.size;
+        if (region_end > candidate_off) candidate_off = region_end;
+        if (!checked_align_up(candidate_off, page_size_, candidate_off)) {
             return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
-                                         "no gap large enough");
+                                         "address alignment overflow");
         }
-    } else if (candidate - xbox_base_ + aligned > capacity_) {
+    }
+    if (candidate_off > capacity_ || aligned > capacity_ - candidate_off) {
         return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                      "no gap large enough");
     }
+    const std::uint64_t candidate = xbox_base_ + candidate_off;
     // Insert the descriptor (limits enforced on the locked map).
     if (limits_.max_reserved_bytes != 0) {
         std::uint64_t current_reserved = 0;
@@ -261,7 +291,8 @@ Result<void> AddressSpace::commit_region(std::uint64_t xbox_va) {
         for (const auto& [va, reg] : impl_->regions) {
             if (reg.state == RegionState::Committed) current_committed += reg.size;
         }
-        if (current_committed + r.size > limits_.max_committed_bytes) {
+        if (current_committed > limits_.max_committed_bytes ||
+            r.size > limits_.max_committed_bytes - current_committed) {
             return Result<void>(RuntimeErrc::OutOfResources,
                                 "committed-bytes limit exceeded");
         }
@@ -339,8 +370,16 @@ Result<void> AddressSpace::resize_region(std::uint64_t xbox_va,
         return Result<void>(RuntimeErrc::NotFound, "no region at that address");
     }
     VmRegion& r = it->second;
-    const std::uint64_t aligned_new =
-        (new_size + page_size_ - 1) / page_size_ * page_size_;
+    std::uint64_t aligned_new = 0;
+    if (!checked_align_up(new_size, page_size_, aligned_new)) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "resize alignment overflow");
+    }
+    const std::uint64_t offset = xbox_va - xbox_base_;
+    if (offset > capacity_ || aligned_new > capacity_ - offset) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "resize exceeds space capacity");
+    }
     if (aligned_new < r.size) {
         // Shrink: the tail returns to PROT_NONE.
         if (impl_->host != nullptr) {
@@ -356,13 +395,35 @@ Result<void> AddressSpace::resize_region(std::uint64_t xbox_va,
     }
     if (aligned_new == r.size) return Result<void>::ok_result();
     // Grow: next bytes must be free and in-bounds.
-    if (xbox_va - xbox_base_ + aligned_new > capacity_) {
-        return Result<void>(RuntimeErrc::InvalidArgument, "grow exceeds capacity");
-    }
     const auto next = impl_->regions.upper_bound(xbox_va);
-    if (next != impl_->regions.end() && next->first < xbox_va + aligned_new) {
+    if (next != impl_->regions.end() &&
+        next->first > xbox_va &&
+        next->first - xbox_va < aligned_new) {
         return Result<void>(RuntimeErrc::AlreadyExists,
                             "grow would overlap the next region");
+    }
+    const std::uint64_t delta = aligned_new - r.size;
+    if (r.state == RegionState::Reserved && limits_.max_reserved_bytes != 0) {
+        std::uint64_t current = 0;
+        for (const auto& [va, reg] : impl_->regions) {
+            if (reg.state == RegionState::Reserved) current += reg.size;
+        }
+        if (current > limits_.max_reserved_bytes ||
+            delta > limits_.max_reserved_bytes - current) {
+            return Result<void>(RuntimeErrc::OutOfResources,
+                                "reservation limit exceeded on resize");
+        }
+    } else if (r.state == RegionState::Committed &&
+               limits_.max_committed_bytes != 0) {
+        std::uint64_t current = 0;
+        for (const auto& [va, reg] : impl_->regions) {
+            if (reg.state == RegionState::Committed) current += reg.size;
+        }
+        if (current > limits_.max_committed_bytes ||
+            delta > limits_.max_committed_bytes - current) {
+            return Result<void>(RuntimeErrc::OutOfResources,
+                                "committed-bytes limit exceeded on resize");
+        }
     }
     if (impl_->host != nullptr) {
         // New pages follow the region's current state/protection.
@@ -402,7 +463,7 @@ Result<VmRegion> AddressSpace::find_containing(std::uint64_t xbox_va) const {
         return Result<VmRegion>(RuntimeErrc::NotFound, "before first region");
     }
     --it;
-    if (xbox_va >= it->first + it->second.size) {
+    if (xbox_va - it->first >= it->second.size) {
         return Result<VmRegion>(RuntimeErrc::NotFound, "inside a gap");
     }
     return Result<VmRegion>(it->second);
@@ -412,7 +473,11 @@ std::uint64_t AddressSpace::find_overlap(std::uint64_t xbox_va,
                                           std::uint64_t size) const {
     std::lock_guard lock(impl_->lock);
     for (const auto& [va, r] : impl_->regions) {
-        if (va < xbox_va + size && xbox_va < va + r.size) return va;
+        if (va <= xbox_va) {
+            if (xbox_va - va < r.size) return va;
+        } else if (va - xbox_va < size) {
+            return va;
+        }
     }
     return 0;
 }
