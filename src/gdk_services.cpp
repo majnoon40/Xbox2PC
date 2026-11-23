@@ -1478,20 +1478,15 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_all(
 
     std::vector<RefGuard> objects;
     objects.reserve(handles.size());
+    std::unordered_set<std::uint64_t> unique_handles;
     for (const auto handle : handles) {
-        if (handle == 0)
+        if (handle == 0 || !unique_handles.insert(handle).second)
             return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
-                                         "wait-all handles must be non-null");
+                                         "wait-all handles must be non-null and unique");
         auto object = lookup_sync_object(pid, handle);
         if (!object.ok())
             return Result<std::uint32_t>(object.errc(), object.context());
         objects.push_back(std::move(object.value()));
-    }
-    for (std::size_t i = 0; i < handles.size(); ++i) {
-        if (std::find(handles.begin(), handles.begin() + static_cast<std::ptrdiff_t>(i),
-                      handles[i]) != handles.begin() + static_cast<std::ptrdiff_t>(i))
-            return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
-                                         "wait-all handles must be unique");
     }
 
     RefGuard guest_thread;
@@ -1532,6 +1527,7 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_all(
         bool abandoned = false;
         std::vector<std::size_t> acquired;
         acquired.reserve(objects.size());
+        std::vector<bool> acquired_abandoned(objects.size(), false);
         RuntimeErrc failure = RuntimeErrc::Timeout;
         std::string failure_context = "wait-all candidate is not ready";
         {
@@ -1551,6 +1547,7 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_all(
                     auto result = mutex->acquire(tid, 0);
                     if (result.ok()) {
                         ready = true;
+                        acquired_abandoned[i] = result.value();
                         abandoned = abandoned || result.value();
                     } else {
                         failure = result.errc();
@@ -1589,7 +1586,10 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_all(
                 if (auto* event = value->as<RtEvent>()) {
                     if (event->auto_reset()) (void)event->set();
                 } else if (auto* mutex = value->as<RtGuestMutex>()) {
-                    (void)mutex->release(tid);
+                    if (acquired_abandoned[*it])
+                        (void)mutex->abandon_owner(tid);
+                    else
+                        (void)mutex->release(tid);
                 } else if (auto* semaphore = value->as<RtGuestSemaphore>()) {
                     (void)semaphore->release(1);
                 }
