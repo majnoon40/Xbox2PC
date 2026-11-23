@@ -221,3 +221,10 @@ target_link_libraries(vfs_fuzz_test PRIVATE
 target_compile_features(vfs_fuzz_test PRIVATE cxx_std_20)
 
 add_test(NAME vfs_fuzz_test COMMAND vfs_fuzz_test)
+
+# M9: structural binary validation tests.
+add_executable(binary_validation_test binary_validation_test.cpp)
+target_link_libraries(binary_validation_test PRIVATE
+    xbox2pc_rt_binary_validation xbox2pc_pe_builder gtest)
+target_compile_features(binary_validation_test PRIVATE cxx_std_20)
+add_test(NAME binary_validation_test COMMAND binary_validation_test)
