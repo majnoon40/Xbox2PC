@@ -1479,11 +1479,9 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_all(
     std::vector<RefGuard> objects;
     objects.reserve(handles.size());
     for (const auto handle : handles) {
-        if (handle == 0 ||
-            std::find(handles.begin(), &handle, handle) != handles.end()) {
-            // Duplicate handles make acquisition/rollback ambiguous. Check
-            // uniqueness explicitly below instead of relying on object IDs.
-        }
+        if (handle == 0)
+            return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
+                                         "wait-all handles must be non-null");
         auto object = lookup_sync_object(pid, handle);
         if (!object.ok())
             return Result<std::uint32_t>(object.errc(), object.context());
