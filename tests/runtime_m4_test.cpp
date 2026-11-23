@@ -122,6 +122,45 @@ TEST(MemoryTest, ReserveCommitProtectRelease) {
     ASSERT_FALSE(gone.ok());
 }
 
+TEST(MemoryTest, PartialRangeCommitProtectDecommitAndRelease) {
+    AddressSpace space(32 * 4096, 0x30000000, "partial-ranges");
+    const auto page = space.page_size();
+    const auto base = 0x30000000ull;
+    ASSERT_TRUE(space.reserve_region(base, 4 * page, "allocation").ok());
+
+    // Commit only the middle two pages.
+    ASSERT_TRUE(space.commit_range(base + page, 2 * page).ok());
+    auto left = space.find_containing(base);
+    auto middle = space.find_containing(base + page);
+    auto right = space.find_containing(base + 3 * page);
+    ASSERT_TRUE(left.ok());
+    ASSERT_TRUE(middle.ok());
+    ASSERT_TRUE(right.ok());
+    EXPECT_EQ(left.value().state, RegionState::Reserved);
+    EXPECT_EQ(middle.value().state, RegionState::Committed);
+    EXPECT_EQ(middle.value().size, 2 * page);
+    EXPECT_EQ(right.value().state, RegionState::Reserved);
+    EXPECT_EQ(space.stats().committed_bytes, 2 * page);
+
+    // Protection applies to a strict subrange and returns its old value.
+    auto old = space.protect_range(base + page, page, MemProtect::ReadOnly);
+    ASSERT_TRUE(old.ok());
+    EXPECT_EQ(old.value(), MemProtect::ReadWrite);
+    EXPECT_TRUE(space.validate_access(base + page, false, false).ok());
+    EXPECT_FALSE(space.validate_access(base + page, true, false).ok());
+    EXPECT_TRUE(space.validate_access(base + 2 * page, true, false).ok());
+
+    // Decommit only the first committed page; neighbors retain their state.
+    ASSERT_TRUE(space.decommit_range(base + page, page).ok());
+    EXPECT_EQ(space.find_containing(base + page).value().state, RegionState::Reserved);
+    EXPECT_EQ(space.find_containing(base + 2 * page).value().state, RegionState::Committed);
+    EXPECT_EQ(space.stats().committed_bytes, page);
+
+    // The original allocation base still releases every split segment.
+    ASSERT_TRUE(space.release_region(base).ok());
+    EXPECT_TRUE(space.list_regions().empty());
+}
+
 TEST(MemoryTest, OverlapDetectionAndAutoPlacement) {
     AddressSpace space(64 * 4096, 0x10000000, "test");
     const auto page = space.page_size();
