@@ -372,8 +372,10 @@ const char* device_type_to_name(XSystemDeviceType t) {
 
 // ── GameRuntimeService ───────────────────────────────────────────────────
 
-GameRuntimeService::GameRuntimeService(ApiRegistry& api_reg)
-    : RtService("gdk_game_runtime"), api_reg_(api_reg) {}
+GameRuntimeService::GameRuntimeService(ApiRegistry& api_reg,
+                                       ProcessManager& process_manager)
+    : RtService("gdk_game_runtime"), api_reg_(api_reg),
+      process_manager_(process_manager) {}
 
 GameRuntimeService::~GameRuntimeService() {
     if (service_state() == ServiceState::Ready) {
@@ -412,12 +414,29 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r10 = reg("XThreadIsTimeSensitive",
                    keep(std::make_shared<ThreadIsTsImpl>(*this)));
     for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10}) {
-        if (!r->ok()) return Result<void>(r->errc(), r->context());
+        if (!r->ok()) {
+            (void)api_reg_.revoke_owner(id());
+            owned_.clear();
+            return Result<void>(r->errc(), r->context());
+        }
     }
+    auto observer = process_manager_.add_process_exit_observer(
+        [this](std::uint64_t process_id) { release_process(process_id); });
+    if (!observer.ok()) {
+        (void)api_reg_.revoke_owner(id());
+        owned_.clear();
+        return Result<void>(observer.errc(), observer.context());
+    }
+    process_exit_observer_id_ = observer.value();
     return Result<void>::ok_result();
 }
 
 Result<void> GameRuntimeService::on_shutdown() {
+    Result<void> observer_removed = Result<void>::ok_result();
+    if (process_exit_observer_id_ != 0) {
+        observer_removed = process_manager_.remove_process_exit_observer(process_exit_observer_id_);
+        process_exit_observer_id_ = 0;
+    }
     const auto revoked = api_reg_.revoke_owner(id());
     {
         std::lock_guard lock(state_lock_);
@@ -425,9 +444,10 @@ Result<void> GameRuntimeService::on_shutdown() {
         ts_bits_.clear();
     }
     owned_.clear();
-    if (!revoked.ok()) {
-        return Result<void>(revoked.errc(), revoked.context());
+    if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
+        return Result<void>(observer_removed.errc(), observer_removed.context());
     }
+    if (!revoked.ok()) return Result<void>(revoked.errc(), revoked.context());
     return Result<void>::ok_result();
 }
 

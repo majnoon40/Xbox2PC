@@ -72,7 +72,7 @@ class GameRuntimeService : public RtService {
 public:
     static const char* service_type_name() { return "gdk_game_runtime"; }
 
-    explicit GameRuntimeService(ApiRegistry& api_reg);
+    GameRuntimeService(ApiRegistry& api_reg, ProcessManager& process_manager);
     ~GameRuntimeService() override;
 
     Result<void> on_initialize() override;   // registers implementations
@@ -114,6 +114,8 @@ private:
         bool uninit_failed_terminal = false;  // documented terminal state
     };
     ApiRegistry& api_reg_;
+    ProcessManager& process_manager_;
+    std::uint64_t process_exit_observer_id_ = 0;
     mutable std::mutex state_lock_;
     std::map<std::uint64_t, ProcState> procs_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)

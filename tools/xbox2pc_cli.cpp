@@ -2097,7 +2097,7 @@ struct M7World {
 
     M7World() : pm(core.objects()) {
         {
-            auto grt_s = std::make_unique<xbox2pc::rt::api::GameRuntimeService>(reg);
+            auto grt_s = std::make_unique<xbox2pc::rt::api::GameRuntimeService>(reg, pm);
             auto tq_s = std::make_unique<xbox2pc::rt::api::TaskQueueService>(reg, pm);
             auto tim_s = std::make_unique<xbox2pc::rt::api::TimingService>(reg);
             grt = grt_s.get();

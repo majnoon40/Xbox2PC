@@ -102,6 +102,10 @@ void ManagedProcess::set_memory_limits(const MemoryLimits& limits) {
 ProcessManager::ProcessManager(ObjectManager& objects) : objects_(objects) {}
 
 ProcessManager::~ProcessManager() {
+    {
+        std::lock_guard lock(lock_);
+        exit_observers_.clear();
+    }
     // Snapshot ids under the map lock; never index pid_to_object_id_ after
     // releasing it. Drain every host thread before releasing its address
     // space, because a cooperative thread may still be executing guest code.
@@ -306,7 +310,49 @@ Result<void> ProcessManager::terminate_process(Handle process,
             return detached;
         }
     }
-    return proc->finish_termination(exit_code);
+    const std::uint64_t pid = proc->pid_value();
+    auto finished = proc->finish_termination(exit_code);
+    if (!finished.ok()) return finished;
+
+    std::vector<ProcessExitObserver> observers;
+    {
+        std::lock_guard lock(lock_);
+        observers.reserve(exit_observers_.size());
+        for (const auto& [observer_id, observer] : exit_observers_) {
+            (void)observer_id;
+            observers.push_back(observer);
+        }
+    }
+    for (const auto& observer : observers) {
+        try { observer(pid); } catch (...) {
+            // A notification cannot undo or escape successful teardown.
+        }
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::uint64_t> ProcessManager::add_process_exit_observer(
+    ProcessExitObserver observer) {
+    if (!observer) return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                                "empty process-exit observer");
+    std::lock_guard lock(lock_);
+    if (next_exit_observer_ == 0 || next_exit_observer_ == ~std::uint64_t{0}) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "process-exit observer ID space exhausted");
+    }
+    const std::uint64_t id = next_exit_observer_++;
+    exit_observers_.emplace(id, std::move(observer));
+    return Result<std::uint64_t>(id);
+}
+
+Result<void> ProcessManager::remove_process_exit_observer(std::uint64_t observer_id) {
+    if (observer_id == 0) return Result<void>(RuntimeErrc::InvalidArgument,
+                                               "zero process-exit observer ID");
+    std::lock_guard lock(lock_);
+    if (exit_observers_.erase(observer_id) == 0) {
+        return Result<void>(RuntimeErrc::NotFound, "process-exit observer not registered");
+    }
+    return Result<void>::ok_result();
 }
 
 Result<Handle> ProcessManager::spawn_thread(Handle process,

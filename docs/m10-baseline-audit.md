@@ -58,3 +58,15 @@ These are audit targets, not confirmed defects:
 No API is marked supported merely because it has a descriptor or resolves an
 import. A supported status requires implementation evidence and tests for the
 documented behavior. Stubs remain explicitly stubbed/partial.
+
+
+## M10.2 implementation slice — process-exit state cleanup
+
+- `GameRuntimeService` subscribes to M4 `ProcessManager` process-exit notifications.
+- M4 emits notifications only after thread drain, handle closure, address-space
+  release, thread detachment, and the transition to `Terminated` succeed.
+- Failed/deferred termination does not notify observers, so GDK state is not
+  discarded while a process may still be running.
+- The GDK service unregisters its observer during shutdown and removes its
+  process initialization and thread time-sensitive state on successful exit.
+- Tests cover automatic cleanup, replacing the prior manual-only follow-up.

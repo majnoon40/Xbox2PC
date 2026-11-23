@@ -67,7 +67,7 @@ struct ApiWorld {
 
     ApiWorld() : pm(core.objects()) {
         {
-            auto grt_s = std::make_unique<GameRuntimeService>(reg);
+            auto grt_s = std::make_unique<GameRuntimeService>(reg, pm);
             auto tq_s = std::make_unique<TaskQueueService>(reg, pm);
             auto tim_s = std::make_unique<TimingService>(reg);
             grt = grt_s.get();
@@ -539,6 +539,29 @@ TEST(GdkServiceTest, ThreadTimeSensitiveBitsAreProcessScoped) {
     w.grt->release_process(20);
     EXPECT_FALSE(w.grt->is_time_sensitive(20, 7).value());
     EXPECT_FALSE(w.grt->is_time_sensitive(10, 7).value());
+}
+
+TEST(GdkServiceTest, ProcessTerminationReleasesGameRuntimeState) {
+    ApiWorld w;
+    (void)w.new_process("gdk-exit.exe");
+    const auto pid_result = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const std::uint64_t pid = pid_result.value();
+
+    const auto first_init = w.grt->grt_initialize(pid);
+    ASSERT_TRUE(first_init.ok());
+    EXPECT_EQ(first_init.value(), 1u);
+    const auto second_init = w.grt->grt_initialize(pid);
+    ASSERT_TRUE(second_init.ok());
+    EXPECT_EQ(second_init.value(), 2u);
+    ASSERT_TRUE(w.grt->set_time_sensitive(pid, 17, true).ok());
+    ASSERT_TRUE(w.grt->is_time_sensitive(pid, 17).value());
+
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+    EXPECT_FALSE(w.grt->is_time_sensitive(pid, 17).value());
+    const auto after_exit = w.grt->grt_initialize(pid);
+    ASSERT_TRUE(after_exit.ok());
+    EXPECT_EQ(after_exit.value(), 1u);
 }
 
 TEST(GdkServiceTest, ThreadTimeSensitiveDispatchUsesCallingThreadIdentity) {
