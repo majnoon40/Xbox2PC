@@ -462,6 +462,23 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         add(a);
     }
 
+    {
+        ApiDescriptor a;
+        a.library = "xgameruntime";
+        a.export_name = "XTaskQueueDuplicateHandle";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 2;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT XTaskQueueDuplicateHandle(XTaskQueueHandle queueHandle, XTaskQueueHandle* duplicatedHandle)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::Unsupported;
+        a.evidence = "[GDK-TQ-Duplicate]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueueduplicatehandle?view=gdk-2604";
+        a.notes = "documented reference-counted queue-handle duplication; duplicated-handle ownership and reference lifetime are not implemented";
+        add(a);
+    }
+
 // — kernel32 (Win32 timing; evidence: MS-QPC pages) —
     {
         ApiDescriptor a;
