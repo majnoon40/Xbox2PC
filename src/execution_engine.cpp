@@ -212,13 +212,23 @@ ExecutionResult DeterministicBackend::run(
         // execute the RET semantics (pop + optional imm16) and complete.
         if (req.completion_va != 0) {
             auto opcode_b = mem.read_u8(io_cpu.rip);
-            if (opcode_b.ok() && opcode_b.value() == 0xC3) {
+            if (opcode_b.ok() &&
+                (opcode_b.value() == 0xC3 || opcode_b.value() == 0xC2)) {
                 const std::uint64_t sp0 =
                     rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
                 auto target = mem.read_u64(sp0);
-                if (target.ok() && target.value() == req.completion_va) {
-                    // Pop the return address (the sentinel) and finish.
-                    io_cpu.set_reg(Gpr::Sp, sp0 + 8);
+                std::uint64_t extra = 0;
+                if (opcode_b.value() == 0xC2) {
+                    auto imm_lo = mem.read_u8(io_cpu.rip + 1);
+                    auto imm_hi = mem.read_u8(io_cpu.rip + 2);
+                    if (imm_lo.ok() && imm_hi.ok()) {
+                        extra = static_cast<std::uint64_t>(imm_lo.value()) |
+                                (static_cast<std::uint64_t>(imm_hi.value()) << 8);
+                    }
+                }
+                if (target.ok() && target.value() == req.completion_va &&
+                    sp0 <= (~0ull) - (8 + extra)) {
+                    io_cpu.set_reg(Gpr::Sp, sp0 + 8 + extra);
                     res.outcome = Outcome::Returned;
                     res.return_value =
                         rg(io_cpu, static_cast<std::uint8_t>(Gpr::Rax));
