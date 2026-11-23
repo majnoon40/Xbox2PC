@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "xbox2pc/diagnostics.hpp"
+#include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/pe_parser.hpp"
 
 namespace xbox2pc::validation {
@@ -79,6 +80,12 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
         "identification", StageStatus::Passed, "PE signature and headers parsed"));
 
     Stage structure = make_stage("pe-structure", StageStatus::Passed);
+    const auto loader_validation =
+        xbox2pc::rt::loader::validate_image(image, data, size);
+    for (const auto& issue : loader_validation.issues) {
+        structure.status = StageStatus::Failed;
+        structure.findings.push_back(issue.code + ": " + issue.message);
+    }
     if (diagnostics.has_warnings()) {
         if (structure.status != StageStatus::Failed) {
             structure.status = StageStatus::Warning;
@@ -169,29 +176,55 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
     }
     report.stages.push_back(std::move(structure));
 
-    report.stages.push_back(make_stage(
-        "imports", StageStatus::Passed,
+    Stage imports = make_stage(
+        "imports", diagnostics.has_warnings() ? StageStatus::Warning : StageStatus::Passed,
         std::to_string(image.imports.entries.size()) +
-            " import descriptor(s) parsed; resolution not tested"));
+            " regular import descriptor(s) parsed; symbol resolution not tested");
+    if (image.delay_imports.present) {
+        imports.findings.push_back(
+            std::to_string(image.delay_imports.entries.size()) +
+            " delay-import descriptor(s) parsed");
+    }
+    report.stages.push_back(std::move(imports));
 
     Stage relocations = make_stage(
-        "relocations", StageStatus::NotTested, "relocation application is not performed");
-    if (image.directories.size() > xbox2pc::pe::kDirReloc &&
-        image.directories[xbox2pc::pe::kDirReloc].rva != 0) {
-        relocations.findings.push_back("base-relocation directory is present");
+        "relocations", StageStatus::Passed,
+        "relocation blocks decoded; relocation application not performed");
+    const auto relocation_blocks = xbox2pc::rt::loader::decode_relocations(
+        image, data, size, xbox2pc::rt::loader::kMaxRelocEntries);
+    if (!relocation_blocks.ok()) {
+        relocations.status = StageStatus::Failed;
+        relocations.findings.push_back(relocation_blocks.error_string());
     } else {
-        relocations.findings.push_back("no base-relocation directory");
+        std::uint64_t entries = 0;
+        for (const auto& block : relocation_blocks.value()) {
+            entries += block.entries.size();
+        }
+        relocations.findings.push_back(
+            std::to_string(relocation_blocks.value().size()) +
+            " relocation block(s), " + std::to_string(entries) +
+            " entry/entries decoded; no relocations applied");
     }
     report.stages.push_back(std::move(relocations));
 
     Stage tls = make_stage(
-        "tls", StageStatus::NotTested,
-        "TLS callback validation and execution are not performed");
-    if (image.directories.size() > xbox2pc::pe::kDirTls &&
-        image.directories[xbox2pc::pe::kDirTls].rva != 0) {
-        tls.findings.push_back("TLS directory is present");
-    } else {
+        "tls", StageStatus::Passed,
+        "TLS metadata decoded; callbacks are never executed by validation");
+    xbox2pc::rt::loader::LoadDiagnostics tls_diagnostics;
+    const auto tls_info = xbox2pc::rt::loader::decode_tls(
+        image, data, size, tls_diagnostics);
+    if (!tls_info.ok()) {
+        tls.status = StageStatus::Failed;
+        tls.findings.push_back(tls_info.error_string());
+    } else if (!tls_info.value().has_value()) {
         tls.findings.push_back("no TLS directory");
+    } else {
+        tls.findings.push_back(
+            std::to_string(tls_info.value()->callback_count) +
+            " TLS callback(s) validated; execution not tested");
+        tls.findings.push_back(
+            "TLS template size " +
+            std::to_string(tls_info.value()->template_size) + " bytes");
     }
     report.stages.push_back(std::move(tls));
 
