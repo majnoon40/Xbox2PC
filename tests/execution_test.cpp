@@ -2148,6 +2148,9 @@ TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
     ExecutionRequest request;
     request.stack_top_va = context.info().stack_top;
     request.stack_size = context.info().stack_size;
+    // A caller-supplied gate must not detach managed execution from its
+    // owning thread's suspend/terminate lifecycle.
+    request.control = std::make_shared<ExecutionControl>();
     ContextBindingProbe engine;
     std::atomic<bool> interrupted{false};
     const auto result = context.invoke(request, engine, interrupted);
