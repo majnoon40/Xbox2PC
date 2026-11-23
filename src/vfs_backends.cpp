@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 namespace xbox2pc::rt {
@@ -24,11 +25,15 @@ HostDirBackend::HostDirBackend(std::string host_root, bool read_only)
     : root_(std::move(host_root)), read_only_(read_only), reject_symlinks_(true) {
     // Root must exist and be a directory (validated through the PAL; the
     // ctor result surfaces through every operation when invalid).
+    auto root_link = pal::host_path_is_symlink(root_);
     auto st = pal::stat_host_path(root_);
-    root_valid_ = st.ok() && st.value().is_directory;
+    root_valid_ = root_link.ok() && !root_link.value() &&
+                  st.ok() && st.value().is_directory;
     if (!root_valid_) {
-        root_error_ = st.ok() ? "host root is not a directory"
-                              : st.error_string();
+        root_error_ = root_link.ok() && root_link.value()
+                          ? "host root is a symlink"
+                          : (st.ok() ? "host root is not a directory"
+                                     : st.error_string());
     }
 }
 
@@ -62,12 +67,35 @@ Result<void> HostDirBackend::reject_if_symlink(const std::string& host_path,
     return Result<void>::ok_result();
 }
 
+Result<void> HostDirBackend::reject_symlink_components(
+    const VfsPath& rel, const std::string& what) const {
+    // Check every path prefix, not just the final component. A symlinked
+    // intermediate directory can otherwise redirect the whole operation
+    // outside root_ even when the leaf itself is not a symlink.
+    auto root_link = pal::host_path_is_symlink(root_);
+    if (!root_link.ok()) return Result<void>(root_link.errc(), root_link.context());
+    if (root_link.value()) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            what + ": backend root is a symlink");
+    }
+    std::string prefix = root_;
+    for (const auto& component : rel.components()) {
+        prefix.push_back('/');
+        prefix.append(component);
+        auto checked = reject_if_symlink(prefix, what);
+        if (!checked.ok()) return checked;
+    }
+    return Result<void>::ok_result();
+}
+
 Result<VfsStat> HostDirBackend::stat(const VfsPath& rel) {
     if (!root_valid_) {
         return Result<VfsStat>(RuntimeErrc::NotInitialized,
                                "backend root invalid: " + root_error_);
     }
     std::lock_guard lock(io_lock_);
+    auto safe = reject_symlink_components(rel, "stat");
+    if (!safe.ok()) return Result<VfsStat>(safe.errc(), safe.context());
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
@@ -91,11 +119,11 @@ Result<std::unique_ptr<IVfsFileHandle>> HostDirBackend::open(const VfsPath& rel,
             RuntimeErrc::LockNotOwned, "backend is read-only");
     }
     std::lock_guard lock(io_lock_);
-    const std::string hp = host_path_for(rel);
-    auto sy = reject_if_symlink(hp, "open");
+    auto sy = reject_symlink_components(rel, "open");
     if (!sy.ok()) {
         return Result<std::unique_ptr<IVfsFileHandle>>(sy.errc(), sy.context());
     }
+    const std::string hp = host_path_for(rel);
     // Existence + type via stat first (typed NotFound beats PAL open's).
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
@@ -121,28 +149,48 @@ Result<std::unique_ptr<IVfsFileHandle>> HostDirBackend::open(const VfsPath& rel,
         explicit PalVfsFileHandle(std::unique_ptr<pal::PalFile> f)
             : pal_(std::move(f)) {}
         Result<std::uint64_t> read(void* buf, std::uint64_t len) override {
-            return pal_->read(buf, len);
+            std::lock_guard lock(lock_);
+            auto r = pal_->read(buf, len);
+            if (r.ok()) pos_ += r.value();
+            return r;
         }
         Result<std::uint64_t> write(const void* buf, std::uint64_t len) override {
-            return pal_->write(buf, len);
+            std::lock_guard lock(lock_);
+            auto r = pal_->write(buf, len);
+            if (r.ok()) {
+                // This handle is opened in append mode: O_APPEND may move
+                // the descriptor to EOF before writing, so pos_ += n from
+                // the old shadow position would be incorrect.
+                auto end = pal_->seek(0, true);
+                pos_ = end.ok() ? end.value() : pos_ + r.value();
+            }
+            return r;
         }
         Result<std::uint64_t> seek(std::uint64_t position) override {
-            return pal_->seek(static_cast<std::int64_t>(position), false);
+            if (position > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+                return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                             "seek position exceeds PAL range");
+            }
+            std::lock_guard lock(lock_);
+            auto r = pal_->seek(static_cast<std::int64_t>(position), false);
+            if (r.ok()) pos_ = r.value();
+            return r;
         }
-        std::uint64_t position() const override { return pos_; }
+        std::uint64_t position() const override {
+            std::lock_guard lock(lock_);
+            return pos_;
+        }
         std::uint64_t size() const override {
+            std::lock_guard lock(lock_);
             auto s = pal_->size();
             return s.ok() ? s.value() : 0;
         }
     private:
         std::unique_ptr<pal::PalFile> pal_;
+        mutable std::mutex lock_;
         std::uint64_t pos_ = 0;
     };
-    // PAL files track position internally (read/write/seek); the wrapper
-    // forwards. position() mirrors PAL state lazily via seek(0)? No —
-    // keep a shadow tracked on each op:
-    // (simplified: position() is 0 after open; ops advance it via the
-    //  wrapper below)
+    // The wrapper serializes operations and tracks the PAL file cursor.
     auto wrap = std::make_unique<PalVfsFileHandle>(std::move(fh.value()));
     return Result<std::unique_ptr<IVfsFileHandle>>(
         std::unique_ptr<IVfsFileHandle>(wrap.release()));
@@ -155,12 +203,12 @@ Result<void> HostDirBackend::create_file(const VfsPath& rel) {
     }
     if (read_only_) return Result<void>(RuntimeErrc::LockNotOwned, "backend is read-only");
     std::lock_guard lock(io_lock_);
-    const std::string hp = host_path_for(rel);
     if (rel.is_root()) {
         return Result<void>(RuntimeErrc::InvalidArgument, "cannot create root");
     }
-    auto sy = reject_if_symlink(hp, "create_file");
+    auto sy = reject_symlink_components(rel, "create_file");
     if (!sy.ok()) return sy;
+    const std::string hp = host_path_for(rel);
     // Create via PAL open(WriteNew) + immediate close.
     auto fh = pal::open_file(hp, pal::FileOpenMode::WriteNew);
     if (!fh.ok()) {
@@ -177,6 +225,8 @@ Result<void> HostDirBackend::delete_file(const VfsPath& rel) {
     }
     if (read_only_) return Result<void>(RuntimeErrc::LockNotOwned, "backend is read-only");
     std::lock_guard lock(io_lock_);
+    auto safe = reject_symlink_components(rel, "delete_file");
+    if (!safe.ok()) return Result<void>(safe.errc(), safe.context());
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) return Result<void>(st.errc(), st.context());
@@ -199,6 +249,8 @@ Result<void> HostDirBackend::create_directory(const VfsPath& rel) {
     if (rel.is_root()) {
         return Result<void>(RuntimeErrc::InvalidArgument, "cannot create root");
     }
+    auto safe = reject_symlink_components(rel, "create_directory");
+    if (!safe.ok()) return safe;
     return pal::create_host_directory(host_path_for(rel));
 }
 
@@ -213,6 +265,8 @@ Result<void> HostDirBackend::delete_directory(const VfsPath& rel) {
         return Result<void>(RuntimeErrc::InvalidArgument,
                             "refusing to delete the backend root");
     }
+    auto safe = reject_symlink_components(rel, "delete_directory");
+    if (!safe.ok()) return safe;
     return pal::remove_host_directory(host_path_for(rel));
 }
 
@@ -222,6 +276,10 @@ Result<std::vector<VfsDirEntry>> HostDirBackend::list(const VfsPath& rel) {
             RuntimeErrc::NotInitialized, "backend root invalid: " + root_error_);
     }
     std::lock_guard lock(io_lock_);
+    auto safe = reject_symlink_components(rel, "list");
+    if (!safe.ok()) {
+        return Result<std::vector<VfsDirEntry>>(safe.errc(), safe.context());
+    }
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
@@ -486,11 +544,21 @@ MemoryFileHandle::MemoryFileHandle(std::shared_ptr<std::string> payload,
     : data_(std::move(payload)), lock_(std::move(backend_lock)), writable_(writable) {}
 
 Result<std::uint64_t> MemoryFileHandle::read(void* buf, std::uint64_t len) {
+    if (!data_ || !lock_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "memory file handle has no backing storage");
+    }
+    if (len == 0) return Result<std::uint64_t>(0);
+    if (buf == nullptr) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "null read buffer");
+    }
     std::lock_guard lock(*lock_);
     if (pos_ >= data_->size()) return Result<std::uint64_t>(0);
     const std::uint64_t avail =
         std::min<std::uint64_t>(len, data_->size() - pos_);
-    std::memcpy(buf, data_->data() + pos_, static_cast<std::size_t>(avail));
+    std::memcpy(buf, data_->data() + static_cast<std::size_t>(pos_),
+                static_cast<std::size_t>(avail));
     pos_ += avail;
     return Result<std::uint64_t>(avail);
 }
@@ -500,17 +568,39 @@ Result<std::uint64_t> MemoryFileHandle::write(const void* buf, std::uint64_t len
         return Result<std::uint64_t>(RuntimeErrc::LockNotOwned,
                                       "handle opened read-only");
     }
-    std::lock_guard lock(*lock_);
-    const std::size_t new_end = static_cast<std::size_t>(pos_ + len);
-    if (new_end > data_->size()) {
-        data_->resize(new_end, '\0');
+    if (!data_ || !lock_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "memory file handle has no backing storage");
     }
-    std::memcpy(data_->data() + pos_, buf, static_cast<std::size_t>(len));
-    pos_ += len;
+    if (len == 0) return Result<std::uint64_t>(0);
+    if (buf == nullptr) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "null write buffer");
+    }
+    std::lock_guard lock(*lock_);
+    if (pos_ > (~0ull) - len) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "file write offset overflow");
+    }
+    const std::uint64_t end = pos_ + len;
+    if (end > data_->max_size()) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "file write exceeds string capacity");
+    }
+    const std::size_t new_end = static_cast<std::size_t>(end);
+    if (new_end > data_->size()) data_->resize(new_end, '\0');
+    std::memcpy(data_->data() + static_cast<std::size_t>(pos_), buf,
+                static_cast<std::size_t>(len));
+    pos_ = end;
     return Result<std::uint64_t>(len);
 }
 
 Result<std::uint64_t> MemoryFileHandle::seek(std::uint64_t position) {
+    if (!data_ || !lock_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "memory file handle has no backing storage");
+    }
+    std::lock_guard lock(*lock_);
     if (position > data_->size()) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "seek beyond end of file");
@@ -519,6 +609,16 @@ Result<std::uint64_t> MemoryFileHandle::seek(std::uint64_t position) {
     return Result<std::uint64_t>(pos_);
 }
 
-std::uint64_t MemoryFileHandle::size() const { return data_->size(); }
+std::uint64_t MemoryFileHandle::position() const {
+    if (!lock_) return pos_;
+    std::lock_guard lock(*lock_);
+    return pos_;
+}
+
+std::uint64_t MemoryFileHandle::size() const {
+    if (!data_ || !lock_) return 0;
+    std::lock_guard lock(*lock_);
+    return data_->size();
+}
 
 }  // namespace xbox2pc::rt

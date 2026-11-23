@@ -98,9 +98,11 @@ GuestRange GuestMemory::validate(std::uint64_t va, std::uint64_t len,
     // invalid; a same-flags contiguous mapping passes.
     const std::uint64_t first_page = va & ~4095ull;
     const std::uint64_t last_page = last & ~4095ull;
-    for (std::uint64_t p = first_page; p <= last_page; p += 4096) {
-        // Check the first byte of each intermediate page and the range's
-        // own bytes where they fall in that page.
+    for (std::uint64_t p = first_page;;) {
+        // Check the first byte of each page touched by the range. Do not
+        // use p <= last_page with an unconditional increment: a valid
+        // range ending in the top uint64 page would wrap p to zero and
+        // loop forever.
         const std::uint64_t probe = p < va ? va : p;
         const auto mid = space_.validate_access(probe, want_write, want_exec);
         if (!mid.ok()) {
@@ -109,6 +111,8 @@ GuestRange GuestMemory::validate(std::uint64_t va, std::uint64_t len,
                         : GuestMemErrc::PermissionDenied;
             return r;
         }
+        if (p == last_page) break;
+        p += 4096;
     }
     return r;   // err stays NullPointer = valid
 }

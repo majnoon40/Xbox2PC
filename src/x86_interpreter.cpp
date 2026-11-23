@@ -20,6 +20,7 @@
 
 #include <cstring>
 #include <string>
+#include <mutex>
 
 namespace xbox2pc::rt::x86 {
 
@@ -35,6 +36,11 @@ using x64::Operand;
 // ── 1. sub-register access ────────────────────────────────────────────────
 
 namespace {
+
+// Serialize guest memory accesses across interpreter instances. The recursive
+// lock lets a memory XCHG hold the lock across its read/write pair while the
+// shared operand helpers take the same lock internally.
+std::recursive_mutex g_guest_memory_mutex;
 
 constexpr std::uint64_t kMask8 = 0xFFull;
 constexpr std::uint64_t kMask16 = 0xFFFFull;
@@ -77,7 +83,11 @@ struct Ea {
 Ea compute_ea(const CpuState& c, const Operand& o, std::uint64_t base_rip) {
     Ea ea;
     if (o.rip_relative) {
-        ea.va = static_cast<std::uint64_t>(static_cast<std::int64_t>(base_rip) + o.disp);
+        // Unsigned arithmetic deliberately models x86 address wraparound.
+        // With 67h, EIP-relative addresses are truncated to 32 bits and
+        // zero-extended; without it, the full 64-bit sum is retained.
+        const std::uint64_t sum = base_rip + static_cast<std::uint64_t>(o.disp);
+        ea.va = o.addr32 ? (sum & kMask32) : sum;
         return ea;
     }
     std::uint64_t sum = 0;
@@ -90,8 +100,9 @@ Ea compute_ea(const CpuState& c, const Operand& o, std::uint64_t base_rip) {
         const std::uint64_t scaled = idx * o.scale;   // scale ∈ {1,2,4,8}
         sum += o.addr32 ? (scaled & kMask32) : scaled;
     }
+    sum += static_cast<std::uint64_t>(o.disp);
     if (o.addr32) sum &= kMask32;
-    ea.va = static_cast<std::uint64_t>(static_cast<std::int64_t>(sum) + o.disp);
+    ea.va = sum;
     return ea;
 }
 
@@ -117,6 +128,9 @@ struct Ctx {
 
 // Reads an operand's value (register, immediate or memory).
 bool read_operand(Ctx& cx, const Operand& o, Value& out) {
+    std::unique_lock<std::recursive_mutex> memory_lock(
+        g_guest_memory_mutex, std::defer_lock);
+    if (o.kind == x64::OpKind::Mem) memory_lock.lock();
     switch (o.kind) {
         case x64::OpKind::Reg:
             out.bits = o.bits;
@@ -161,6 +175,9 @@ bool read_operand(Ctx& cx, const Operand& o, Value& out) {
 }
 
 bool write_operand(Ctx& cx, const Operand& o, std::uint64_t value) {
+    std::unique_lock<std::recursive_mutex> memory_lock(
+        g_guest_memory_mutex, std::defer_lock);
+    if (o.kind == x64::OpKind::Mem) memory_lock.lock();
     switch (o.kind) {
         case x64::OpKind::Reg:
             write_gpr(cx.cpu, o.reg, o.bits, value, cx.rex);
@@ -212,9 +229,9 @@ void set_muldiv_flags(CpuState& cpu, bool overflow, std::uint8_t /*bits*/) {
 bool check_exec(Ctx& cx, std::uint64_t va) {
     auto x = cx.mem.validate_exec(va);
     if (!x.ok()) {
-        GuestFault f = x.err == guest::GuestMemErrc::InvalidAddress
-                           ? GuestFault::InvalidAccess
-                           : GuestFault::PermissionExec;
+        GuestFault f = x.err == guest::GuestMemErrc::PermissionDenied
+                           ? GuestFault::PermissionExec
+                           : GuestFault::InvalidAccess;
         cx.abort(f, "branch target", va);
         return false;
     }
@@ -315,8 +332,9 @@ U128 u128_div_u64(U128 n, std::uint64_t d) {
     std::uint64_t rem = 0;
     for (int i = 127; i >= 0; --i) {
         // rem = rem << 1 | bit i of n (check rem < d before subtracting).
+        const bool carry = (rem >> 63) != 0;
         rem = (rem << 1) | ((i >= 64 ? (n.hi >> (i - 64)) : (n.lo >> i)) & 1ull);
-        if (rem >= d) {
+        if (carry || rem >= d) {
             rem -= d;
             if (i >= 64) q.hi |= (1ull << (i - 64));
             else q.lo |= (1ull << i);
@@ -328,8 +346,9 @@ U128 u128_div_u64(U128 n, std::uint64_t d) {
 inline std::uint64_t u128_mod_u64(U128 n, std::uint64_t d) {
     std::uint64_t rem = 0;
     for (int i = 127; i >= 0; --i) {
+        const bool carry = (rem >> 63) != 0;
         rem = (rem << 1) | ((i >= 64 ? (n.hi >> (i - 64)) : (n.lo >> i)) & 1ull);
-        if (rem >= d) rem -= d;
+        if (carry || rem >= d) rem -= d;
     }
     return rem;
 }
@@ -410,21 +429,46 @@ bool Interpreter::supports(Mnemonic m) {
 x64::DecodeResult Interpreter::decode_at_rip(StepFault* fault_out) const {
     std::uint8_t buf[x64::kMaxInstructionBytes] = {};
     const std::uint64_t rip = cpu_.rip;
-    // Exec permission is checked on the FIRST byte (the engine loop does
-    // the same check before calling); fetch then proceeds byte-wise so a
-    // page boundary at the end of an instruction surfaces as Truncated.
+    // Decode incrementally: fetch only bytes the decoder actually needs.
+    // Every byte of an instruction must be executable, but bytes after the
+    // decoded instruction must not be fetched (they may be in an NX page).
     for (std::size_t n = 0; n < x64::kMaxInstructionBytes; ++n) {
-        auto b = mem_.read_u8(rip + n);
-        if (!b.ok()) {
-            if (n == 0 && fault_out != nullptr) {
+        if (rip > (~0ull) - n) {
+            if (fault_out != nullptr) {
                 fault_out->fault = GuestFault::InvalidAccess;
                 fault_out->fault_rip = rip;
                 fault_out->fault_address = rip;
-                fault_out->detail = "instruction fetch";
+                fault_out->detail = "instruction fetch address overflow";
             }
-            return x64::decode(buf, n, rip);   // n bytes available
+            return x64::decode(buf, n, rip);
+        }
+        const std::uint64_t address = rip + n;
+        const auto exec = mem_.validate_exec(address);
+        if (!exec.ok()) {
+            if (fault_out != nullptr) {
+                fault_out->fault =
+                    exec.err == guest::GuestMemErrc::PermissionDenied
+                        ? GuestFault::PermissionExec
+                        : GuestFault::InvalidAccess;
+                fault_out->fault_rip = rip;
+                fault_out->fault_address = address;
+                fault_out->detail = "instruction fetch byte is not executable";
+            }
+            return x64::decode(buf, n, rip);
+        }
+        auto b = mem_.read_u8(address);
+        if (!b.ok()) {
+            if (fault_out != nullptr) {
+                fault_out->fault = GuestFault::InvalidAccess;
+                fault_out->fault_rip = rip;
+                fault_out->fault_address = address;
+                fault_out->detail = "instruction fetch read failed";
+            }
+            return x64::decode(buf, n, rip);
         }
         buf[n] = b.value();
+        const auto decoded = x64::decode(buf, n + 1, rip);
+        if (decoded.status != x64::DecodeStatus::Truncated) return decoded;
     }
     return x64::decode(buf, x64::kMaxInstructionBytes, rip);
 }
@@ -442,6 +486,11 @@ StepResult Interpreter::step_at_rip() {
     StepFault fetch_fault;
     const x64::DecodeResult r = decode_at_rip(&fetch_fault);
     if (r.status != x64::DecodeStatus::Ok) {
+        // A required instruction byte can fault independently of the
+        // decoder's Truncated status (e.g. an NX page boundary).
+        if (!fetch_fault.detail.empty()) {
+            return StepResult::failed(fetch_fault);
+        }
         // Map the reject to a typed fault; RIP never advances.
         GuestFault f = GuestFault::UnsupportedInstruction;
         const char* why = "instruction rejected by the decoder";
@@ -485,14 +534,15 @@ StepResult Interpreter::step(const Decoded& ins) {
             switch (ins.mnem) {
                 case Mnemonic::Add:
                     result = (av + bv) & m;
-                    cf = (av + bv) > m;
+                    cf = av > (m - bv);
                     of = ((~(av ^ bv) & (av ^ result)) & (1ull << (bits - 1))) != 0;
                     break;
                 case Mnemonic::Adc: {
                     const std::uint64_t cin = cx.cpu.flag(cpu::kFlagCF) ? 1u : 0u;
+                    const std::uint64_t limit = m - bv;
+                    cf = av > limit || (cin != 0 && av == limit);
                     const std::uint64_t sum = av + bv + cin;
                     result = sum & m;
-                    cf = sum > m;
                     of = ((~(av ^ bv) & (av ^ result)) & (1ull << (bits - 1))) != 0;
                     break;
                 }
@@ -631,8 +681,10 @@ StepResult Interpreter::step(const Decoded& ins) {
             // unsigned product av*bv (fits in 64 bits unless both are huge)
             const std::uint64_t prod = mul_full(av, bv);
             if (bits == 8) {
-                write_gpr(cx.cpu, 0, 16, prod & 0xFFFFull, cx.rex);           // AX
-                write_gpr(cx.cpu, 4, 8, (prod >> 8) & 0xFFull, cx.rex);       // DX:AH..
+                // The complete byte-product is AX. Writing AH separately
+                // through the encoded byte-register path is wrong when a
+                // REX prefix is present (register 4 would mean SPL).
+                write_gpr(cx.cpu, 0, 16, prod & 0xFFFFull, cx.rex);
             } else if (bits == 16) {
                 write_gpr(cx.cpu, 0, 16, prod & kMask16, cx.rex);             // AX
                 write_gpr(cx.cpu, 2, 16, (prod >> 16) & kMask16, cx.rex);    // DX
@@ -784,8 +836,11 @@ StepResult Interpreter::step(const Decoded& ins) {
                     }
                     const std::uint64_t q = dividend / divisor;
                     const std::uint64_t r = dividend % divisor;
-                    write_gpr(cx.cpu, 0, 8, q, cx.rex);                        // AL
-                    write_gpr(cx.cpu, 4, 8, r, cx.rex);                         // AH
+                    // Byte DIV returns quotient:AL and remainder:AH. Store
+                    // AX as one 16-bit result so a REX prefix cannot turn
+                    // the implicit AH destination into SPL.
+                    write_gpr(cx.cpu, 0, 16,
+                              (q & 0xFFull) | ((r & 0xFFull) << 8), cx.rex);
                 } else if (bits == 16) {
                     if (divisor == 0 || dividend / divisor > kMask16) {
                         return StepResult::failed(StepFault{
@@ -895,16 +950,24 @@ StepResult Interpreter::step(const Decoded& ins) {
             const std::int64_t q = sdividend / sd;
             const std::int64_t r = sdividend % sd;
             const std::uint64_t qlim =
-                (1ull << (bits - 1)) - 1ull;   // |q| <= 2^(bits-1)-1, except -2^(bits-1)
+                (1ull << (bits - 1)) - (q < 0 ? 0ull : 1ull);
             const std::uint64_t mag = q < 0 ? static_cast<std::uint64_t>(-(q + 1)) + 1ull
                                             : static_cast<std::uint64_t>(q);
-            const bool in_range = mag <= qlim || (q == static_cast<std::int64_t>(INT64_MIN) && false);
+            const bool in_range = mag <= qlim;
             if (!in_range) {
                 return StepResult::failed(StepFault{GuestFault::DivideError, cx.start_rip, 0,
                                                     "IDIV quotient overflow"});
             }
-            write_gpr(cx.cpu, 0, bits, static_cast<std::uint64_t>(q) & smask, cx.rex);
-            write_gpr(cx.cpu, 2, bits, static_cast<std::uint64_t>(r) & smask, cx.rex);
+            if (bits == 8) {
+                // IDIV r/m8 writes AL quotient and AH remainder (AX).
+                write_gpr(cx.cpu, 0, 16,
+                          (static_cast<std::uint64_t>(q) & 0xFFull) |
+                              ((static_cast<std::uint64_t>(r) & 0xFFull) << 8),
+                          cx.rex);
+            } else {
+                write_gpr(cx.cpu, 0, bits, static_cast<std::uint64_t>(q) & smask, cx.rex);
+                write_gpr(cx.cpu, 2, bits, static_cast<std::uint64_t>(r) & smask, cx.rex);
+            }
             cx.cpu.rip += ins.length;
             return StepResult::success();
         }
@@ -947,36 +1010,36 @@ StepResult Interpreter::step(const Decoded& ins) {
         case Mnemonic::Loope:
         case Mnemonic::Loopne:
         case Mnemonic::Jrcxz: {
-            // Address-size prefix selects RCX/ECX; the decoder rejects other
-            // widths at decode time (16-bit LOOP is UnsupportedValid).
             const std::uint8_t cbits = ins.addr_size == 32 ? 32 : 64;
             const std::uint64_t rcx = read_gpr(cx.cpu, 1, cbits, cx.rex);
+            const std::uint64_t next_rcx = (rcx - 1) & width_mask(cbits);
+            bool decrement = false;
             bool taken = false;
             switch (ins.mnem) {
                 case Mnemonic::Loop:
-                    taken = (rcx - 1) != 0;
-                    write_gpr(cx.cpu, 1, cbits, rcx - 1, cx.rex);
+                    decrement = true;
+                    taken = next_rcx != 0;
                     break;
                 case Mnemonic::Loope:
-                    taken = (rcx - 1) != 0 && cx.cpu.flag(cpu::kFlagZF);
-                    write_gpr(cx.cpu, 1, cbits, rcx - 1, cx.rex);
+                    decrement = true;
+                    taken = next_rcx != 0 && cx.cpu.flag(cpu::kFlagZF);
                     break;
                 case Mnemonic::Loopne:
-                    taken = (rcx - 1) != 0 && !cx.cpu.flag(cpu::kFlagZF);
-                    write_gpr(cx.cpu, 1, cbits, rcx - 1, cx.rex);
+                    decrement = true;
+                    taken = next_rcx != 0 && !cx.cpu.flag(cpu::kFlagZF);
                     break;
                 case Mnemonic::Jrcxz:
                     taken = rcx == 0;
                     break;
                 default: break;
             }
+            std::uint64_t target = 0;
             if (taken) {
-                const std::uint64_t target = x64::branch_target(ins);
+                target = x64::branch_target(ins);
                 if (!check_exec(cx, target)) return StepResult::failed(cx.fail);
-                cx.cpu.rip = target;
-            } else {
-                cx.cpu.rip += ins.length;
             }
+            if (decrement) write_gpr(cx.cpu, 1, cbits, next_rcx, cx.rex);
+            cx.cpu.rip = taken ? target : cx.cpu.rip + ins.length;
             return StepResult::success();
         }
 
@@ -999,16 +1062,25 @@ StepResult Interpreter::step(const Decoded& ins) {
         }
 
         case Mnemonic::Ret: {
-            // Optional imm16 stack-pop after the return.
-            std::uint64_t pop_extra = 0;
-            if (ins.op_count > 0 && ins.ops[0].kind == x64::OpKind::Imm) {
-                pop_extra = ins.ops[0].imm & kMask16;
+            const std::uint64_t pop_extra =
+                ins.op_count > 0 && ins.ops[0].kind == x64::OpKind::Imm
+                    ? (ins.ops[0].imm & kMask16)
+                    : 0;
+            const std::uint8_t sp = static_cast<std::uint8_t>(Gpr::Sp);
+            const std::uint64_t old_sp = cx.cpu.gprs[sp];
+            const std::uint64_t adjustment = 8 + pop_extra;
+            if (old_sp > (~0ull) - adjustment) {
+                cx.abort(GuestFault::StackOverflow, "RET stack adjustment overflow", old_sp);
+                return StepResult::failed(cx.fail);
             }
-            Value ra;
-            if (!pop_u64(cx, ra)) return StepResult::failed(cx.fail);
-            if (!check_exec(cx, ra.raw)) return StepResult::failed(cx.fail);
-            cx.cpu.gprs[static_cast<std::size_t>(Gpr::Sp)] += pop_extra;
-            cx.cpu.rip = ra.raw;
+            auto ra = cx.mem.read_u64(old_sp);
+            if (!ra.ok()) {
+                cx.abort(GuestFault::InvalidAccess, "RET stack read", old_sp);
+                return StepResult::failed(cx.fail);
+            }
+            if (!check_exec(cx, ra.value())) return StepResult::failed(cx.fail);
+            cx.cpu.gprs[sp] = old_sp + adjustment;
+            cx.cpu.rip = ra.value();
             return StepResult::success();
         }
 
@@ -1072,6 +1144,15 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Xchg: {
+            // Memory XCHG is implicitly locked. Hold the shared guest-memory
+            // lock across both operand accesses so other interpreter threads
+            // cannot observe an intermediate value.
+            std::unique_lock<std::recursive_mutex> atomic_lock(
+                g_guest_memory_mutex, std::defer_lock);
+            if (ins.ops[0].kind == x64::OpKind::Mem ||
+                ins.ops[1].kind == x64::OpKind::Mem) {
+                atomic_lock.lock();
+            }
             Value a_v, b_v;
             if (!read_operand(cx, ins.ops[0], a_v)) return StepResult::failed(cx.fail);
             if (!read_operand(cx, ins.ops[1], b_v)) return StepResult::failed(cx.fail);
@@ -1193,24 +1274,28 @@ StepResult Interpreter::step(const Decoded& ins) {
                 // (width-1..0) chain, which for a >= width shift of a masked
                 // value is 0 when masked > bits and the value's bit
                 // (masked-bits-1)... keep it simple: CF = 0 (documented).
-                bool cf = false;
                 if (masked <= bits) {
-                    cf = ((dst.raw >> (bits - masked)) & 1ull) != 0;
+                    const bool cf = ((dst.raw >> (bits - masked)) & 1ull) != 0;
+                    cx.cpu.set_flag(cpu::kFlagCF, cf);
                 }
-                cx.cpu.set_flag(cpu::kFlagCF, cf);
                 if (masked == 1) {
-                    cx.cpu.set_flag(cpu::kFlagOF, sign_bit(result, bits) != 0);
+                    const bool msb = sign_bit(result, bits) != 0;
+                    cx.cpu.set_flag(cpu::kFlagOF, msb != cx.cpu.flag(cpu::kFlagCF));
                 }
             } else if (ins.mnem == Mnemonic::Shr) {
-                const std::uint64_t last = masked <= bits ? ((dst.raw >> (masked - 1)) & 1ull) : 0;
-                cx.cpu.set_flag(cpu::kFlagCF, masked <= bits && (last != 0));
+                if (masked <= bits) {
+                    const std::uint64_t last = (dst.raw >> (masked - 1)) & 1ull;
+                    cx.cpu.set_flag(cpu::kFlagCF, last != 0);
+                }
                 if (masked == 1) {
                     cx.cpu.set_flag(cpu::kFlagOF, sign_bit(dst.raw & m, bits) != 0);
                 }
             } else if (ins.mnem == Mnemonic::Sar) {
-                const std::uint64_t last = masked <= bits ? ((dst.raw >> (masked - 1)) & 1ull) : 0;
-                cx.cpu.set_flag(cpu::kFlagCF, masked <= bits && (last != 0));
-                cx.cpu.set_flag(cpu::kFlagOF, false);
+                if (masked <= bits) {
+                    const std::uint64_t last = (dst.raw >> (masked - 1)) & 1ull;
+                    cx.cpu.set_flag(cpu::kFlagCF, last != 0);
+                }
+                if (masked == 1) cx.cpu.set_flag(cpu::kFlagOF, false);
             } else if (ins.mnem == Mnemonic::Rol) {
                 const std::uint64_t n = masked % bits;
                 if (n != 0) {
@@ -1234,10 +1319,16 @@ StepResult Interpreter::step(const Decoded& ins) {
                                                     ((result >> (bits - 2)) & 1ull));
                 }
             }
-            // RCL/RCR set CF above; their OF (count 1) uses the top two bits.
-            if ((ins.mnem == Mnemonic::Rcl || ins.mnem == Mnemonic::Rcr) && masked == 1) {
-                cx.cpu.set_flag(cpu::kFlagOF, ((result >> (bits - 1)) & 1ull) !=
-                                                ((result >> (bits - 2)) & 1ull));
+            if (ins.mnem == Mnemonic::Rcl && masked == 1) {
+                // RCL: OF = MSB(result) XOR CF.
+                cx.cpu.set_flag(cpu::kFlagOF,
+                                (((result >> (bits - 1)) & 1ull) != 0) !=
+                                    cx.cpu.flag(cpu::kFlagCF));
+            } else if (ins.mnem == Mnemonic::Rcr && masked == 1) {
+                // RCR: OF = XOR of the two most significant result bits.
+                cx.cpu.set_flag(cpu::kFlagOF,
+                                ((result >> (bits - 1)) & 1ull) !=
+                                    ((result >> (bits - 2)) & 1ull));
             }
             set_pf_zf_sf(cx.cpu, result, bits);
             if (!write_operand(cx, ins.ops[0], result)) {
@@ -1249,14 +1340,36 @@ StepResult Interpreter::step(const Decoded& ins) {
 
         case Mnemonic::Bt: case Mnemonic::Bts: case Mnemonic::Btr:
         case Mnemonic::Btc: {
-            Value dst, pos;
-            if (!read_operand(cx, ins.ops[0], dst)) return StepResult::failed(cx.fail);
-            // ops[1]: immediate bit index, or the same-width register form
-            // (BT r/m, r: the bit offset applies modulo the operand size).
+            Value pos;
             if (!read_operand(cx, ins.ops[1], pos)) return StepResult::failed(cx.fail);
             const std::uint8_t bits = ins.ops[0].bits;
+            Operand dst_operand = ins.ops[0];
+            std::uint64_t bit = pos.raw % bits;
+            if (dst_operand.kind == x64::OpKind::Mem &&
+                ins.ops[1].kind == x64::OpKind::Reg) {
+                // For a memory bit string, the signed register index selects
+                // a word relative to the effective address, not merely a bit
+                // within the first word.
+                const std::int64_t index = static_cast<std::int64_t>(pos.sign_extended());
+                std::int64_t word = index / static_cast<std::int64_t>(bits);
+                std::int64_t rem = index % static_cast<std::int64_t>(bits);
+                if (rem < 0) { rem += bits; --word; }
+                const std::int64_t byte_delta =
+                    word * static_cast<std::int64_t>(bits / 8u);
+                if ((byte_delta > 0 &&
+                     dst_operand.disp > INT64_MAX - byte_delta) ||
+                    (byte_delta < 0 &&
+                     dst_operand.disp < INT64_MIN - byte_delta)) {
+                    cx.abort(GuestFault::InvalidAccess,
+                             "memory bit-string address overflow");
+                    return StepResult::failed(cx.fail);
+                }
+                dst_operand.disp += byte_delta;
+                bit = static_cast<std::uint64_t>(rem);
+            }
+            Value dst;
+            if (!read_operand(cx, dst_operand, dst)) return StepResult::failed(cx.fail);
             const std::uint64_t m = width_mask(bits);
-            const std::uint64_t bit = pos.raw % bits;
             const bool was = ((dst.raw >> bit) & 1ull) != 0;
             std::uint64_t result = dst.raw & m;
             switch (ins.mnem) {
@@ -1267,7 +1380,7 @@ StepResult Interpreter::step(const Decoded& ins) {
                 default: break;
             }
             if (ins.mnem != Mnemonic::Bt) {
-                if (!write_operand(cx, ins.ops[0], result)) {
+                if (!write_operand(cx, dst_operand, result)) {
                     return StepResult::failed(cx.fail);
                 }
             }
@@ -1290,9 +1403,13 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Pop: {
+            // POP computes a memory destination using the incremented RSP,
+            // but a failed destination write must not leave RSP changed.
+            const CpuState before = cx.cpu;
             Value v;
             if (!pop_u64(cx, v)) return StepResult::failed(cx.fail);
             if (!write_operand(cx, ins.ops[0], v.raw & width_mask(ins.ops[0].bits))) {
+                cx.cpu = before;
                 return StepResult::failed(cx.fail);
             }
             cx.cpu.rip += ins.length;
@@ -1357,13 +1474,20 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Leave: {
-            // RSP = RBP; pop RBP.
             const std::uint8_t sp = static_cast<std::uint8_t>(Gpr::Sp);
             const std::uint8_t bp = static_cast<std::uint8_t>(Gpr::Bp);
-            cx.cpu.gprs[sp] = cx.cpu.gprs[bp];
-            Value v;
-            if (!pop_u64(cx, v)) return StepResult::failed(cx.fail);
-            cx.cpu.gprs[bp] = v.raw;
+            const std::uint64_t frame_sp = cx.cpu.gprs[bp];
+            if (frame_sp > (~0ull) - 8) {
+                cx.abort(GuestFault::StackOverflow, "LEAVE stack adjustment overflow", frame_sp);
+                return StepResult::failed(cx.fail);
+            }
+            auto saved_bp = cx.mem.read_u64(frame_sp);
+            if (!saved_bp.ok()) {
+                cx.abort(GuestFault::InvalidAccess, "LEAVE stack read", frame_sp);
+                return StepResult::failed(cx.fail);
+            }
+            cx.cpu.gprs[sp] = frame_sp + 8;
+            cx.cpu.gprs[bp] = saved_bp.value();
             cx.cpu.rip += ins.length;
             return StepResult::success();
         }

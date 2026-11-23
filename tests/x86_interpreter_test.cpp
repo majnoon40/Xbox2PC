@@ -129,6 +129,120 @@ TEST_F(X86SemanticsTest, SubRegisterMergeRules) {
 
 // ── ADD / ADC / SUB / SBB / CMP flags ───────────────────────────────────────
 
+TEST_F(X86SemanticsTest, InstructionFetchDoesNotReadPastDecodedLength) {
+    const std::uint64_t rx = 0x10010000;
+    const std::uint64_t rw = rx + 4096;
+    ASSERT_TRUE(space_->reserve_region(rx, 4096, "rx-tail").ok());
+    ASSERT_TRUE(space_->reserve_region(rw, 4096, "rw-next").ok());
+    ASSERT_TRUE(space_->commit_region(rx).ok());
+    ASSERT_TRUE(space_->commit_region(rw).ok());
+    const std::uint8_t nop = 0x90;
+    const std::uint8_t next = 0x90;
+    ASSERT_TRUE(mem().write(rx + 4095, &nop, 1).ok());
+    ASSERT_TRUE(mem().write(rw, &next, 1).ok());
+    ASSERT_TRUE(space_->protect_region(rx, MemProtect::ReadExecute).ok());
+    cpu().rip = rx + 4095;
+    auto r = interp().step_at_rip();
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(cpu().rip, rx + 4096);
+
+    // A multi-byte instruction requiring the next byte must fault on the
+    // non-executable page rather than fetching it with read permission.
+    const std::uint8_t rex = 0x48;
+    ASSERT_TRUE(space_->protect_region(rx, MemProtect::ReadWrite).ok());
+    ASSERT_TRUE(mem().write(rx + 4095, &rex, 1).ok());
+    const std::uint8_t mov_opcode = 0xB8;
+    ASSERT_TRUE(mem().write(rw, &mov_opcode, 1).ok());
+    ASSERT_TRUE(space_->protect_region(rx, MemProtect::ReadExecute).ok());
+    cpu().rip = rx + 4095;
+    const auto before = cpu();
+    auto bad = interp().step_at_rip();
+    ASSERT_FALSE(bad.ok());
+    EXPECT_EQ(bad.fault().fault, rt::exec::GuestFault::PermissionExec);
+    EXPECT_EQ(bad.fault().fault_address, rw);
+    EXPECT_EQ(cpu().rip, before.rip);
+}
+
+TEST_F(X86SemanticsTest, ShlOverflowIncludesCarryOut) {
+    cpu().set_reg(Gpr::Rax, 0x80);
+    cpu().rip = code_at(0, {0xD0, 0xE0}); // shl al, 1
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFu, 0u);
+    EXPECT_TRUE(cf());
+    EXPECT_TRUE(of());
+}
+
+TEST_F(X86SemanticsTest, RclOverflowUsesCarryFlag) {
+    cpu().set_reg(Gpr::Rax, 0x80);
+    cpu().set_flag(rt::cpu::kFlagCF, false);
+    cpu().rip = code_at(0, {0xD0, 0xD0}); // rcl al, 1
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFu, 0u);
+    EXPECT_TRUE(cf());
+    EXPECT_TRUE(of());
+}
+
+TEST_F(X86SemanticsTest, MemoryXchgIsAtomicAndExchangesBothOperands) {
+    const std::uint64_t slot = kDataBase + 0x40;
+    ASSERT_TRUE(mem().write_u64(slot, 0x1122334455667788ull).ok());
+    cpu().set_reg(Gpr::Rax, 0xAABBCCDD);
+    cpu().set_reg(Gpr::Rbx, slot);
+    cpu().rip = code_at(0, {0x48, 0x87, 0x03}); // xchg [rbx], rax
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(mem().read_u64(slot).value(), 0xAABBCCDDu);
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0x1122334455667788ull);
+}
+
+TEST_F(X86SemanticsTest, MemoryBitStringRegisterOffsetSelectsAdjacentWord) {
+    const std::uint64_t slot = kDataBase + 0x40;
+    ASSERT_TRUE(mem().write_u64(slot, 0).ok());
+    ASSERT_TRUE(mem().write_u64(slot + 8, 0).ok());
+    cpu().set_reg(Gpr::Rax, 64);  // bit 64 = bit 0 of the next qword
+    cpu().set_reg(Gpr::Rbx, slot);
+    cpu().rip = code_at(0, {0x48, 0x0F, 0xAB, 0x03}); // bts [rbx], rax
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(mem().read_u64(slot).value(), 0u);
+    EXPECT_EQ(mem().read_u64(slot + 8).value(), 1u);
+}
+
+TEST_F(X86SemanticsTest, PopMemoryFaultRestoresRsp) {
+    const std::uint64_t stack = kDataBase + 0x100;
+    ASSERT_TRUE(mem().write_u64(stack, 0x12345678).ok());
+    cpu().set_reg(Gpr::Sp, stack);
+    cpu().set_reg(Gpr::Rax, 0x99990000);
+    cpu().rip = code_at(0, {0x8F, 0x00}); // pop qword ptr [rax]
+    const auto before = cpu();
+    auto r = interp().step_at_rip();
+    ASSERT_FALSE(r.ok());
+    EXPECT_EQ(cpu().reg(Gpr::Sp), before.reg(Gpr::Sp));
+    EXPECT_EQ(cpu().rip, before.rip);
+}
+
+TEST_F(X86SemanticsTest, Add64CarryAndAdcCarryIn) {
+    cpu().set_reg(Gpr::Rax, ~0ull);
+    cpu().rip = code_at(0, {0x48, 0x05, 0x01, 0x00, 0x00, 0x00});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0u);
+    EXPECT_TRUE(cf());
+    cpu().set_reg(Gpr::Rax, ~0ull);
+    cpu().set_flag(rt::cpu::kFlagCF, true);
+    cpu().rip = code_at(16, {0x48, 0x15, 0x00, 0x00, 0x00, 0x00});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0u);
+    EXPECT_TRUE(cf());
+}
+
+TEST_F(X86SemanticsTest, ByteMulWithRexDoesNotClobberRsp) {
+    cpu().set_reg(Gpr::Rax, 0x12);
+    cpu().set_reg(Gpr::Rcx, 0x34);
+    cpu().set_reg(Gpr::Sp, 0x1122334455667788ull);
+    const auto rsp = cpu().reg(Gpr::Sp);
+    cpu().rip = code_at(0, {0x40, 0xF6, 0xE1});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFFFu, 0x03A8u);
+    EXPECT_EQ(cpu().reg(Gpr::Sp), rsp);
+}
+
 TEST_F(X86SemanticsTest, AddAndCarryFlags) {
     // 8-bit ADD 0xF0 + 0x20: carry, AF, not zero, SF set, OF clear.
     cpu().reset();
@@ -422,6 +536,39 @@ TEST_F(X86SemanticsTest, WriteToReadOnlyFaults) {
 }
 
 // ── MUL/DIV families ────────────────────────────────────────────────────────
+
+TEST_F(X86SemanticsTest, ByteDivWithRexWritesAxNotRsp) {
+    cpu().set_reg(Gpr::Rax, 0x0100); // AX = 256
+    cpu().set_reg(Gpr::Rcx, 2);      // divisor CL = 2
+    cpu().set_reg(Gpr::Sp, 0x1122334455667788ull);
+    const auto rsp = cpu().reg(Gpr::Sp);
+    cpu().rip = code_at(0, {0x40, 0xF6, 0xF1}); // rex; div cl
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFFFu, 0x0080u);
+    EXPECT_EQ(cpu().reg(Gpr::Sp), rsp);
+}
+
+TEST_F(X86SemanticsTest, IdivByteAcceptsNegativeMinimumQuotient) {
+    cpu().set_reg(Gpr::Rax, 0xFF80); // signed AX = -128
+    cpu().set_reg(Gpr::Rcx, 1);     // divisor CL = 1
+    cpu().set_reg(Gpr::Sp, 0x1122334455667788ull);
+    const auto rsp = cpu().reg(Gpr::Sp);
+    cpu().rip = code_at(0, {0x40, 0xF6, 0xF9}); // rex; idiv cl
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFFFu, 0x0080u);
+    EXPECT_EQ(cpu().reg(Gpr::Sp), rsp);
+}
+
+TEST_F(X86SemanticsTest, Div64HandlesRemainderHighBit) {
+    // (2^127) / (2^63 + 1) = 2^64 - 2, remainder 2.
+    cpu().set_reg(Gpr::Rdx, 0x8000000000000000ull);
+    cpu().set_reg(Gpr::Rax, 0);
+    cpu().set_reg(Gpr::Rbx, 0x8000000000000001ull);
+    cpu().rip = code_at(0, {0x48, 0xF7, 0xF3});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0xFFFFFFFFFFFFFFFEull);
+    EXPECT_EQ(cpu().reg(Gpr::Rdx), 2u);
+}
 
 TEST_F(X86SemanticsTest, MulUnsigned) {
     // 8-bit MUL: AX = AL * r/m8.

@@ -94,41 +94,20 @@ RtThread::RtThread(ThreadMain main, void* arg, std::string name)
 RtThread::~RtThread() = default;
 
 void RtThread::on_destroy() {
-    // M4 use-after-free fix: a detached host thread's trampoline writes
-    // state/exit fields AFTER the manager frees the object (found by ASan:
-    // heap-use-after-free in ThreadState::store). Destruction now DRAINS
-    // the trampoline before teardown continues:
-    //   * never-started thread  -> nothing to do;
-    //   * exited thread        -> trampoline_done_ already set;
-    //   * running thread        -> request a cooperative stop, then wait
-    //     (bounded: 250 ms; never kill — documented M3/M4 safety rule)
-    //     for trampoline_done_; if the deadline passes, the host thread
-    //     is detached and the failure is RECORDED in object metadata
-    //     (never silently dropped), and destruction proceeds — the
-    //     trampoline touches nothing after trampoline_done_ is set, and
-    //     a pathological runaway is the documented escape hatch.
+    // A live trampoline still holds a raw pointer to this object, so it
+    // must finish before the object can be erased. Detaching after a timeout
+    // is unsafe: the host thread may still dereference this object.
     if (host_ == nullptr) return;
     if (!exited_.load(std::memory_order_acquire)) {
         stop_flag_.store(true, std::memory_order_release);
         host_->request_stop();
     }
-    const pal::MonotonicNs deadline = pal::now_ns() + 250ull * 1000 * 1000;
     while (!trampoline_done_.load(std::memory_order_acquire)) {
-        if (pal::now_ns() >= deadline) {
-            // Record the miss (metadata survives until the final erase).
-            set_meta("destroy-timeout", "trampoline did not finish in 250ms");
-            host_->detach();
-            return;
-        }
         std::this_thread::yield();
     }
-    // Trampoline is done; the host thread may still be finishing its
-    // return — join when possible, detach otherwise (no zombie hosts).
     if (!host_joined_) {
         const auto joined = host_->join();
-        if (!joined.ok()) {
-            (void)host_->detach();
-        }
+        if (!joined.ok()) set_meta("join-error", joined.context());
     }
 }
 
@@ -141,22 +120,34 @@ Result<void> RtThread::start() {
         return Result<void>(RuntimeErrc::InvalidTransition,
                             "start() from " + std::string(thread_state_to_name(cur)));
     }
+    if (!is_alive()) {
+        return Result<void>(RuntimeErrc::ObjectDestroyed,
+                            "start() on a destroying thread object");
+    }
+    if (stop_flag_.load(std::memory_order_acquire)) {
+        return Result<void>(RuntimeErrc::ProcessTerminated,
+                            "thread start cancelled by process shutdown");
+    }
     host_ = pal::make_host_thread();
+    if (host_ == nullptr) {
+        return Result<void>(RuntimeErrc::OutOfResources,
+                            "host thread allocation failed");
+    }
+    // Publish Ready before spawning. A fast trampoline must not be
+    // overwritten back to Ready after it has already entered Running.
+    state_.store(ThreadState::Ready, std::memory_order_release);
     const auto spawned = host_->start(&RtThread::pal_trampoline, this);
     if (!spawned.ok()) {
+        state_.store(ThreadState::Failed, std::memory_order_release);
+        host_.reset();
         return Result<void>(spawned.errc(), spawned.context());
     }
-    // Created -> Ready: host thread spawned, trampoline gate handles the
-    // visibility of `this`.
-    state_.store(ThreadState::Ready, std::memory_order_release);
     return Result<void>::ok_result();
 }
 
 void* RtThread::pal_trampoline(void* self_ptr) {
     auto* self = static_cast<RtThread*>(self_ptr);
     self->state_.store(ThreadState::Running, std::memory_order_release);
-    // M4: exception containment — nothing escapes a runtime thread. A
-    // caught exception fails the thread with a distinct exit code.
     void* code = nullptr;
     try {
         code = self->main_(*self, self->arg_);
@@ -164,20 +155,20 @@ void* RtThread::pal_trampoline(void* self_ptr) {
         self->fail(std::string("thread exception: ") + e.what());
         self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
         self->exited_.store(true, std::memory_order_release);
+        self->trampoline_done_.store(true, std::memory_order_release);
         return reinterpret_cast<void*>(kExceptionExitCode);
     } catch (...) {
         self->fail("thread exception: unknown type");
         self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
         self->exited_.store(true, std::memory_order_release);
+        self->trampoline_done_.store(true, std::memory_order_release);
         return reinterpret_cast<void*>(kExceptionExitCode);
     }
     const std::uint64_t ec = reinterpret_cast<std::uint64_t>(code);
     self->exit_code_.store(ec, std::memory_order_release);
     self->exited_.store(true, std::memory_order_release);
     self->state_.store(ThreadState::Terminated, std::memory_order_release);
-    // LAST touch of `self`: after this flag, the trampoline never
-    // dereferences the object. on_destroy drains this flag before
-    // returning so the object is never freed under a live trampoline.
+    // Final object access: on_destroy waits for this before erasing self.
     self->trampoline_done_.store(true, std::memory_order_release);
     return code;
 }

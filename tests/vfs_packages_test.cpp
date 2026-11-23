@@ -194,6 +194,21 @@ TEST(MemoryBackendTest, CrudSeekMetadata) {
     EXPECT_EQ(missing.errc(), RuntimeErrc::NotFound);
 }
 
+TEST(MemoryBackendTest, RejectsNullAndOverflowBuffers) {
+    MemoryBackend mb;
+    auto path = VfsPath::parse("/overflow.bin").value();
+    ASSERT_TRUE(mb.create_file(path).ok());
+    auto h = mb.open(path, true);
+    ASSERT_TRUE(h.ok());
+    const char byte = 'x';
+    EXPECT_FALSE(h.value()->write(nullptr, 1).ok());
+    EXPECT_FALSE(h.value()->read(nullptr, 1).ok());
+    auto huge = h.value()->write(&byte, ~0ull);
+    EXPECT_FALSE(huge.ok());
+    EXPECT_EQ(h.value()->size(), 0u);
+    EXPECT_EQ(h.value()->position(), 0u);
+}
+
 TEST(MemoryBackendTest, ConcurrentHandles) {
     for (int rep = 0; rep < kRepeat; ++rep) {
         MemoryBackend mb;
@@ -318,6 +333,8 @@ TEST(HostBackendTest, RootConfinementAndSymlinkRejection) {
     auto esc = backend.open(VfsPath::parse("/escape").value(), false);
     ASSERT_FALSE(esc.ok());
     EXPECT_NE(esc.error_string().find("symlink"), std::string::npos);
+    EXPECT_EQ(backend.create_file(VfsPath::parse("/f.txt").value()).errc(),
+              RuntimeErrc::AlreadyExists);
 
     // Read-only mode denies mutations.
     rt::HostDirBackend ro(root, /*read_only=*/true);
@@ -337,6 +354,50 @@ TEST(HostBackendTest, RootConfinementAndSymlinkRejection) {
 }
 
 // ── XPK: roundtrip + adversarial ───────────────────────────────────────────
+
+TEST(BoundedReaderTest, NullBuffersAndZeroLengthOperationsAreSafe) {
+    BoundedReader reader(nullptr, 8);
+    char out = 0;
+    EXPECT_FALSE(reader.read_exact(&out, 1).ok());
+    EXPECT_FALSE(reader.read_exact(nullptr, 1).ok());
+    EXPECT_TRUE(reader.read_exact(nullptr, 0).ok());
+    auto zero = reader.read_some(nullptr, 0);
+    ASSERT_TRUE(zero.ok());
+    EXPECT_EQ(zero.value(), 0u);
+    EXPECT_FALSE(reader.peek(0, 1).ok());
+    auto empty = reader.peek(0, 0);
+    ASSERT_TRUE(empty.ok());
+    EXPECT_TRUE(empty.value().empty());
+}
+
+TEST(HostBackendTest, RejectsIntermediateSymlinkComponents) {
+    const std::string root = "/tmp/x2pc-m5-root-" + std::to_string(::getpid());
+    const std::string outside = "/tmp/x2pc-m5-outside-" + std::to_string(::getpid());
+    ASSERT_TRUE(pal::create_host_directory(root).ok());
+    ASSERT_TRUE(pal::create_host_directory(outside).ok());
+    {
+        auto f = pal::open_file(outside + "/secret.txt", pal::FileOpenMode::WriteNew);
+        ASSERT_TRUE(f.ok());
+        ASSERT_TRUE(f.value()->write("secret", 6).ok());
+        ASSERT_TRUE(f.value()->close().ok());
+    }
+    ASSERT_EQ(::symlink(outside.c_str(), (root + "/link").c_str()), 0);
+    rt::HostDirBackend backend(root, false);
+    auto target = VfsPath::parse("/link/secret.txt").value();
+    auto opened = backend.open(target, false);
+    EXPECT_FALSE(opened.ok());
+    EXPECT_NE(opened.error_string().find("symlink"), std::string::npos);
+    EXPECT_FALSE(backend.stat(target).ok());
+    EXPECT_FALSE(backend.list(VfsPath::parse("/link").value()).ok());
+    EXPECT_FALSE(backend.create_file(VfsPath::parse("/link/new.txt").value()).ok());
+    EXPECT_FALSE(backend.delete_file(target).ok());
+    (void)pal::remove_host_file(root + "/link");
+    (void)pal::remove_host_file(outside + "/secret.txt");
+    (void)pal::remove_host_directory(outside);
+    (void)pal::remove_host_directory(root);
+}
+
+
 
 TEST(XpkTest, Roundtrip) {
     std::vector<XpkBuildEntry> entries = {

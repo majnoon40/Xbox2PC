@@ -7,7 +7,9 @@
 
 #include "xbox2pc/platform.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
@@ -680,14 +682,28 @@ public:
         switch (mode) {
             case FileOpenMode::ReadExisting: flags = O_RDONLY; break;
             case FileOpenMode::WriteNew:
-                flags = O_WRONLY | O_CREAT | O_TRUNC;
+                flags = O_WRONLY | O_CREAT | O_EXCL;
                 break;
             case FileOpenMode::ReadWriteAppend:
                 flags = O_RDWR | O_CREAT | O_APPEND;
                 break;
         }
+        // Refuse a final-component symlink even if it is swapped in after
+        // the VFS's lstat-style preflight. Intermediate components still
+        // require the prefix checks in HostDirBackend.
+        flags |= O_NOFOLLOW | O_CLOEXEC;
         const int fd = ::open(path.c_str(), flags, 0644);
         if (fd < 0) {
+            const int en = errno;
+            if (en == EEXIST) {
+                return Result<std::unique_ptr<PalFile>>(
+                    RuntimeErrc::AlreadyExists, "open: file already exists");
+            }
+            if (en == ELOOP) {
+                return Result<std::unique_ptr<PalFile>>(
+                    RuntimeErrc::InvalidArgument, "open: symlink rejected");
+            }
+            errno = en;
             return Result<std::unique_ptr<PalFile>>(
                 RuntimeErrc::IoError, errno_string("open"));
         }
@@ -698,14 +714,26 @@ public:
 
     Result<std::uint64_t> read(void* buf, std::uint64_t len) override {
         if (fd_ < 0) return Result<std::uint64_t>(RuntimeErrc::InvalidState, "closed");
-        const ssize_t n = ::read(fd_, buf, static_cast<std::size_t>(len));
+        if (len == 0) return Result<std::uint64_t>(0);
+        if (buf == nullptr) {
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "null read buffer");
+        }
+        const std::uint64_t bounded =
+            std::min<std::uint64_t>(len, static_cast<std::uint64_t>(SSIZE_MAX));
+        const ssize_t n = ::read(fd_, buf, static_cast<std::size_t>(bounded));
         if (n < 0) return Result<std::uint64_t>(RuntimeErrc::IoError, errno_string("read"));
         return Result<std::uint64_t>(static_cast<std::uint64_t>(n));
     }
 
     Result<std::uint64_t> write(const void* buf, std::uint64_t len) override {
         if (fd_ < 0) return Result<std::uint64_t>(RuntimeErrc::InvalidState, "closed");
-        const ssize_t n = ::write(fd_, buf, static_cast<std::size_t>(len));
+        if (len == 0) return Result<std::uint64_t>(0);
+        if (buf == nullptr) {
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "null write buffer");
+        }
+        const std::uint64_t bounded =
+            std::min<std::uint64_t>(len, static_cast<std::uint64_t>(SSIZE_MAX));
+        const ssize_t n = ::write(fd_, buf, static_cast<std::size_t>(bounded));
         if (n < 0) return Result<std::uint64_t>(RuntimeErrc::IoError, errno_string("write"));
         return Result<std::uint64_t>(static_cast<std::uint64_t>(n));
     }
@@ -870,7 +898,7 @@ Result<std::vector<PalDirEntry>> list_host_directory(const std::string& host_pat
         } else if (de->d_type == DT_UNKNOWN || de->d_type == DT_REG) {
             struct stat st {};
             const std::string full = host_path + "/" + name;
-            if (::stat(full.c_str(), &st) == 0) {
+            if (::lstat(full.c_str(), &st) == 0) {
                 e.is_directory = S_ISDIR(st.st_mode);
             } else {
                 e.is_directory = false;  // unstatable entry: report as file
@@ -892,12 +920,13 @@ Result<std::vector<PalDirEntry>> list_host_directory(const std::string& host_pat
 }
 
 Result<void> remove_host_tree(const std::string& host_path) {
-    auto st = stat_host_path(host_path);
-    if (!st.ok()) {
-        auto r = Result<void>(st.errc(), st.context());
-        return r;
+    // lstat, not stat: a symlink to a directory must be unlinked, never
+    // recursively traversed outside the requested tree.
+    struct stat root_st {};
+    if (::lstat(host_path.c_str(), &root_st) != 0) {
+        return errno_dir_result("lstat", errno);
     }
-    if (!st.value().is_directory) {
+    if (S_ISLNK(root_st.st_mode) || !S_ISDIR(root_st.st_mode)) {
         return remove_host_file(host_path);
     }
     auto listing = list_host_directory(host_path);

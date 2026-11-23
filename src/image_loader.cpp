@@ -207,7 +207,10 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
 
     // Image size consistency: SizeOfImage must cover headers + every
     // section's virtual extent (spec: SizeOfImage is section-aligned).
-    const std::uint32_t salign = img.opt.section_alignment;
+    const std::uint32_t raw_salign = img.opt.section_alignment;
+    // Continue collecting validation issues without dividing by zero when
+    // the hostile header supplies SectionAlignment == 0.
+    const std::uint32_t salign = raw_salign == 0 ? 1u : raw_salign;
     std::uint64_t need = img.opt.size_of_headers;
     for (const auto& s : img.sections) {
         const std::uint64_t vs =
@@ -221,9 +224,9 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
         const std::uint64_t aligned = (extent + salign - 1) / salign * salign;
         if (aligned > need) need = aligned;
     }
+    const std::uint64_t hdr_aligned =
+        (img.opt.size_of_headers + salign - 1) / salign * salign;
     if (img.opt.size_of_image != 0) {
-        const std::uint64_t hdr_aligned =
-            (img.opt.size_of_headers + salign - 1) / salign * salign;
         if (img.opt.size_of_image < hdr_aligned || img.opt.size_of_image < need) {
             issue(vcode::kImageSizeInconsistent,
                   "SizeOfImage " + std::to_string(img.opt.size_of_image) +
@@ -272,11 +275,11 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
                       "section " + s.name + " raw data exceeds file size");
             }
         }
-        if (s.virtual_address != 0 &&
-            s.virtual_address < img.opt.size_of_headers &&
-            !rva_in_headers(s.virtual_address, img.opt.size_of_headers)) {
+        const std::uint64_t section_extent =
+            std::max<std::uint64_t>(s.virtual_size, s.size_of_raw_data);
+        if (section_extent != 0 && s.virtual_address < hdr_aligned) {
             issue(vcode::kSectionOutsideImage,
-                  "section " + s.name + " starts below SizeOfHeaders");
+                  "section " + s.name + " overlaps the mapped headers region");
         }
         if (std::max<std::uint64_t>(s.virtual_size, s.size_of_raw_data) >
             kMaxImageSize) {
@@ -293,8 +296,8 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
             };
             const std::uint64_t a_end = a.virtual_address + extent(a);
             const std::uint64_t b_end = b.virtual_address + extent(b);
-            if (a.virtual_address < b_end && b.virtual_address < a_end &&
-                (a.has_raw_data && b.has_raw_data)) {
+            if (extent(a) != 0 && extent(b) != 0 &&
+                a.virtual_address < b_end && b.virtual_address < a_end) {
                 issue(vcode::kSectionOverlap,
                       "sections " + a.name + " and " + b.name +
                           " overlap in virtual space with raw data");
@@ -307,6 +310,15 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
         const auto& dir = img.directories[d];
         if (dir.size == 0) continue;
         std::uint64_t end = 0;
+        if (d == pe::kDirSecurity) {
+            // IMAGE_DIRECTORY_ENTRY_SECURITY is the exception: VirtualAddress
+            // is a FILE OFFSET to the certificate table, not an image RVA.
+            if (!add_ok(dir.rva, dir.size, end) || end > file_size) {
+                issue(vcode::kDirectoryRange,
+                      "security certificate table exceeds file bounds");
+            }
+            continue;
+        }
         if (!add_ok(dir.rva, dir.size, end)) {
             issue(vcode::kDirectoryRange,
                   std::string(pe::directory_to_name(static_cast<std::uint16_t>(d))) +
@@ -509,8 +521,14 @@ bool apply_dir64(AddressSpace& space, std::uint64_t xbox_va,
     }
     std::uint64_t v = 0;
     std::memcpy(&v, dst.value(), sizeof(v));
+    // Null pointers must remain null when the image is rebased.
+    if (v == 0) return true;
     if (delta_negative) {
-        v = delta > v ? 0 : v - delta;
+        if (delta > v) {
+            err = "relocation value underflows when applying the base delta";
+            return false;
+        }
+        v -= delta;
     } else {
         std::uint64_t nv = 0;
         if (!add_ok(v, delta, nv)) {
@@ -621,9 +639,10 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
         return Ret(RuntimeErrc::InvalidArgument,
                    "preferred/requested base not page-aligned");
     }
-    const bool in_bounds = preferred >= space.base() &&
-                           preferred - space.base() + image_pages <=
-                               space.capacity();
+    const std::uint64_t preferred_off =
+        preferred >= space.base() ? preferred - space.base() : ~0ull;
+    const bool in_bounds = preferred_off <= space.capacity() &&
+                           image_pages <= space.capacity() - preferred_off;
     if (in_bounds && space.find_overlap(preferred, image_pages) == 0) {
         base = preferred;
     } else if (want_base != 0) {
@@ -640,14 +659,25 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
         // first reserve below fail with typed AlreadyExists — a clean,
         // deterministic failure, never corruption.
         base = space.base();
+        const std::uint64_t page = space.page_size();
         for (const auto& r : space.list_regions()) {
-            if (r.xbox_va >= base + image_pages) break;  // gap before it fits
-            if (r.xbox_va + r.size <= base) continue;    // entirely below
-            base = r.xbox_va + r.size;
-            base = (base + space.page_size() - 1) / space.page_size() *
-                   space.page_size();
+            if (r.xbox_va >= base && r.xbox_va - base >= image_pages) {
+                break;  // the gap before this region is large enough
+            }
+            const std::uint64_t region_end = r.xbox_va + r.size;
+            if (region_end > base) {
+                const std::uint64_t rem = region_end % page;
+                const std::uint64_t delta = rem == 0 ? 0 : page - rem;
+                if (region_end > (~0ull) - delta) {
+                    return Ret(RuntimeErrc::OutOfResources,
+                               "image placement alignment overflow");
+                }
+                base = region_end + delta;
+            }
         }
-        if (base + image_pages > space.base() + space.capacity()) {
+        if (base < space.base() ||
+            base - space.base() > space.capacity() ||
+            image_pages > space.capacity() - (base - space.base())) {
             return Ret(RuntimeErrc::OutOfResources,
                        "no free gap for the image in the address space");
         }
@@ -680,6 +710,42 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
     const std::uint64_t hdr_pages =
         (img.opt.size_of_headers + space.page_size() - 1) / space.page_size() *
         space.page_size();
+    if (hdr_pages == 0 || hdr_pages > image_pages) {
+        rollback();
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "mapped headers exceed the image extent");
+    }
+    // Preflight every section against the page-rounded headers and against
+    // every other section before reserving any guest memory.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> section_ranges;
+    for (const auto& section : img.sections) {
+        const std::uint64_t extent =
+            std::max<std::uint64_t>(section.virtual_size,
+                                    section.size_of_raw_data);
+        if (extent == 0) continue;
+        const std::uint64_t pages =
+            (extent + space.page_size() - 1) / space.page_size() *
+            space.page_size();
+        if (section.virtual_address < hdr_pages ||
+            section.virtual_address > image_pages ||
+            pages > image_pages - section.virtual_address ||
+            section.virtual_address % space.page_size() != 0) {
+            rollback();
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "section overlaps headers or exceeds the mapped image: " +
+                           section.name);
+        }
+        const std::uint64_t end = section.virtual_address + pages;
+        for (const auto& existing : section_ranges) {
+            if (section.virtual_address < existing.second &&
+                existing.first < end) {
+                rollback();
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "page-rounded PE sections overlap");
+            }
+        }
+        section_ranges.emplace_back(section.virtual_address, end);
+    }
     auto hdr_res = space.reserve_region(base, hdr_pages, "pe-headers");
     if (!hdr_res.ok()) return Ret(hdr_res.errc(), hdr_res.context());
     reserved_vas.push_back(base);
@@ -796,6 +862,19 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
                                       limits_.max_relocations);
     if (!blocks.ok()) return Ret(blocks.errc(), blocks.context());
 
+    // Validate every relocation type before touching memory. A late
+    // unsupported entry must not leave earlier DIR64 entries applied.
+    for (const auto& blk : blocks.value()) {
+        for (const auto& e : blk.entries) {
+            if (e.type != RelocType::Absolute && e.type != RelocType::Dir64) {
+                return Ret(RuntimeErrc::PlatformUnsupported,
+                           std::string("unsupported relocation type: ") +
+                               reloc_type_to_name(e.type) +
+                               " (rejected, not skipped)");
+            }
+        }
+    }
+
     // Relocation writes need page RW; sections were protected final in
     // map_image. Flip each affected section to RW, apply, restore.
     std::vector<std::pair<std::uint64_t, MemProtect>> flipped;
@@ -809,12 +888,24 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
                                reloc_type_to_name(e.type) +
                                " (rejected, not skipped)");
             }
-            // The full 8-byte target must sit inside ONE section.
+            // The full 8-byte target must be within the image and ONE
+            // mapped section. Validate the RVA before adding the image base.
+            if (e.target_rva > img.opt.size_of_image ||
+                img.opt.size_of_image - e.target_rva < 8 ||
+                layout.actual_base > (~0ull) - e.target_rva) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "relocation target RVA outside the image");
+            }
             const SectionLayout* host = nullptr;
             const std::uint64_t target_va = layout.actual_base + e.target_rva;
+            if (target_va > (~0ull) - 8) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "relocation target VA overflows");
+            }
             for (const auto& sl : layout.sections) {
                 if (target_va >= sl.mapped_base &&
-                    target_va + 8 <= sl.mapped_base + sl.mapped_size) {
+                    target_va - sl.mapped_base <= sl.mapped_size &&
+                    8 <= sl.mapped_size - (target_va - sl.mapped_base)) {
                     host = &sl;
                     break;
                 }
@@ -872,21 +963,27 @@ Result<std::vector<ImportBinding>> ImageLoader::resolve_imports(
         return Ret(RuntimeErrc::InvalidArgument,
                    "import directory RVA not file-backed");
     }
+    std::uint64_t desc_end = 0;
+    if (!add_ok(desc_off, dir.size, desc_end) || desc_end > file_size) {
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "import directory exceeds file bounds");
+    }
 
     const FileReader rd{file, file_size};
     std::size_t total = 0;
-    for (std::uint64_t d = desc_off;; d += 20) {
-        if (d + 20 > file_size) {
-            return Ret(RuntimeErrc::InvalidArgument,
-                       "import descriptor truncated");
-        }
+    bool descriptor_terminated = false;
+    for (std::uint64_t d = desc_off; d <= desc_end && desc_end - d >= 20;
+         d += 20) {
         std::uint32_t int_rva = 0, name_rva = 0, iat_rva = 0;
         if (!rd.u32(d + 0, int_rva) || !rd.u32(d + 12, name_rva) ||
             !rd.u32(d + 16, iat_rva)) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "import descriptor read failure");
         }
-        if (int_rva == 0 && name_rva == 0 && iat_rva == 0) break;  // terminator
+        if (int_rva == 0 && name_rva == 0 && iat_rva == 0) {
+            descriptor_terminated = true;
+            break;
+        }
         if (++total > limits_.max_imports) {
             return Ret(RuntimeErrc::OutOfResources, "import count exceeds limit");
         }
@@ -933,29 +1030,64 @@ Result<std::vector<ImportBinding>> ImageLoader::resolve_imports(
         // array mirrors the INT order), so its Xbox VA is
         // layout.actual_base + iat_rva + k*8.
         std::uint64_t k = 0;
-        for (std::uint64_t t = t_off; t + 8 <= file_size; t += 8) {
+        bool thunk_terminated = false;
+        for (std::uint64_t t = t_off;
+             t <= file_size && file_size - t >= 8; t += 8) {
             std::uint64_t tv = 0;
             if (!rd.u64(t, tv)) {
                 return Ret(RuntimeErrc::InvalidArgument, "thunk read failure");
             }
-            if (tv == 0) break;  // terminator
+            if (tv == 0) {
+                thunk_terminated = true;
+                break;
+            }
             if (++total > limits_.max_imports) {
                 return Ret(RuntimeErrc::OutOfResources,
                            "import count exceeds limit");
             }
-            const std::uint64_t slot_va = layout.actual_base + iat_rva + k * 8;
+            if (k > (~0ull) / 8) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "IAT slot index overflows");
+            }
+            std::uint64_t slot_rva = 0;
+            if (!add_ok(iat_rva, k * 8, slot_rva) ||
+                slot_rva > img.opt.size_of_image ||
+                img.opt.size_of_image - slot_rva < 8 ||
+                layout.actual_base > (~0ull) - slot_rva) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "IAT slot lies outside the image");
+            }
+            bool slot_file_ok = false;
+            (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(slot_rva),
+                                        slot_file_ok);
+            if (!slot_file_ok) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "IAT slot is not file-backed");
+            }
+            const std::uint64_t slot_va = layout.actual_base + slot_rva;
             ImportLookup look;
             look.dll = dll;
             if ((tv & 0x8000000000000000ull) != 0) {
                 look.by_ordinal = true;
                 look.ordinal = static_cast<std::uint32_t>(tv & 0xFFFF);
             } else {
+                if (tv > UINT32_MAX) {
+                    ImportBinding b;
+                    b.lookup = look;
+                    b.status = ImportStatus::Invalid;
+                    b.note = "import-by-name RVA exceeds 32 bits";
+                    b.iat_va = slot_va;
+                    bindings.push_back(std::move(b));
+                    ++k;
+                    continue;
+                }
                 bool xok = false;
                 const std::uint64_t hn_off =
                     checked_rva_to_offset(img, static_cast<std::uint32_t>(tv), xok);
+                std::uint64_t symbol_off = 0;
                 // Skip the 2-byte hint; read the name.
-                if (!xok ||
-                    !read_cstr(file, file_size, hn_off + 2, kMaxImportNameLen,
+                if (!xok || !add_ok(hn_off, 2, symbol_off) ||
+                    !read_cstr(file, file_size, symbol_off, kMaxImportNameLen,
                                look.symbol)) {
                     ImportBinding b;
                     b.lookup = look;
@@ -979,6 +1111,14 @@ Result<std::vector<ImportBinding>> ImageLoader::resolve_imports(
             bindings.push_back(std::move(b));
             ++k;
         }
+        if (!thunk_terminated) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "import thunk table lacks an in-bounds terminator");
+        }
+    }
+    if (!descriptor_terminated) {
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "import descriptor table lacks an in-bounds terminator");
     }
     return Ret(std::move(bindings));
 }
@@ -989,33 +1129,56 @@ Result<void> ImageLoader::write_iat_slots(
     const std::vector<ImportBinding>& bindings) {
     using Ret = Result<void>;
     std::vector<std::pair<std::uint64_t, MemProtect>> flipped;
+    struct RestoreOnExit {
+        AddressSpace& space;
+        std::vector<std::pair<std::uint64_t, MemProtect>>& regions;
+        ~RestoreOnExit() {
+            for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+                (void)space.protect_region(it->first, it->second);
+            }
+        }
+    } restore_on_error{space, flipped};
+
     for (const auto& b : bindings) {
         if (b.status != ImportStatus::Resolved) continue;
-        // IAT slot rva = slot file offset equivalence: the slot's VA.
-        // The binding carries the FILE offset of the IAT slot; convert to
-        // the RVA it came from is not possible post-hoc, so resolve via
-        // the slot's xbox VA recorded at walk time.
         if (b.iat_va == 0) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "resolved import missing its IAT slot VA");
         }
         const SectionLayout* host = nullptr;
         for (const auto& sl : layout.sections) {
-            if (b.iat_va >= sl.mapped_base &&
-                b.iat_va + 8 <= sl.mapped_base + sl.mapped_size) {
-                host = &sl;
-                break;
+            if (b.iat_va >= sl.mapped_base) {
+                const std::uint64_t offset = b.iat_va - sl.mapped_base;
+                if (offset <= sl.mapped_size && 8 <= sl.mapped_size - offset) {
+                    host = &sl;
+                    break;
+                }
             }
         }
         if (host == nullptr) {
-            // Headers-resident IAT (allowed: SizeOfHeaders region).
-            if (b.iat_va >= layout.actual_base &&
-                b.iat_va + 8 <= layout.actual_base +
-                                   layout.headers_region_size) {
-                auto dst = space.translate(b.iat_va);
-                if (!dst.ok()) return Ret(dst.errc(), dst.context());
-                std::memcpy(dst.value(), &b.value, 8);
-                continue;
+            // Headers are read-only after mapping; temporarily make the
+            // header region writable for a headers-resident IAT slot.
+            if (b.iat_va >= layout.actual_base) {
+                const std::uint64_t offset = b.iat_va - layout.actual_base;
+                if (offset <= layout.headers_region_size &&
+                    8 <= layout.headers_region_size - offset) {
+                    const auto already = std::find_if(
+                        flipped.begin(), flipped.end(),
+                        [&](const auto& x) {
+                            return x.first == layout.headers_region_xbox_va;
+                        });
+                    if (already == flipped.end()) {
+                        auto pr = space.protect_region(
+                            layout.headers_region_xbox_va, MemProtect::ReadWrite);
+                        if (!pr.ok()) return Ret(pr.errc(), pr.context());
+                        flipped.emplace_back(layout.headers_region_xbox_va,
+                                             MemProtect::ReadOnly);
+                    }
+                    auto dst = space.translate(b.iat_va);
+                    if (!dst.ok()) return Ret(dst.errc(), dst.context());
+                    std::memcpy(dst.value(), &b.value, 8);
+                    continue;
+                }
             }
             return Ret(RuntimeErrc::InvalidArgument,
                        "IAT slot VA outside the mapped image");
@@ -1024,20 +1187,27 @@ Result<void> ImageLoader::write_iat_slots(
             host->protection == MemProtect::ReadWrite ||
             host->protection == MemProtect::Full;
         if (!writable_now) {
-            auto pr = space.protect_region(host->mapped_base,
-                                           MemProtect::ReadWrite);
-            if (!pr.ok()) return Ret(pr.errc(), pr.context());
-            flipped.emplace_back(host->mapped_base, host->protection);
+            const auto already = std::find_if(
+                flipped.begin(), flipped.end(),
+                [&](const auto& x) { return x.first == host->mapped_base; });
+            if (already == flipped.end()) {
+                auto pr = space.protect_region(host->mapped_base,
+                                               MemProtect::ReadWrite);
+                if (!pr.ok()) return Ret(pr.errc(), pr.context());
+                flipped.emplace_back(host->mapped_base, host->protection);
+            }
         }
         auto dst = space.translate(b.iat_va);
         if (!dst.ok()) return Ret(dst.errc(), dst.context());
         std::memcpy(dst.value(), &b.value, 8);
     }
-    // Restore (reverse order).
+    // Restore (reverse order). The scope guard retries restoration if a
+    // failure path returns before this point.
     for (auto it = flipped.rbegin(); it != flipped.rend(); ++it) {
         auto pr = space.protect_region(it->first, it->second);
         if (!pr.ok()) return Ret(pr.errc(), pr.context());
     }
+    flipped.clear();
     return Ret::ok_result();
 }
 
@@ -1051,9 +1221,10 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
     if (img.directories.size() <= pe::kDirTls) return Ret(std::nullopt);
     const auto& dir = img.directories[pe::kDirTls];
     if (dir.size == 0) return Ret(std::nullopt);
-    if (dir.size < 64) {
+    // IMAGE_TLS_DIRECTORY64 is 40 bytes (four 64-bit VAs and two DWORDs).
+    if (dir.size < 40) {
         return Ret(RuntimeErrc::InvalidArgument,
-                   "TLS directory smaller than 64 bytes (PE32+)");
+                   "TLS directory smaller than 40 bytes (PE32+)");
     }
     bool ok = false;
     const std::uint64_t off = checked_rva_to_offset(img, dir.rva, ok);
@@ -1061,7 +1232,7 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
         return Ret(RuntimeErrc::InvalidArgument,
                    "TLS directory RVA not file-backed");
     }
-    if (off + 64 > file_size) {
+    if (off > file_size || file_size - off < 40) {
         return Ret(RuntimeErrc::InvalidArgument,
                    "TLS directory truncated in file");
     }
@@ -1073,37 +1244,106 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
         !rd.u32(off + 32, zero_fill)) {
         return Ret(RuntimeErrc::InvalidArgument, "TLS directory read failure");
     }
-    if (end_va < start_va) {
-        return Ret(RuntimeErrc::InvalidArgument,
-                   "TLS template end before start");
+    const std::uint64_t image_base = img.opt.image_base;
+    const std::uint64_t image_size = img.opt.size_of_image;
+    std::uint64_t start_rva = 0, end_rva = 0;
+    if (start_va == 0 && end_va == 0) {
+        // A zero-length TLS template is valid.
+    } else {
+        if (start_va < image_base || end_va < image_base || end_va < start_va) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS template VAs are outside the image or reversed");
+        }
+        const std::uint64_t raw_template_size = end_va - start_va;
+        if (raw_template_size > kMaxTlsTemplate) {
+            return Ret(RuntimeErrc::OutOfResources,
+                       "TLS raw template exceeds the limit");
+        }
+        start_rva = start_va - image_base;
+        end_rva = end_va - image_base;
+        if (start_rva > image_size || end_rva > image_size) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS template range exceeds the image");
+        }
     }
     TlsInfo info;
     info.present = true;
-    info.raw_data_start_rva = start_va - img.opt.image_base;
-    info.raw_data_end_rva = end_va - img.opt.image_base;
-    info.template_size = end_va - start_va;
-    info.template_rva = info.raw_data_start_rva;
-    info.index_slot_rva = static_cast<std::uint32_t>(idx_va - img.opt.image_base);
+    info.raw_data_start_rva = start_rva;
+    info.raw_data_end_rva = end_rva;
+    info.template_size = end_rva - start_rva;
+    info.template_rva = start_rva;
+    if (idx_va != 0) {
+        if (idx_va < image_base) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS index VA is below the image base");
+        }
+        const std::uint64_t index_rva = idx_va - image_base;
+        if (index_rva > image_size || image_size - index_rva < 4) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS index slot lies outside the image");
+        }
+        info.index_slot_rva = static_cast<std::uint32_t>(index_rva);
+    }
     info.callbacks_va = cb_va;
     info.zero_fill_size = zero_fill;
-    if (info.template_size > kMaxTlsTemplate) {
-        return Ret(RuntimeErrc::OutOfResources,
-                   "TLS template exceeds the limit");
+    // The raw template is file-backed and decoded here. Zero-fill is
+    // metadata only; enforce the combined allocation limit when a thread's
+    // TLS block is actually created, not while decoding the image.
+    if (info.template_size != 0) {
+        bool start_ok = false, end_ok = false;
+        (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(start_rva),
+                                    start_ok);
+        (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(end_rva - 1),
+                                    end_ok);
+        if (!start_ok || !end_ok) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS template is not fully file-backed");
+        }
     }
-    // Callback count (bounded walk; NEVER executed).
+    // Callback count (bounded walk; callbacks are NEVER executed).
     std::uint32_t cbs = 0;
     if (cb_va != 0) {
-        const std::uint64_t cb_rva = cb_va - img.opt.image_base;
+        if (cb_va < image_base) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback-array VA is below the image base");
+        }
+        const std::uint64_t cb_rva = cb_va - image_base;
+        if (cb_rva > image_size || image_size - cb_rva < 8) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback-array pointer lies outside the image");
+        }
         bool cok = false;
         std::uint64_t p = checked_rva_to_offset(
             img, static_cast<std::uint32_t>(cb_rva), cok);
-        if (cok) {
-            while (p + 8 <= file_size && cbs < 64) {
-                std::uint64_t cb = 0;
-                if (!rd.u64(p, cb) || cb == 0) break;
-                ++cbs;
-                p += 8;
+        if (!cok) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback array is not file-backed");
+        }
+        bool terminated = false;
+        while (p <= file_size && file_size - p >= 8) {
+            if (cbs == 64) {
+                return Ret(RuntimeErrc::OutOfResources,
+                           "TLS callback count exceeds 64");
             }
+            std::uint64_t cb = 0;
+            if (!rd.u64(p, cb)) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS callback entry is truncated");
+            }
+            if (cb == 0) {
+                terminated = true;
+                break;
+            }
+            if (cb < image_base || cb - image_base >= image_size) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS callback VA lies outside the image");
+            }
+            ++cbs;
+            p += 8;
+        }
+        if (!terminated) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback array lacks an in-bounds terminator");
         }
     }
     info.callback_count = cbs;

@@ -12,10 +12,10 @@
 //                 https://learn.microsoft.com/en-us/cpp/build/stack-usage?view=msvc-170
 //
 // Documented facts implemented:
-//   - Integer/pointer args 1..4 -> RCX, RDX, R8, R9 (left to right);
-//     args 5+ -> stack, right-to-left packing, 8-byte aligned [MS-X64CC].
-//   - FP/double args 1..4 -> XMM0..XMM3 by POSITION (the integer and
-//     FP register classes are independent per position) [MS-X64CC].
+//   - The first four ARGUMENT POSITIONS use the matching register slot:
+//     integer/pointer position i -> GP[i] (RCX/RDX/R8/R9), FP position i
+//     -> XMM[i]. The classes are NOT compacted independently. All
+//     position-5+ arguments spill to 8-byte stack slots [MS-X64CC].
 //   - Shadow (home) space: caller always reserves 32 bytes so the
 //     callee can home RCX/RDX/R8/R9 [MS-X64CC] [MS-X64STACK].
 //   - Stack: 16-byte aligned; RSP 16-aligned before the call pushes the
@@ -113,8 +113,8 @@ Result<void> validate_call(const CallSpec& spec);
 
 // 2. Compute the call's stack requirements.
 struct CallLayout {
-    std::uint32_t gp_reg_args = 0;     // args in RCX/RDX/R8/R9 (<= 4)
-    std::uint32_t xmm_reg_args = 0;    // args in XMM0..3 (<= 4)
+    std::uint32_t gp_reg_args = 0;     // integer args in positions 1..4
+    std::uint32_t xmm_reg_args = 0;    // FP args in positions 1..4
     std::uint32_t stack_args = 0;      // args 5+ (8 bytes each)
     std::uint64_t total_stack_bytes = 0;  // shadow 32 + stack args 8n,
                                           // 16-byte aligned

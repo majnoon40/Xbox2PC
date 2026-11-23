@@ -5,8 +5,11 @@ pages. Evidence tags (full URLs live in the header comments and the
 descriptor table):
 
 - **[MS-X64CC]** x64 calling convention:
-  RCX/RDX/R8/R9 for integer/pointer args 1–4 (left-to-right); XMM0–3
-  for FP args 1–4 *by position*; args 5+ on the stack, 8-byte slots;
+  for each of argument positions 1–4, the type selects the matching
+  register slot: integer/pointer position *i* uses GP register *i*
+  (RCX/RDX/R8/R9), while FP position *i* uses XMM register *i*
+  (XMM0–XMM3). Register classes are not independently compacted.
+  Every argument at position 5 or later spills to an 8-byte stack slot;
   32-byte shadow space always reserved by the caller; aggregates of
   1/2/4/8 bytes pass like integers, larger ones by pointer; `__m128`
   always by pointer; varargs duplicate FP values into GP registers;

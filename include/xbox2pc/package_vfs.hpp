@@ -19,6 +19,7 @@
 //     (not silently dropped).
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -71,7 +72,7 @@ public:
     Result<std::uint64_t> read(void* buf, std::uint64_t len) override;
     Result<std::uint64_t> write(const void* buf, std::uint64_t len) override;  // denied
     Result<std::uint64_t> seek(std::uint64_t position) override;
-    std::uint64_t position() const override { return pos_; }
+    std::uint64_t position() const override;
     std::uint64_t size() const override { return size_; }
 
 private:
@@ -79,6 +80,8 @@ private:
     std::uint64_t offset_ = 0;
     std::uint64_t size_ = 0;
     std::uint64_t pos_ = 0;
+    bool valid_ = false;
+    mutable std::mutex lock_;
 };
 
 // ── discovery ─────────────────────────────────────────────────────────────
