@@ -72,6 +72,8 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented |
 | XTaskQueueCloseHandle | `void ...(queue)` | partially-implemented |
 | XTaskQueueTerminate | `HRESULT ...(queue, bool, void*, cb*)` | partially-implemented |
+| XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | unsupported implementation |
+| XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 
@@ -270,24 +272,18 @@ mirrored).
 
 ## Known limitations
 
-- 16 APIs covered; the GDK surface is far larger (users, achievements,
+- 34 built-in API descriptors are cataloged, including partially implemented and explicitly unsupported imports; the GDK surface is far larger (users, achievements,
   multiplayer, storage, input, networking, graphics, audio stay
   unsupported/unknown — deliberately, without fabrication).
 - No verified ordinals (nothing ships one).
-- No guest-code execution: the ApiContext interface exists, the
-  marshalling bridge is future work (execution context).
-- XTaskQueue models Manual dispatch only (ThreadPool/Immediate modes
-  create but do not auto-dispatch — reported in the descriptor notes).
+- Guest-code execution is limited to the deterministic interpreter subset and explicitly supported execution paths; this is not a complete Xbox execution environment or game-compatibility claim.
+- XTaskQueue models process-owned Manual-mode queue handles only. Callback submission and delayed submission are cataloged but fail closed: guest callback invocation, cancellation delivery, callback-held queue references, and dispatch scheduling are not implemented. ThreadPool/Immediate modes are unsupported.
 - XSystemGetDeviceType always returns the documented Unknown
   fallback (no device spoofing).
 - Delay-load resolution resolves at load time; the runtime does not
   implement lazy first-call hooking (the documented delay-load
   semantics of resolving on first call require an execution context).
 
-## Roadmap
+## Current execution boundary
 
-M8 (recommended): **execution-context foundation** — guest stack/
-register modeling, the ApiContext marshalling bridge (guest args →
-typed slots), TLS callback invocation, and entry-point invocation
-using M6's `ExecDescription` — turning "prepared" images into
-controlled executing ones, still without claiming full game support.
+The M8 execution-context foundation is present: guest CPU state, ABI marshalling, a bounded interpreter, TLS callback execution, and controlled entry-point invocation. M10 expands selected Game OS services but still lacks scheduler-aware waits, complete guest-thread lifecycle integration, full task-queue callback execution, broad system-service coverage, and full virtual-memory subrange semantics. A successful import resolution or partial guest execution does not establish that a retail Xbox game can boot.
