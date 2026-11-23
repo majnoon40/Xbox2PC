@@ -504,6 +504,8 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     c.process_id=pid.value()+1; c.arg_count=1; c.args[0]=h;
     auto foreign=w.reg.dispatch("kernel32","SetEvent",c);
     ASSERT_TRUE(foreign.ok); EXPECT_EQ(foreign.return_value,0u);
+    // Restore the owning process before creating another process-owned handle.
+    c.process_id=pid.value();
     // Auto-reset consumes the initial signal after exactly one successful wait.
     c.arg_count=4; c.args[0]=0; c.args[1]=0; c.args[2]=1; c.args[3]=0;
     auto auto_event=w.reg.dispatch("kernel32","CreateEventW",c);
@@ -528,9 +530,12 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
 TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
     ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    const auto objects_before=w.core.objects().object_count();
     auto h=w.grt->create_event(pid.value(),false,true); ASSERT_TRUE(h.ok());
+    EXPECT_EQ(w.core.objects().object_count(),objects_before+1);
     ASSERT_TRUE(w.pm.terminate_process(w.last_handle,0).ok());
     EXPECT_FALSE(w.grt->set_event(pid.value(),h.value()).ok());
+    EXPECT_EQ(w.core.objects().object_count(),objects_before);
 }
 
 TEST(GdkServiceTest, DocumentedIdFallbacks) {
