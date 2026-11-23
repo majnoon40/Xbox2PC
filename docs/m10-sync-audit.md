@@ -68,3 +68,9 @@ The M10 tests cover the implemented event, mutex, and semaphore slices, includin
 ## AllocationProtect metadata
 
 VmRegion keeps allocation_protection independently from current protection. Win32 VirtualAlloc records the initial requested protection when creating a reservation; later VirtualProtect calls do not overwrite it. VirtualQuery returns this value in the x64 MEMORY_BASIC_INFORMATION.AllocationProtect field. Generic M4 reservations use the runtime's PAGE_READWRITE default. Image/mapped/shared region types remain outside this model.
+
+## Guest-facing wait-multiple subset
+
+- `WaitForMultipleObjects` is registered as partially implemented. The bridge reads a bounded 1–64 element `HANDLE` array from guest memory and passes the decoded handles to the process-scoped wait-any service.
+- `bWaitAll=FALSE` returns `WAIT_OBJECT_0 + index` or `WAIT_ABANDONED_0 + index` as applicable, and supports finite/infinite timeouts through the existing service.
+- `bWaitAll=TRUE` returns `WAIT_FAILED` with an explicit unsupported note. Correct wait-all atomic consumption/rollback semantics and scheduler-aware waits remain unimplemented.
