@@ -72,7 +72,7 @@ VmRegion keeps allocation_protection independently from current protection. Win3
 
 ## Guest-facing wait-multiple subset
 
-- `WaitForMultipleObjects` is registered as partially implemented. The bridge reads a bounded 1–64 element `HANDLE` array from guest memory and passes the decoded handles to the process-scoped wait-any service.
+- `WaitForMultipleObjects` is registered as partially implemented. The bridge reads a bounded 1–64 element `HANDLE` array from guest memory and passes the decoded handles to the process-scoped wait-any or transactional wait-all service.
 - `bWaitAll=FALSE` returns `WAIT_OBJECT_0 + index` or `WAIT_ABANDONED_0 + index` as applicable, and supports finite/infinite timeouts through the existing service.
 - `bWaitAll=TRUE` uses a serialized probe/rollback transaction across 1–64 unique process-owned event, guest-mutex, and guest-semaphore handles. A failed/expired attempt restores consumed auto-reset event signals, semaphore counts, and mutex ownership; an abandoned mutex remains abandoned if the overall wait fails. Successful wait-all retains acquired mutex ownership and returns `WAIT_ABANDONED_0` if any acquired mutex was abandoned. This remains host-thread polling, not scheduler-aware parking.
 
