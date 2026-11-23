@@ -569,6 +569,43 @@ TEST(BridgeTest, MarshalIntegerCall) {
     EXPECT_EQ(c.reg(cpu::Gpr::Rax), api::kSOk);   // marshalled into guest RAX
 }
 
+TEST(BridgeTest, ThreadIdentityReachesGdkService) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("thread-identity.exe");
+    guest::GuestMemory mem(proc->address_space());
+    auto plan = plan_for_descriptor(
+        *w.reg.find("xgameruntime", "XThreadSetTimeSensitive"));
+    ASSERT_TRUE(plan.ok());
+    cpu::CpuState c;
+    c.reset();
+    c.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack st(0x2003F000ull, 0x1000);
+    std::vector<rt::abi::ArgValue> args(1);
+    args[0].int_v = 1;
+    auto prep = rt::abi::prepare_call(
+        c, 0x51000001, plan.value().call, args, HostStack::writer(&st));
+    ASSERT_TRUE(prep.ok()) << prep.error_string();
+
+    auto dispatched = marshal_and_dispatch(
+        c, mem, w.reg, plan.value(), 42, 0, 64, 7);
+    ASSERT_TRUE(dispatched.ok()) << dispatched.error_string();
+    EXPECT_TRUE(dispatched.value().api_result.ok);
+    EXPECT_EQ(dispatched.value().api_result.return_value, api::kSOk);
+
+    api::ApiContext query;
+    query.process_id = 42;
+    query.thread_id = 7;
+    auto same_thread = w.reg.dispatch(
+        "xgameruntime", "XThreadIsTimeSensitive", query);
+    ASSERT_TRUE(same_thread.ok);
+    EXPECT_EQ(same_thread.return_value, 1u);
+    query.process_id = 43;
+    auto other_process = w.reg.dispatch(
+        "xgameruntime", "XThreadIsTimeSensitive", query);
+    ASSERT_TRUE(other_process.ok);
+    EXPECT_EQ(other_process.return_value, 0u);
+}
+
 TEST(BridgeTest, MarshalPointerCallWithOutBuffer) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("br2.exe");
