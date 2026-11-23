@@ -754,19 +754,17 @@ public:
             out.note = "WaitForMultipleObjects requires 1-64 readable handles and a DWORD timeout";
             return true;
         }
-        if (ctx.args[2] != 0) {
-            out.return_value = 0xFFFFFFFFu;
-            out.note = "bWaitAll=TRUE is not implemented; wait-any is supported";
-            return true;
-        }
-        auto waited = svc_.wait_objects_any(ctx.process_id, ctx.thread_id,
-            ctx.pointer_arrays[1], static_cast<std::uint32_t>(ctx.args[3]));
+        auto waited = ctx.args[2] != 0
+            ? svc_.wait_objects_all(ctx.process_id, ctx.thread_id,
+                ctx.pointer_arrays[1], static_cast<std::uint32_t>(ctx.args[3]))
+            : svc_.wait_objects_any(ctx.process_id, ctx.thread_id,
+                ctx.pointer_arrays[1], static_cast<std::uint32_t>(ctx.args[3]));
         out.return_value = waited.ok() ? waited.value() : 0xFFFFFFFFu;
         if (!waited.ok()) out.note = waited.error_string();
         return true;
     }
     std::string describe() const override {
-        return "Win32: WaitForMultipleObjects (wait-any subset; wait-all unsupported)";
+        return "Win32: WaitForMultipleObjects (wait-any and transactional wait-all subsets)";
     }
 private:
     GameRuntimeService& svc_;
@@ -1245,6 +1243,7 @@ Result<void> GameRuntimeService::release_mutex(std::uint64_t pid,
     if (!object.ok()) return Result<void>(object.errc(), object.context());
     auto* mutex = object.value().get()->as<RtGuestMutex>();
     if (mutex == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not a mutex");
+    std::lock_guard transaction(sync_transaction_lock_);
     return mutex->release(thread_id);
 }
 
@@ -1261,6 +1260,7 @@ Result<std::int64_t> GameRuntimeService::release_semaphore(
     if (!object.ok()) return Result<std::int64_t>(object.errc(), object.context());
     auto* semaphore = object.value().get()->as<RtGuestSemaphore>();
     if (semaphore == nullptr) return Result<std::int64_t>(RuntimeErrc::ObjectTypeMismatch, "handle is not a semaphore");
+    std::lock_guard transaction(sync_transaction_lock_);
     return semaphore->release(release_count);
 }
 
@@ -1269,6 +1269,7 @@ Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t hand
     if (!object.ok()) return Result<void>(object.errc(), object.context());
     auto* event = object.value().get()->as<RtEvent>();
     if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not an event");
+    std::lock_guard transaction(sync_transaction_lock_);
     return event->set();
 }
 
@@ -1277,6 +1278,7 @@ Result<void> GameRuntimeService::reset_event(std::uint64_t pid, std::uint64_t ha
     if (!object.ok()) return Result<void>(object.errc(), object.context());
     auto* event = object.value().get()->as<RtEvent>();
     if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not an event");
+    std::lock_guard transaction(sync_transaction_lock_);
     return event->reset();
 }
 
@@ -1350,7 +1352,11 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
                 ? pal::MonotonicNs(2'000'000)
                 : std::max<pal::MonotonicNs>(0, deadline - now);
             const auto slice = std::min<pal::MonotonicNs>(2'000'000, remaining);
-            auto waited = event->wait_ns(slice);
+            Result<void> waited(RuntimeErrc::InvalidState, "event wait not attempted");
+            {
+                std::lock_guard transaction(sync_transaction_lock_);
+                waited = event->wait_ns(slice);
+            }
             if (waited.ok()) return Result<std::uint32_t>(0u);
             if (waited.errc() != RuntimeErrc::Timeout)
                 return Result<std::uint32_t>(waited.errc(), waited.context());
@@ -1375,7 +1381,11 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
                            : std::max<pal::MonotonicNs>(0, deadline - now));
             const auto slice = expired ? pal::MonotonicNs(0)
                 : std::min<pal::MonotonicNs>(2'000'000, remaining);
-            auto waited = mutex->acquire(tid, slice, cancelled);
+            Result<bool> waited(RuntimeErrc::InvalidState, "mutex wait not attempted");
+            {
+                std::lock_guard transaction(sync_transaction_lock_);
+                waited = mutex->acquire(tid, slice, cancelled);
+            }
             if (waited.ok()) return Result<std::uint32_t>(waited.value() ? 0x80u : 0u);
             if (waited.errc() != RuntimeErrc::Timeout)
                 return Result<std::uint32_t>(waited.errc(), waited.context());
@@ -1399,7 +1409,11 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
                            : std::max<pal::MonotonicNs>(0, deadline - now));
             const auto slice = expired ? pal::MonotonicNs(0)
                 : std::min<pal::MonotonicNs>(2'000'000, remaining);
-            auto waited = semaphore->acquire(slice, cancelled);
+            Result<void> waited(RuntimeErrc::InvalidState, "semaphore wait not attempted");
+            {
+                std::lock_guard transaction(sync_transaction_lock_);
+                waited = semaphore->acquire(slice, cancelled);
+            }
             if (waited.ok()) return Result<std::uint32_t>(0u);
             if (waited.errc() != RuntimeErrc::Timeout)
                 return Result<std::uint32_t>(waited.errc(), waited.context());
@@ -1455,6 +1469,148 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_any(
     }
 }
 
+Result<std::uint32_t> GameRuntimeService::wait_objects_all(
+    std::uint64_t pid, std::uint64_t tid,
+    const std::vector<std::uint64_t>& handles, std::uint32_t timeout_ms) {
+    if (handles.empty() || handles.size() > 64)
+        return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
+                                     "wait-all requires between 1 and 64 handles");
+
+    std::vector<RefGuard> objects;
+    objects.reserve(handles.size());
+    for (const auto handle : handles) {
+        if (handle == 0 ||
+            std::find(handles.begin(), &handle, handle) != handles.end()) {
+            // Duplicate handles make acquisition/rollback ambiguous. Check
+            // uniqueness explicitly below instead of relying on object IDs.
+        }
+        auto object = lookup_sync_object(pid, handle);
+        if (!object.ok())
+            return Result<std::uint32_t>(object.errc(), object.context());
+        objects.push_back(std::move(object.value()));
+    }
+    for (std::size_t i = 0; i < handles.size(); ++i) {
+        if (std::find(handles.begin(), handles.begin() + static_cast<std::ptrdiff_t>(i),
+                      handles[i]) != handles.begin() + static_cast<std::ptrdiff_t>(i))
+            return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
+                                         "wait-all handles must be unique");
+    }
+
+    RefGuard guest_thread;
+    if (tid != 0) {
+        auto process = process_manager_.find_process_by_pid(pid);
+        if (process.ok()) {
+            if (auto* managed = process.value().get()->as<ManagedProcess>()) {
+                for (const auto object_id : managed->thread_ids()) {
+                    auto candidate = process_manager_.objects().lookup_id(object_id);
+                    if (!candidate.ok()) continue;
+                    auto* thread = candidate.value().get()->as<RtThread>();
+                    if (thread != nullptr && thread->thread_id() == tid) {
+                        guest_thread = std::move(candidate.value());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    auto* runtime_thread = guest_thread.get() != nullptr
+        ? guest_thread.get()->as<RtThread>() : nullptr;
+
+    const auto start = pal::now_ns();
+    const auto duration = timeout_ms == 0xFFFFFFFFu
+        ? pal::MonotonicNs(-1)
+        : static_cast<pal::MonotonicNs>(timeout_ms) * 1'000'000LL;
+    const auto deadline = duration < 0 || duration > INT64_MAX - start
+        ? INT64_MAX : start + duration;
+
+    for (;;) {
+        if (runtime_thread != nullptr) {
+            if (!runtime_thread->suspension_point() ||
+                runtime_thread->stop_requested())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "wait-all cancelled by guest thread stop");
+        }
+
+        bool abandoned = false;
+        std::vector<std::size_t> acquired;
+        acquired.reserve(objects.size());
+        RuntimeErrc failure = RuntimeErrc::Timeout;
+        std::string failure_context = "wait-all candidate is not ready";
+        {
+            // This lock also guards single-object guest waits and signal/
+            // release/close operations. Therefore no other guest operation
+            // can consume a resource between this set's probes and rollback.
+            std::lock_guard transaction(sync_transaction_lock_);
+            for (std::size_t i = 0; i < objects.size(); ++i) {
+                auto* value = objects[i].get();
+                Result<void> event_result(RuntimeErrc::ObjectTypeMismatch,
+                                          "unsupported wait-all object");
+                bool ready = false;
+                if (auto* event = value->as<RtEvent>()) {
+                    event_result = event->wait_ns(0);
+                    ready = event_result.ok();
+                } else if (auto* mutex = value->as<RtGuestMutex>()) {
+                    auto result = mutex->acquire(tid, 0);
+                    if (result.ok()) {
+                        ready = true;
+                        abandoned = abandoned || result.value();
+                    } else {
+                        failure = result.errc();
+                        failure_context = result.context();
+                    }
+                } else if (auto* semaphore = value->as<RtGuestSemaphore>()) {
+                    event_result = semaphore->try_acquire();
+                    ready = event_result.ok();
+                }
+                if (ready) {
+                    acquired.push_back(i);
+                    continue;
+                }
+                if (failure == RuntimeErrc::Timeout) {
+                    if (auto* event = value->as<RtEvent>()) {
+                        (void)event;
+                    } else if (auto* semaphore = value->as<RtGuestSemaphore>()) {
+                        (void)semaphore;
+                    }
+                    if (!event_result.ok() &&
+                        event_result.errc() != RuntimeErrc::ObjectTypeMismatch) {
+                        failure = event_result.errc();
+                        failure_context = event_result.context();
+                    }
+                }
+                break;
+            }
+
+            if (acquired.size() == objects.size())
+                return Result<std::uint32_t>(abandoned ? 0x80u : 0u);
+
+            // Roll back every successful acquisition before releasing the
+            // transaction lock. Auto-reset event signals are restored.
+            for (auto it = acquired.rbegin(); it != acquired.rend(); ++it) {
+                auto* value = objects[*it].get();
+                if (auto* event = value->as<RtEvent>()) {
+                    if (event->auto_reset()) (void)event->set();
+                } else if (auto* mutex = value->as<RtGuestMutex>()) {
+                    (void)mutex->release(tid);
+                } else if (auto* semaphore = value->as<RtGuestSemaphore>()) {
+                    (void)semaphore->release(1);
+                }
+            }
+        }
+
+        if (failure != RuntimeErrc::Timeout)
+            return Result<std::uint32_t>(failure, failure_context);
+        const auto now = pal::now_ns();
+        if (deadline != INT64_MAX && now >= deadline)
+            return Result<std::uint32_t>(0x102u);
+        const auto sleep_ns = deadline == INT64_MAX
+            ? pal::MonotonicNs(2'000'000)
+            : std::min<pal::MonotonicNs>(2'000'000, deadline - now);
+        if (sleep_ns > 0)
+            std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+    }
+}
+
 Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
                                                       std::uint64_t handle,
                                                       std::uint32_t timeout_ms) {
@@ -1462,6 +1618,7 @@ Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
 }
 
 Result<void> GameRuntimeService::close_sync_handle(std::uint64_t pid, std::uint64_t handle) {
+    std::lock_guard transaction(sync_transaction_lock_);
     auto object = lookup_sync_object(pid, handle);
     if (!object.ok()) return Result<void>(object.errc(), object.context());
     auto process = process_manager_.find_process_by_pid(pid);
