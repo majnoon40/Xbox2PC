@@ -574,7 +574,7 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     event_module.module_name = "event-test.exe";
     event_module.is_valid_pe = true;
     ASSERT_TRUE(w.pm.initialize_process(w.last_handle, event_module,
-                                        xbox2pc::xbox2pc::xbox2pc::rt::RuntimeConfig{}).ok());
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     ApiContext c; c.process_id=pid.value(); c.arg_count=4;
     c.args[0]=0; c.args[1]=1; c.args[2]=0; c.args[3]=0;
@@ -634,7 +634,7 @@ TEST(GdkServiceTest, ProcessTerminationCancelsBlockedGuestSyncWait) {
     (void)w.new_process("cancel-wait.exe");
     const auto pid = w.pm.resolve_pid(w.last_handle);
     ASSERT_TRUE(pid.ok());
-    xbox2pc::xbox2pc::rt::ModuleDescriptor module;
+    xbox2pc::rt::ModuleDescriptor module;
     module.module_name = "cancel-wait.exe";
     module.is_valid_pe = true;
     ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
@@ -1001,7 +1001,7 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
     xbox2pc::rt::ModuleDescriptor module;
     module.module_name = "task-queue-process-exit.exe";
     module.is_valid_pe = true;
-    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, xbox2pc::rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     const auto pid_result = w.pm.resolve_pid(w.last_handle);
     ASSERT_TRUE(pid_result.ok());
