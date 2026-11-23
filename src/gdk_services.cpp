@@ -1043,48 +1043,50 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
         (allocation_type != kReserve && allocation_type != kCommit &&
          allocation_type != (kReserve | kCommit)))
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
-            "VirtualAlloc supports MEM_RESERVE, MEM_COMMIT on an exact reserved region, and MEM_RESERVE|MEM_COMMIT");
+            "VirtualAlloc supports MEM_RESERVE, MEM_COMMIT, and MEM_RESERVE|MEM_COMMIT");
     auto decoded = decode_win32_page_protection(protection);
     if (!decoded.ok()) return Result<std::uint64_t>(decoded.errc(), decoded.context());
-    // Enforce W^X before changing reservation or commit state. This applies
-    // equally to MEM_COMMIT and MEM_RESERVE|MEM_COMMIT; otherwise the combined
-    // form could bypass the policy used by the separate reserve/commit paths.
     if (decoded.value() == MemProtect::Full &&
-        !process_manager_.limits().allow_wx_pages) {
+        !process_manager_.limits().allow_wx_pages)
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "RWX protection requires allow_wx_pages");
-    }
+    const auto snapshot = memory_query_snapshot(pid);
+    if (!snapshot.ok()) return Result<std::uint64_t>(snapshot.errc(), snapshot.context());
+    const auto page = snapshot.value().page_size;
+    if (page == 0 || size > (~0ull) - (page - 1))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "VirtualAlloc size overflows page rounding");
+    const auto aligned_size = ((size + page - 1) / page) * page;
+    const auto page_address = address == 0 ? 0 : address - (address % page);
     if (allocation_type == kCommit) {
-        if (address == 0)
+        if (page_address == 0)
             return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                          "MEM_COMMIT requires an existing guest reservation address");
-        auto committed = process_manager_.commit_region_by_pid(pid, address, size);
+        auto committed = process_manager_.commit_region_by_pid(
+            pid, page_address, aligned_size);
         if (!committed.ok()) return Result<std::uint64_t>(committed.errc(), committed.context());
-        auto changed = process_manager_.protect_region_by_pid(pid, address, size, decoded.value());
+        auto changed = process_manager_.protect_region_by_pid(
+            pid, page_address, aligned_size, decoded.value());
         if (!changed.ok()) {
-            (void)process_manager_.decommit_region_by_pid(pid, address, size);
+            (void)process_manager_.decommit_region_by_pid(pid, page_address, aligned_size);
             return Result<std::uint64_t>(changed.errc(), changed.context());
         }
-        return Result<std::uint64_t>(address);
+        return Result<std::uint64_t>(page_address);
     }
     Result<std::uint64_t> reserved =
         Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                               "reservation was not attempted");
     if (address != 0) {
-        // Windows reserves at allocation-granularity boundaries (64 KiB),
-        // while commit operations are page-granular. Round the requested
-        // reserve address down before asking the address-space manager.
         constexpr std::uint64_t kAllocationGranularity = 0x10000ull;
         const std::uint64_t allocation_base =
             address & ~(kAllocationGranularity - 1);
-        if (allocation_base == 0) {
+        if (allocation_base == 0)
             return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                          "fixed reservation rounded to null");
-        }
         reserved = process_manager_.reserve_region_at_by_pid(
-            pid, allocation_base, size, "VirtualAlloc");
+            pid, allocation_base, aligned_size, "VirtualAlloc");
     } else {
-        reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
+        reserved = process_manager_.reserve_region_by_pid(pid, aligned_size, "VirtualAlloc");
     }
     if (!reserved.ok()) return reserved;
     auto allocation_protection = process_manager_.set_allocation_protection_by_pid(
@@ -1093,15 +1095,15 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
         (void)process_manager_.release_region_by_pid(pid, reserved.value());
         return Result<std::uint64_t>(allocation_protection.errc(), allocation_protection.context());
     }
-    if (allocation_type == kReserve) {
-        return reserved;
-    }
-    auto committed = process_manager_.commit_region_by_pid(pid, reserved.value(), size);
+    if (allocation_type == kReserve) return reserved;
+    auto committed = process_manager_.commit_region_by_pid(
+        pid, reserved.value(), aligned_size);
     if (!committed.ok()) {
         (void)process_manager_.release_region_by_pid(pid, reserved.value());
         return Result<std::uint64_t>(committed.errc(), committed.context());
     }
-    auto changed = process_manager_.protect_region_by_pid(pid, reserved.value(), size, decoded.value());
+    auto changed = process_manager_.protect_region_by_pid(
+        pid, reserved.value(), aligned_size, decoded.value());
     if (!changed.ok()) {
         (void)process_manager_.release_region_by_pid(pid, reserved.value());
         return Result<std::uint64_t>(changed.errc(), changed.context());
@@ -1115,10 +1117,18 @@ Result<void> GameRuntimeService::virtual_free(
         return Result<void>(RuntimeErrc::InvalidArgument, "VirtualFree requires a non-null guest address");
     if (free_type == 0x8000u && size == 0)
         return process_manager_.release_region_by_pid(pid, address);
-    if (free_type == 0x4000u && size != 0)
-        return process_manager_.decommit_region_by_pid(pid, address, size);
+    if (free_type == 0x4000u && size != 0) {
+        const auto snapshot = memory_query_snapshot(pid);
+        if (!snapshot.ok()) return Result<void>(snapshot.errc(), snapshot.context());
+        const auto page = snapshot.value().page_size;
+        if (page == 0 || size > (~0ull) - (page - 1))
+            return Result<void>(RuntimeErrc::InvalidArgument, "VirtualFree size overflows page rounding");
+        const auto start = address - (address % page);
+        const auto aligned = ((size + page - 1) / page) * page;
+        return process_manager_.decommit_region_by_pid(pid, start, aligned);
+    }
     return Result<void>(RuntimeErrc::InvalidArgument,
-        "VirtualFree supports MEM_RELEASE with size zero or whole-region MEM_DECOMMIT");
+        "VirtualFree supports MEM_RELEASE with size zero or page-range MEM_DECOMMIT");
 }
 
 Result<MemProtect> GameRuntimeService::virtual_protect(
@@ -1127,7 +1137,15 @@ Result<MemProtect> GameRuntimeService::virtual_protect(
         return Result<MemProtect>(RuntimeErrc::InvalidArgument, "VirtualProtect requires a non-null guest address");
     auto decoded = decode_win32_page_protection(protection);
     if (!decoded.ok()) return decoded;
-    return process_manager_.protect_region_by_pid(pid, address, size, decoded.value());
+    const auto snapshot = memory_query_snapshot(pid);
+    if (!snapshot.ok()) return Result<MemProtect>(snapshot.errc(), snapshot.context());
+    const auto page = snapshot.value().page_size;
+    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument,
+                                  "VirtualProtect size overflows page rounding");
+    const auto start = address - (address % page);
+    const auto aligned = ((size + page - 1) / page) * page;
+    return process_manager_.protect_region_by_pid(pid, start, aligned, decoded.value());
 }
 
 Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,
