@@ -649,25 +649,47 @@ Result<void> ProcessManager::set_allocation_protection_by_pid(
 }
 
 Result<void> ProcessManager::commit_region_by_pid(
-    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size,
+    MemProtect protection) {
     auto found = find_process_by_pid(pid);
     if (!found.ok()) return Result<void>(found.errc(), found.context());
     auto* proc = found.value().get()->as<ManagedProcess>();
     if (proc == nullptr || proc->state() != ProcessState::Running)
         return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
     std::lock_guard lock(lock_);
+    if (protection == MemProtect::Full && !limits_.allow_wx_pages)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "RWX protection requires allow_wx_pages");
     const auto page = proc->address_space().page_size();
     if (size == 0 || page == 0 || xbox_va % page != 0 ||
         size > (~0ull) - (page - 1))
         return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest commit range");
     const auto aligned = ((size + page - 1) / page) * page;
+    if (xbox_va > (~0ull) - aligned)
+        return Result<void>(RuntimeErrc::InvalidArgument, "guest commit range overflows");
     const auto region = proc->address_space().find_containing(xbox_va);
     if (!region.ok()) return Result<void>(region.errc(), region.context());
-    if (xbox_va > (~0ull) - aligned ||
-        region.value().allocation_base == 0 ||
-        xbox_va < region.value().allocation_base)
+    const auto allocation = region.value().allocation_base;
+    if (allocation == 0 || xbox_va < allocation)
         return Result<void>(RuntimeErrc::InvalidArgument, "commit range is outside its reservation");
-    if (limits_.max_committed_bytes_total != 0) {
+
+    std::uint64_t newly_committed = 0;
+    const auto range_end = xbox_va + aligned;
+    for (const auto& segment : proc->address_space().list_regions()) {
+        const auto segment_end = segment.xbox_va + segment.size;
+        if (segment_end <= xbox_va || segment.xbox_va >= range_end) continue;
+        if (segment.allocation_base != allocation)
+            return Result<void>(RuntimeErrc::InvalidState,
+                                "commit range crosses reservation boundaries");
+        if (segment.state == RegionState::Reserved) {
+            const auto begin = std::max(xbox_va, segment.xbox_va);
+            const auto finish = std::min(range_end, segment_end);
+            const auto bytes = finish - begin;
+            newly_committed = bytes > (~0ull) - newly_committed
+                ? ~0ull : newly_committed + bytes;
+        }
+    }
+    if (limits_.max_committed_bytes_total != 0 && newly_committed != 0) {
         std::uint64_t total = 0;
         for (const auto& [other_pid, id] : pid_to_object_id_) {
             (void)other_pid;
@@ -679,10 +701,10 @@ Result<void> ProcessManager::commit_region_by_pid(
             total = used > (~0ull) - total ? ~0ull : total + used;
         }
         if (total > limits_.max_committed_bytes_total ||
-            aligned > limits_.max_committed_bytes_total - total)
+            newly_committed > limits_.max_committed_bytes_total - total)
             return Result<void>(RuntimeErrc::OutOfResources, "global committed-bytes limit");
     }
-    return proc->address_space().commit_range(xbox_va, aligned);
+    return proc->address_space().commit_range(xbox_va, aligned, protection);
 }
 
 Result<void> ProcessManager::decommit_region_by_pid(
