@@ -1158,8 +1158,10 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     EXPECT_EQ(canceled.return_value, 1u);
     EXPECT_EQ(seen_context, 0x87654321u);
     EXPECT_TRUE(seen_canceled);
-    EXPECT_FALSE(w.tq->submit_callback(
-        pid.value(), queue.value(), XTaskQueuePort::Work, 1, 0x140001000).ok());
+    const auto rejected = w.reg.dispatch("xgameruntime",
+                                          "XTaskQueueSubmitCallback", submit);
+    ASSERT_TRUE(rejected.ok) << rejected.error;
+    EXPECT_EQ(rejected.return_value, kEAbort);
     EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
 }
 
