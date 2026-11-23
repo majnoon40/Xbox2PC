@@ -83,6 +83,7 @@ public:
     struct Info {
         std::uint64_t process_id = 0;
         std::uint64_t thread_id = 0;
+        std::uint32_t tls_index = 0;
         std::uint64_t stack_top = 0;
         std::uint64_t stack_size = 0;
         std::uint64_t entry_va = 0;
