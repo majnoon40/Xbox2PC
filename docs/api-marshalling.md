@@ -10,9 +10,17 @@
    payloads through guest memory,
 5. return control at the guest return address.
 
-`plan_for_descriptor` builds marshalling plans ONLY from the 16
-documented M7 signatures (register/stack/out-buffer layout per
-signature); any other API is a typed `NotFound` — layouts are never
-guessed. No host function pointers are exposed to guest code; nested
-dispatch depth is capped. Tests cover integer/pointer/out-buffer/
-error/invalid-pointer/depth paths.
+`plan_for_descriptor` builds marshalling plans only from an explicit
+per-export signature whitelist. It covers the documented M7 signatures
+plus M10 process/thread identity, partial `VirtualQuery`, and the
+supported Win32 event/mutex/semaphore calls. Every entry defines its
+register/stack and pointer/out-buffer layout; any API outside the
+whitelist returns typed `NotFound` — layouts are never guessed.
+
+M10 synchronization marshalling covers `CreateEventW`, `SetEvent`,
+`ResetEvent`, `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`,
+`ReleaseSemaphore` (null previous-count pointer subset),
+`WaitForSingleObject`, and synchronization-handle `CloseHandle`.
+No host function pointers are exposed to guest code; nested dispatch
+depth is capped. Tests cover integer/pointer/out-buffer/error/
+invalid-pointer/depth paths.

@@ -558,7 +558,7 @@ TEST(BridgeTest, PlanForDescriptorsAndErrors) {
     ExecWorld w;
     for (const auto* d : w.reg.all()) {
         auto p = plan_for_descriptor(*d);
-        // All 16 built-ins have documented plans.
+        // Every descriptor has an explicit plan or is rejected by the whitelist.
         ASSERT_TRUE(p.ok()) << d->export_name << ": " << p.error_string();
         EXPECT_TRUE(rt::abi::validate_call(p.value().call).ok());
     }

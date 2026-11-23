@@ -451,7 +451,7 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     plan.library = d.library;
     plan.export_name = d.export_name;
     // Plan the call from the DOCUMENTED signature (param kinds follow
-    // the signature's parameter types for the 16 built-in APIs; any
+    // the signature's parameter types for the explicitly whitelisted APIs; any
     // other API yields a typed error — never guessed).
     //
     // Built-in signatures and their marshalling kinds:
