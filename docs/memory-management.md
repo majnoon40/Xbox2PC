@@ -159,7 +159,7 @@ Address-space regions retain a memory type independently from their state and pa
 
 - `VirtualAlloc(MEM_COMMIT)` commits page-rounded ranges inside one existing reservation. The address is rounded down to the containing page and the size is rounded up.
 - `VirtualFree(MEM_DECOMMIT)` decommits a page range while retaining the reservation. The address must be page-aligned and the size is rounded up.
-- `VirtualProtect` applies protection to the page range containing the requested address; the prior protection reported is the protection of the first page.
+- `VirtualProtect` rounds the start down to its containing page and rounds up the complete byte span (`address offset + size`), so an unaligned range crossing a page boundary affects both pages; the prior protection reported is that of the first page.
 - Range metadata is split at boundaries. Every segment retains the original allocation base, and `MEM_RELEASE` is accepted only at that original base and releases all segments.
 - A range may not cross reservation boundaries or include pages in an incompatible state. Partial operations are validated before host mapping changes.
 - Linux decommit marks the range PROT_NONE and uses MADV_DONTNEED to discard anonymous backing pages. The PAL currently exposes this operation for the Linux host backend only.
