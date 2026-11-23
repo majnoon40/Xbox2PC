@@ -1227,6 +1227,44 @@ TEST(EngineTest, SingleStepWalks) {
 
 // ── context lifecycle ────────────────────────────────────────────────────
 
+TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
+    ExecWorld w;
+    const std::vector<std::uint8_t> code{0xC3};
+    LoadedGuest guest(w, code, "import-map.exe", true);
+    ASSERT_TRUE(guest.load_ok) << guest.load_error;
+
+    auto loaded_ref = w.core.objects().lookup_handle(guest.image);
+    ASSERT_TRUE(loaded_ref.ok());
+    auto* loaded = loaded_ref.value().get()->as<loader::LoadedImageObject>();
+    ASSERT_NE(loaded, nullptr);
+    ASSERT_EQ(loaded->diagnostics().imports.size(), 1u);
+    ASSERT_EQ(loaded->diagnostics().imports[0].status, loader::ImportStatus::Resolved);
+
+    const auto pid = w.pm.resolve_pid(guest.ph);
+    ASSERT_TRUE(pid.ok());
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    ExecutionContext context(pid.value(), 0x92, guest.proc->address_space(),
+                             w.reg, config.value(), "import-map-context");
+    ASSERT_TRUE(context.initialize().ok());
+
+    rt::abi::CallSpec spec;
+    spec.ret = rt::abi::CallSpec::ReturnKind::Int;
+    auto request = context.prepare_entry(*loaded, 0, {}, spec);
+    ASSERT_TRUE(request.ok()) << request.error_string();
+    ASSERT_EQ(request.value().api_bindings.size(), 1u);
+    ASSERT_EQ(request.value().api_binding_values.size(), 1u);
+    EXPECT_EQ(request.value().api_bindings[0].value,
+              loaded->diagnostics().imports[0].value);
+    EXPECT_EQ(request.value().api_bindings[0].library, "xgameruntime");
+    EXPECT_EQ(request.value().api_bindings[0].export_name, "XGameRuntimeInitialize");
+    EXPECT_TRUE(is_api_binding(request.value().api_bindings[0].value));
+
+    (void)context.destroy();
+    (void)guest.loader.unload_image(w.pm, w.core.objects(), guest.ph, guest.image);
+    (void)w.pm.terminate_process(guest.ph, 0);
+}
+
 TEST(ContextTest, LifecycleTransitionsAndCleanup) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("lc.exe");
