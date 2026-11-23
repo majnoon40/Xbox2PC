@@ -909,6 +909,14 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
             return b;
         }
     }
+    // Two 64-KiB synthetic ranges are reserved for GDK and Win32
+    // imports. Keep the completion sentinel out of the GDK range and
+    // reject exhaustion rather than creating an address collision.
+    if (next_id_ > 0xFFFEull) {
+        b.status = loader::ImportStatus::Unsupported;
+        b.note = "per-image API binding address space exhausted";
+        return b;
+    }
     // Bind: synthetic dispatch address = implementation ticket.
     b.status = loader::ImportStatus::Resolved;
     b.value = (d->category == registry::ApiCategory::XboxGdk ? 0x51000000ull : 0x51010000ull) +
