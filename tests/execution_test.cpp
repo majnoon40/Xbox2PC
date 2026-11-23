@@ -918,6 +918,10 @@ struct LoadedGuest {
     loader::LoadDiagnostics diagnostics;
     bool parsed_imports_present = false;
     std::size_t parsed_import_count = 0;
+    std::size_t parsed_import_function_count = 0;
+    std::size_t parsed_import_ordinal_count = 0;
+    std::uint32_t parsed_import_int_rva = 0;
+    std::uint32_t parsed_import_iat_rva = 0;
     std::uint32_t parsed_import_directory_size = 0;
     std::vector<std::uint8_t> bytes;
     std::vector<std::uint8_t> original_bytes;
@@ -944,6 +948,12 @@ struct LoadedGuest {
         auto img = pe::parse(bytes.data(), bytes.size(), name, pd);
         parsed_imports_present = img.imports.present;
         parsed_import_count = img.imports.entries.size();
+        if (!img.imports.entries.empty()) {
+            parsed_import_function_count = img.imports.entries.front().functions.size();
+            parsed_import_ordinal_count = img.imports.entries.front().ordinal_only.size();
+            parsed_import_int_rva = img.imports.entries.front().int_rva;
+            parsed_import_iat_rva = img.imports.entries.front().iat_rva;
+        }
         parsed_import_directory_size = img.directories.size() > pe::kDirImport
             ? img.directories[pe::kDirImport].size : 0;
         auto h = loader.load_image(w.pm, w.core.objects(), ph, img,
@@ -1644,6 +1654,11 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
         << "fixture parse before load did not recognize import directory";
     ASSERT_EQ(guest.parsed_import_count, 1u)
         << "fixture parse before load import entry count";
+    ASSERT_EQ(guest.parsed_import_function_count, 1u)
+        << "fixture parse before load function count; ordinal count="
+        << guest.parsed_import_ordinal_count << ", INT RVA="
+        << guest.parsed_import_int_rva << ", IAT RVA="
+        << guest.parsed_import_iat_rva;
     ASSERT_NE(guest.parsed_import_directory_size, 0u);
     ASSERT_EQ(guest.diagnostics.imports.size(), 1u)
         << "loader diagnostic imports; resolved count="
