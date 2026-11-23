@@ -2120,6 +2120,39 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     EXPECT_EQ(st.committed_bytes, 0u);
 }
 
+TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
+    ExecWorld world;
+    auto [process_handle, process] = world.new_process("managed-thread-context.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = world.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid.ok());
+
+    RtThread managed_thread(
+        [](RtThread&, void*) -> void* { return nullptr; }, nullptr,
+        "managed-guest-thread", pid.value());
+    auto cfg = ExecutionConfig::default_validated();
+    ASSERT_TRUE(cfg.ok());
+
+    ExecutionContext context(managed_thread, process->address_space(),
+                             world.reg, cfg.value(), "managed-context");
+    ASSERT_TRUE(context.initialize().ok());
+    EXPECT_EQ(context.info().process_id, pid.value());
+    EXPECT_EQ(context.info().thread_id, managed_thread.thread_id());
+    EXPECT_EQ(context.execution_control(), managed_thread.execution_control());
+
+    ExecutionRequest request;
+    request.stack_top_va = context.info().stack_top;
+    request.stack_size = context.info().stack_size;
+    ContextBindingProbe engine;
+    std::atomic<bool> interrupted{false};
+    const auto result = context.invoke(request, engine, interrupted);
+    ASSERT_TRUE(result.ok()) << result.error_string();
+    EXPECT_EQ(engine.bound_pid, pid.value());
+    EXPECT_EQ(engine.bound_tid, managed_thread.thread_id());
+    EXPECT_EQ(engine.bound_space, &process->address_space());
+    EXPECT_TRUE(context.destroy().ok());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
