@@ -129,6 +129,31 @@ TEST_F(X86SemanticsTest, SubRegisterMergeRules) {
 
 // ── ADD / ADC / SUB / SBB / CMP flags ───────────────────────────────────────
 
+TEST_F(X86SemanticsTest, Add64CarryAndAdcCarryIn) {
+    cpu().set_reg(Gpr::Rax, ~0ull);
+    cpu().rip = code_at(0, {0x48, 0x05, 0x01, 0x00, 0x00, 0x00});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0u);
+    EXPECT_TRUE(cf());
+    cpu().set_reg(Gpr::Rax, ~0ull);
+    cpu().set_flag(rt::cpu::kFlagCF, true);
+    cpu().rip = code_at(16, {0x48, 0x15, 0x00, 0x00, 0x00, 0x00});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0u);
+    EXPECT_TRUE(cf());
+}
+
+TEST_F(X86SemanticsTest, ByteMulWithRexDoesNotClobberRsp) {
+    cpu().set_reg(Gpr::Rax, 0x12);
+    cpu().set_reg(Gpr::Rcx, 0x34);
+    cpu().set_reg(Gpr::Sp, 0x1122334455667788ull);
+    const auto rsp = cpu().reg(Gpr::Sp);
+    cpu().rip = code_at(0, {0x40, 0xF6, 0xE1});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax) & 0xFFFFu, 0x03A8u);
+    EXPECT_EQ(cpu().reg(Gpr::Sp), rsp);
+}
+
 TEST_F(X86SemanticsTest, AddAndCarryFlags) {
     // 8-bit ADD 0xF0 + 0x20: carry, AF, not zero, SF set, OF clear.
     cpu().reset();
@@ -422,6 +447,17 @@ TEST_F(X86SemanticsTest, WriteToReadOnlyFaults) {
 }
 
 // ── MUL/DIV families ────────────────────────────────────────────────────────
+
+TEST_F(X86SemanticsTest, Div64HandlesRemainderHighBit) {
+    // (2^127) / (2^63 + 1) = 2^64 - 2, remainder 2.
+    cpu().set_reg(Gpr::Rdx, 0x8000000000000000ull);
+    cpu().set_reg(Gpr::Rax, 0);
+    cpu().set_reg(Gpr::Rbx, 0x8000000000000001ull);
+    cpu().rip = code_at(0, {0x48, 0xF7, 0xF3});
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0xFFFFFFFFFFFFFFFEull);
+    EXPECT_EQ(cpu().reg(Gpr::Rdx), 2u);
+}
 
 TEST_F(X86SemanticsTest, MulUnsigned) {
     // 8-bit MUL: AX = AL * r/m8.
