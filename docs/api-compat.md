@@ -74,6 +74,7 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XTaskQueueTerminate | `HRESULT ...(queue, bool, void*, cb*)` | partially-implemented |
 | XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | unsupported implementation |
 | XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
+| XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | unsupported implementation |
 | WaitForMultipleObjects | `DWORD ...(count, HANDLE*, waitAll, timeout)` | partially-implemented (wait-any only) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
@@ -273,7 +274,7 @@ mirrored).
 
 ## Known limitations
 
-- 34 built-in API descriptors are cataloged, including partially implemented and explicitly unsupported imports; the GDK surface is far larger (users, achievements,
+- 35 built-in API descriptors are cataloged, including partially implemented and explicitly unsupported imports; the GDK surface is far larger (users, achievements,
   multiplayer, storage, input, networking, graphics, audio stay
   unsupported/unknown — deliberately, without fabrication).
 - No verified ordinals (nothing ships one).
