@@ -132,6 +132,11 @@ public:
     Result<std::uint32_t> wait_objects_any(std::uint64_t process_id, std::uint64_t thread_id,
                                            const std::vector<std::uint64_t>& handles,
                                            std::uint32_t timeout_ms);
+    // Wait-all over 1..64 handles. Acquisitions are serialized and rolled back
+    // as a unit when any candidate is unavailable or the deadline expires.
+    Result<std::uint32_t> wait_objects_all(std::uint64_t process_id, std::uint64_t thread_id,
+                                           const std::vector<std::uint64_t>& handles,
+                                           std::uint32_t timeout_ms);
     Result<std::uint32_t> wait_event(std::uint64_t process_id, std::uint64_t handle, std::uint32_t timeout_ms);
     Result<void> close_sync_handle(std::uint64_t process_id, std::uint64_t handle);
     Result<void> close_event(std::uint64_t process_id, std::uint64_t handle);
@@ -150,6 +155,9 @@ private:
     ProcessManager& process_manager_;
     std::uint64_t process_exit_observer_id_ = 0;
     mutable std::mutex state_lock_;
+    // Serializes guest-visible wait probes/signals so wait-all can acquire
+    // multiple auto-reset events, mutexes, and semaphores transactionally.
+    mutable std::mutex sync_transaction_lock_;
     std::map<std::uint64_t, ProcState> procs_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
     // Active event handles map to ObjectManager object IDs. Closed objects
