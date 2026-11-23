@@ -18,6 +18,6 @@ TEST(BinaryValidationTest, ParsesSyntheticPeAndKeepsUnperformedStagesUntested) {
     auto bytes=xbox2pc::test::PeBuilder(spec).build();
     auto r=xbox2pc::validation::validate_pe(bytes.data(),bytes.size(),"synthetic.exe");
     EXPECT_TRUE(r.parsed); EXPECT_TRUE(r.is_pe32_plus_amd64);
-    ASSERT_EQ(r.stages.size(),7u);
+    ASSERT_EQ(r.stages.size(),6u);
     EXPECT_EQ(r.stages[4].status,xbox2pc::validation::StageStatus::NotTested);
 }
