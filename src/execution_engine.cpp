@@ -481,7 +481,7 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
         const auto executable = mem.validate(args.value()[3].ptr_va, 1, false, true);
         if (!executable.ok()) {
             return Ret(RuntimeErrc::NotFound,
-                       "task-queue callback is not executable guest memory: " +
+                       std::string("task-queue callback is not executable guest memory: ") +
                            guest::guest_mem_errc_to_name(executable.err));
         }
     }
