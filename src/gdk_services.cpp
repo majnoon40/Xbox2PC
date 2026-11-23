@@ -1842,10 +1842,6 @@ Result<bool> TaskQueueService::dispatch(
                             "task queue handle belongs to another process");
     if (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion)
         return Result<bool>(RuntimeErrc::InvalidArgument, "unknown XTaskQueuePort value");
-    if (!invoke_callback)
-        return Result<bool>(RuntimeErrc::InvalidState,
-                            "manual guest callback dispatch requires an execution backend");
-
     auto& callbacks = port == XTaskQueuePort::Work
         ? queue->work_callbacks : queue->completion_callbacks;
     const auto ready = [&] {
@@ -1862,6 +1858,9 @@ Result<bool> TaskQueueService::dispatch(
     }
     if (callbacks.empty()) return Result<bool>(false);
 
+    if (!invoke_callback)
+        return Result<bool>(RuntimeErrc::InvalidState,
+                            "manual guest callback dispatch requires an execution backend");
     auto callback = callbacks.front();
     callbacks.pop_front();
     ++queue->active_callbacks;
@@ -1940,8 +1939,8 @@ void TaskQueueService::release_process(std::uint64_t process_id) {
     for (auto& entry : queues_) {
         if (entry.second->owner_process_id == process_id) {
             entry.second->terminated = true;
-            for (auto& callback : entry.second->work_callbacks) callback.canceled = true;
-            for (auto& callback : entry.second->completion_callbacks) callback.canceled = true;
+            entry.second->work_callbacks.clear();
+            entry.second->completion_callbacks.clear();
         }
     }
     for (auto it = queues_.begin(); it != queues_.end();) {
