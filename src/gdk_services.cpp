@@ -1820,11 +1820,13 @@ Result<void> TaskQueueService::submit_callback(
     if (queue->terminated)
         return Result<void>(RuntimeErrc::ProcessTerminated,
                             "cannot submit callbacks to a terminated queue");
-    Queue::Callback callback{callback_context, callback_va, false};
-    if (port == XTaskQueuePort::Work)
-        queue->work_callbacks.push_back(callback);
-    else
-        queue->completion_callbacks.push_back(callback);
+    auto& callbacks = port == XTaskQueuePort::Work
+        ? queue->work_callbacks : queue->completion_callbacks;
+    constexpr std::size_t kMaxPendingCallbacksPerPort = 4096;
+    if (callbacks.size() >= kMaxPendingCallbacksPerPort)
+        return Result<void>(RuntimeErrc::OutOfResources,
+                            "manual task queue callback limit reached");
+    callbacks.push_back(Queue::Callback{callback_context, callback_va, false});
     queue_cv_.notify_all();
     return Result<void>::ok_result();
 }
@@ -1957,8 +1959,9 @@ void TaskQueueService::release_process(std::uint64_t process_id) {
 std::size_t TaskQueueService::live_queues() const {
     std::lock_guard lock(lock_);
     std::unordered_set<const Queue*> unique;
-    unique.reserve(queues_.size());
+    unique.reserve(queues_.size() + retired_queues_.size());
     for (const auto& entry : queues_) unique.insert(entry.second.get());
+    for (const auto& queue : retired_queues_) unique.insert(queue.get());
     return unique.size();
 }
 
