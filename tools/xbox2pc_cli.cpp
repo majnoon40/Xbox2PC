@@ -169,9 +169,9 @@ void print_report(const PeImage& img, const Diagnostics& diags) {
     std::printf("linker:        %u.%u\n", img.opt.major_linker_version,
                 img.opt.minor_linker_version);
     std::printf("dll_characteristics: 0x%04X\n", img.opt.dll_characteristics);
-    if (img.coff.characteristics & 0x0002) std::printf("image_type:    DLL\n");
-    else if (img.coff.characteristics & 0x0001) std::printf("image_type:    object\n");
-    else std::printf("image_type:    executable\n");
+    if (img.coff.characteristics & 0x2000) std::printf("image_type:    DLL\n");
+    else if (img.coff.characteristics & 0x0002) std::printf("image_type:    executable\n");
+    else std::printf("image_type:    object\n");
 
     std::printf("\nsections (%u):\n", static_cast<unsigned>(img.sections.size()));
     std::printf("  %-8s %-10s %-10s %-10s %-10s\n", "name", "vsize", "vaddr", "rawsz", "raw@");

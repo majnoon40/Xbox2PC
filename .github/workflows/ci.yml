@@ -188,7 +188,9 @@ jobs:
               path = Path("samples/m11/golden") / f"{name}.validate-pe.json"
               report = json.loads(path.read_text())
               assert report["valid"], f"{name} rejected: {report.get('issues')}"
-              print(f"{name}: PE validation passed")
+              inspect = (Path("samples/m11/golden") / f"{name}.inspect.txt").read_text()
+              assert "image_type:    executable" in inspect, f"{name} misclassified by inspect"
+              print(f"{name}: PE validation and executable classification passed")
           PY
 
       - name: Upload PE fixtures, hashes, and golden outputs
