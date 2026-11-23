@@ -51,7 +51,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 
 ## Validation boundary
 
-The M10 tests cover the implemented event, mutex, and semaphore slices, including service-level wait-any consumption and abandoned-mutex results. They do not establish scheduler-aware guest blocking or full wait-all semantics. Those remain M10 work; no unsupported behavior should be marked implemented in the compatibility report.
+The M10 tests cover the implemented event, mutex, and semaphore slices, including wait-any selection and transactional wait-all rollback/abandonment. They do not establish scheduler-aware guest blocking or full Xbox kernel equivalence; no unsupported behavior should be marked implemented in the compatibility report.
 
 
 ## M10 virtual-memory API slice
@@ -74,7 +74,7 @@ VmRegion keeps allocation_protection independently from current protection. Win3
 
 - `WaitForMultipleObjects` is registered as partially implemented. The bridge reads a bounded 1–64 element `HANDLE` array from guest memory and passes the decoded handles to the process-scoped wait-any service.
 - `bWaitAll=FALSE` returns `WAIT_OBJECT_0 + index` or `WAIT_ABANDONED_0 + index` as applicable, and supports finite/infinite timeouts through the existing service.
-- `bWaitAll=TRUE` returns `WAIT_FAILED` with an explicit unsupported note. Correct wait-all atomic consumption/rollback semantics and scheduler-aware waits remain unimplemented.
+- `bWaitAll=TRUE` uses a serialized probe/rollback transaction across 1–64 unique process-owned event, guest-mutex, and guest-semaphore handles. A failed/expired attempt restores consumed auto-reset event signals, semaphore counts, and mutex ownership; an abandoned mutex remains abandoned if the overall wait fails. Successful wait-all retains acquired mutex ownership and returns `WAIT_ABANDONED_0` if any acquired mutex was abandoned. This remains host-thread polling, not scheduler-aware parking.
 
 
 ## Task-queue handle lifetime
@@ -107,3 +107,12 @@ MEM_COMMIT is idempotent across a mixed range of already-committed and
 reserved pages within one allocation. Existing committed pages retain their
 current protection; newly committed pages receive the requested protection.
 Global commit accounting charges only the newly committed pages.
+
+
+## Transactional guest wait-all continuation
+
+- The Win32 `WaitForMultipleObjects` bridge now supports `bWaitAll=TRUE` for 1–64 unique, process-owned event, guest-mutex, and guest-semaphore handles.
+- A service transaction mutex serializes guest wait probes with signal, release, and close operations. Wait-all probes every object without blocking while holding this gate; if any object is unavailable, it rolls back acquired resources before releasing the gate and retrying.
+- Auto-reset event signals consumed during an unsuccessful attempt are restored; semaphore tokens are returned; acquired mutexes are released. If a mutex was abandoned, rollback re-abandons it so a later successful wait can still report `WAIT_ABANDONED_0`.
+- On success, all semaphore/event state changes are committed and guest mutex ownership is retained by the calling guest thread. The result is `WAIT_OBJECT_0` or `WAIT_ABANDONED_0` when one or more mutexes were abandoned.
+- Wait-all remains bounded to 64 unique handles and uses 2 ms host-thread polling. It is not a scheduler-owned wait queue and does not establish complete Win32 synchronization fidelity.
