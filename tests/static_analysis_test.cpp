@@ -56,14 +56,14 @@ TEST(StaticAnalysisTest, MarksTruncatedExecutableTailUncertain) {
     // The builder aligns .text to 0x200 bytes. Shrink the first section's
     // SizeOfRawData field to one byte so the final file-backed byte is a
     // lone REX prefix. PE header is at 0x80, COFF at 0x84, optional header
-    // is 0xF0 bytes, so the first section header starts at 0x178 and its
-    // SizeOfRawData field is at 0x188.
+    // is 0xF0 bytes, so the first section header starts at 0x188 and its
+    // SizeOfRawData field is at 0x198.
     spec.text_payloads.push_back({0x1000, {0x48}});
     auto bytes = xbox2pc::test::PeBuilder(spec).build();
-    bytes[0x188] = 1;
-    bytes[0x189] = 0;
-    bytes[0x18A] = 0;
-    bytes[0x18B] = 0;
+    bytes[0x198] = 1;
+    bytes[0x199] = 0;
+    bytes[0x19A] = 0;
+    bytes[0x19B] = 0;
 
     const auto report =
         xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "truncated-tail.exe");
