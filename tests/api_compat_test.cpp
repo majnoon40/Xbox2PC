@@ -477,6 +477,7 @@ TEST(GdkServiceTest, LifecycleRefCountPerProcess) {
 TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     ApiWorld w; auto* p=w.new_process("event-api.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     ApiContext c; c.process_id=pid.value(); c.arg_count=4;
     c.args[0]=0; c.args[1]=1; c.args[2]=0; c.args[3]=0;
     const auto handles_before=p->handle_table().live_count();
@@ -531,6 +532,7 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
 TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
     ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     const auto objects_before=w.core.objects().object_count();
     auto h=w.grt->create_event(pid.value(),false,true); ASSERT_TRUE(h.ok());
     EXPECT_EQ(w.core.objects().object_count(),objects_before+1);
