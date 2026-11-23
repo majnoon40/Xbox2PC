@@ -1050,7 +1050,7 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
         !process_manager_.limits().allow_wx_pages)
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "RWX protection requires allow_wx_pages");
-    const auto snapshot = memory_query_snapshot(pid);
+    const auto snapshot = query_memory_snapshot(pid);
     if (!snapshot.ok()) return Result<std::uint64_t>(snapshot.errc(), snapshot.context());
     const auto page = snapshot.value().page_size;
     if (page == 0 || size > (~0ull) - (page - 1))
@@ -1114,7 +1114,7 @@ Result<void> GameRuntimeService::virtual_free(
     if (free_type == 0x8000u && size == 0)
         return process_manager_.release_region_by_pid(pid, address);
     if (free_type == 0x4000u && size != 0) {
-        const auto snapshot = memory_query_snapshot(pid);
+        const auto snapshot = query_memory_snapshot(pid);
         if (!snapshot.ok()) return Result<void>(snapshot.errc(), snapshot.context());
         const auto page = snapshot.value().page_size;
         if (page == 0 || size > (~0ull) - (page - 1))
@@ -1135,7 +1135,7 @@ Result<MemProtect> GameRuntimeService::virtual_protect(
         return Result<MemProtect>(RuntimeErrc::InvalidArgument, "VirtualProtect requires a non-null guest address");
     auto decoded = decode_win32_page_protection(protection);
     if (!decoded.ok()) return decoded;
-    const auto snapshot = memory_query_snapshot(pid);
+    const auto snapshot = query_memory_snapshot(pid);
     if (!snapshot.ok()) return Result<MemProtect>(snapshot.errc(), snapshot.context());
     const auto page = snapshot.value().page_size;
     if (size == 0 || page == 0)
