@@ -4,6 +4,7 @@
 #include "xbox2pc/execution_context.hpp"
 
 #include <cstring>
+#include <unordered_set>
 
 namespace xbox2pc::rt::exec {
 
@@ -183,6 +184,8 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     // a synthetic address or scan arbitrary image memory for address ranges.
     req.api_binding_values.clear();
     req.api_bindings.clear();
+    std::unordered_set<std::uint64_t> seen_bindings;
+    seen_bindings.reserve(image.diagnostics().imports.size());
     for (const auto& imported : image.diagnostics().imports) {
         if (imported.status != loader::ImportStatus::Resolved ||
             imported.value == 0) {
@@ -191,6 +194,16 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         if (!is_api_binding(imported.value)) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "resolved import value is outside the API binding range");
+        }
+        if (!seen_bindings.insert(imported.value).second) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "duplicate synthetic API binding value in loader diagnostics");
+        }
+        if (imported.lookup.dll.empty() ||
+            (imported.lookup.by_ordinal && imported.lookup.ordinal == 0) ||
+            (!imported.lookup.by_ordinal && imported.lookup.symbol.empty())) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "resolved import has incomplete DLL/name-or-ordinal identity");
         }
         ApiBindingInfo binding;
         binding.value = imported.value;
