@@ -511,7 +511,8 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.notes = "supports wait-any for 1-64 readable process-owned event, guest mutex, and guest semaphore handles; wait-all is unsupported; host execution thread is polled and not scheduler-aware";
         add(a);
     }
-
+    {
+        ApiDescriptor a;
         a.library = "kernel32"; a.export_name = "VirtualQuery";
         a.convention = Convention::X64Microsoft; a.param_count = 3;
         a.ret = ReturnKind::Uint64;
