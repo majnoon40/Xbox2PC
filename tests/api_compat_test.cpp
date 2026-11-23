@@ -574,6 +574,8 @@ TEST(GdkServiceTest, ThreadTimeSensitiveDispatchUsesCallingThreadIdentity) {
     auto set = w.reg.dispatch("xgameruntime", "XThreadSetTimeSensitive", ctx);
     ASSERT_TRUE(set.ok);
     EXPECT_EQ(set.return_value, kSOk);
+    // XThreadIsTimeSensitive has no arguments; the set call above takes one.
+    ctx.arg_count = 0;
     ctx.process_id = 200;
     auto other_process = w.reg.dispatch("xgameruntime", "XThreadIsTimeSensitive", ctx);
     ASSERT_TRUE(other_process.ok);
