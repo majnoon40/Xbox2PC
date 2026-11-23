@@ -217,6 +217,21 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     return Ret(req);
 }
 
+Result<void> ExecutionContext::bind_thread_control(
+    std::shared_ptr<ExecutionControl> control) {
+    if (control == nullptr) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "thread execution control must not be null");
+    }
+    std::lock_guard lock(lock_);
+    if (state_ == ContextState::Destroyed || state_ == ContextState::Executing) {
+        return Result<void>(RuntimeErrc::InvalidState,
+                            "cannot bind thread control in the current context state");
+    }
+    execution_control_ = std::move(control);
+    return Result<void>::ok_result();
+}
+
 Result<ExecutionResult> ExecutionContext::invoke(
     const ExecutionRequest& req, IExecutionEngine& engine,
     const std::atomic<bool>& interrupted) {
@@ -246,7 +261,9 @@ Result<ExecutionResult> ExecutionContext::invoke(
         return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
     }
     state_ = ContextState::Executing;
-    auto res = engine.run(req, cpu_, interrupted);
+    ExecutionRequest controlled = req;
+    if (controlled.control == nullptr) controlled.control = execution_control_;
+    auto res = engine.run(controlled, cpu_, interrupted);
     state_ = ContextState::Stopped;
     ++runs_;
     return Ret(res);
