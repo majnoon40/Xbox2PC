@@ -245,9 +245,58 @@ ExecutionResult DeterministicBackend::run(
 
             const auto depth = impl_->dispatch_depth;
             ++impl_->dispatch_depth;
+            // Manual task-queue callbacks execute on this guest thread.
+            // Carve a bounded nested frame below the suspended caller RSP;
+            // preserve the caller CPU state and use the normal interpreter,
+            // API bindings, instruction budget, and cooperative gate.
+            api::GuestCallbackInvoker callback_invoker =
+                [this, &req, &io_cpu, &mem, &interrupted, stack_floor](
+                    std::uint64_t callback_va, std::uint64_t callback_context,
+                    bool canceled) -> Result<void> {
+                    if (callback_va == 0 || req.completion_va == 0)
+                        return Result<void>(RuntimeErrc::InvalidArgument,
+                                            "guest callback or completion sentinel is null");
+                    const std::uint64_t parent_rsp =
+                        rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+                    constexpr std::uint64_t kCallbackFrameReserve = 0x100;
+                    if (parent_rsp < stack_floor ||
+                        parent_rsp - stack_floor < kCallbackFrameReserve + 0x100)
+                        return Result<void>(RuntimeErrc::OutOfResources,
+                                            "insufficient guest stack for nested task callback");
+                    const std::uint64_t callback_rsp =
+                        parent_rsp - kCallbackFrameReserve;
+                    if ((callback_rsp & 0xFull) != 8)
+                        return Result<void>(RuntimeErrc::InvalidState,
+                                            "nested callback stack violates x64 entry alignment");
+                    const auto stack_write = mem.write_u64(callback_rsp, req.completion_va);
+                    if (!stack_write.ok())
+                        return Result<void>(RuntimeErrc::PlatformError,
+                                            "cannot prepare nested callback return slot");
+                    ExecutionRequest callback_request = req;
+                    callback_request.entry_va = callback_va;
+                    callback_request.stack_top_va = callback_rsp + 0x80;
+                    callback_request.stack_size = callback_request.stack_top_va - stack_floor;
+                    callback_request.entry_args.clear();
+                    callback_request.control = req.control;
+                    CpuState callback_cpu;
+                    callback_cpu.reset();
+                    callback_cpu.set_reg(Gpr::Sp, callback_rsp);
+                    callback_cpu.set_reg(Gpr::Rcx, callback_context);
+                    callback_cpu.set_reg(Gpr::Rdx, canceled ? 1u : 0u);
+                    callback_cpu.rip = callback_va;
+                    const auto callback_result =
+                        this->run(callback_request, callback_cpu, interrupted);
+                    if (callback_result.outcome != Outcome::Returned) {
+                        const std::string detail = callback_result.exception.has_value()
+                            ? format_exception(*callback_result.exception)
+                            : std::string("guest callback did not return normally");
+                        return Result<void>(RuntimeErrc::PlatformError, detail);
+                    }
+                    return Result<void>::ok_result();
+                };
             auto dispatched = marshal_and_dispatch(
                 io_cpu, mem, registry_, plan.value(), pid_, depth,
-                cfg_.max_dispatch_depth, tid_);
+                cfg_.max_dispatch_depth, tid_, callback_invoker);
             --impl_->dispatch_depth;
             if (!dispatched.ok()) {
                 fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
@@ -398,7 +447,8 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
                                           std::uint64_t pid,
                                           std::uint32_t depth,
                                           std::uint32_t max_depth,
-                                          std::uint64_t tid) {
+                                          std::uint64_t tid,
+                                          const api::GuestCallbackInvoker& invoke_callback) {
     using Ret = Result<MarshalResult>;
     if (depth >= max_depth) {
         return Ret(RuntimeErrc::OutOfResources,
@@ -424,6 +474,7 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
     api::ApiContext ctx;
     ctx.process_id = pid;
     ctx.thread_id = tid;
+    ctx.invoke_guest_callback = invoke_callback;
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&
                             i < api::ApiContext::kMaxArgs;
