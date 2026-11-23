@@ -821,6 +821,77 @@ TEST(ProcessMgmtTest, FullLifecycleWithCleanup) {
     ASSERT_TRUE(core.shutdown().ok());
 }
 
+TEST(ProcessMgmtTest, ProcessSuspendResumeDoesNotCancelOwnedThreads) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    ProcessManager pm(core.objects());
+    auto process = pm.create_process("suspend-process.exe");
+    ASSERT_TRUE(process.ok());
+    rt::ModuleDescriptor module;
+    ASSERT_TRUE(pm.initialize_process(process.value(), module,
+                                      rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(pm.start_process(process.value()).ok());
+
+    std::atomic<std::uint64_t> progress{0};
+    auto spawned = pm.spawn_thread(
+        process.value(),
+        [](rt::RtThread& self, void* raw) -> void* {
+            auto* count = static_cast<std::atomic<std::uint64_t>*>(raw);
+            while (self.suspension_point()) {
+                count->fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return nullptr;
+        },
+        &progress, "process-owned-suspend-worker");
+    ASSERT_TRUE(spawned.ok());
+
+    auto process_ref = pm.find_process(process.value());
+    ASSERT_TRUE(process_ref.ok());
+    auto* managed = process_ref.value().get()->as<ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const auto thread_ids = managed->thread_ids();
+    ASSERT_EQ(thread_ids.size(), 1u);
+    auto thread_ref = core.objects().lookup_id(thread_ids.front());
+    ASSERT_TRUE(thread_ref.ok());
+    auto* thread = thread_ref.value().get()->as<RtThread>();
+    ASSERT_NE(thread, nullptr);
+
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(progress.load(std::memory_order_relaxed), 0u);
+
+    ASSERT_TRUE(pm.suspend_process(process.value()).ok());
+    const auto parked_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (!thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < parked_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(thread->execution_control()->is_parked());
+    const auto parked_progress = progress.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    ASSERT_TRUE(pm.resume_process(process.value()).ok());
+    const auto resume_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == parked_progress &&
+           std::chrono::steady_clock::now() < resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    ASSERT_TRUE(pm.terminate_process(process.value(), 0).ok());
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
 TEST(ProcessMgmtTest, MultipleProcessesIsolation) {
     rt::RuntimeCore core;
     ASSERT_TRUE(core.initialize().ok());
