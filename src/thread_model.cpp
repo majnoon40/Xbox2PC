@@ -133,9 +133,11 @@ std::uint64_t RtThread::next_thread_id() {
 
 // ── construction / teardown ───────────────────────────────────────────────
 
-RtThread::RtThread(ThreadMain main, void* arg, std::string name)
+RtThread::RtThread(ThreadMain main, void* arg, std::string name,
+                   std::uint64_t owner_process_id)
     : RuntimeObject(TypeId::Thread),
       thread_id_(next_thread_id()),
+      owner_process_id_(owner_process_id),
       main_(main),
       arg_(arg),
       name_(std::move(name)),
