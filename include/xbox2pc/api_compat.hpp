@@ -51,7 +51,9 @@
 //   [GDK-ERR]     GDK error codes doc (E_GAMERUNTIME_* semantics)
 
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -81,6 +83,8 @@ enum class ReturnKind : std::uint8_t {
     Void,
     HResult,     // HRESULT: 0x00000000 S_OK / 0x8007.... errors
     Bool,        // Win32 BOOL (0 = failure)
+    Uint32,      // DWORD / uint32_t scalar
+    Uint64,      // SIZE_T / uint64_t scalar on x64
     Uint32Enum,  // enum class ... : uint32_t (e.g. XSystemDeviceType)
     Pointer,     // _Out_ pointer params; return is an out-param status
     Unknown,
@@ -128,17 +132,29 @@ struct ApiDescriptor {
 // argument values — implementations interpret them as the documented
 // parameter semantics (sizes, flags, buffer ids) through THIS layer only.
 
+using GuestCallbackInvoker = std::function<Result<void>(std::uint64_t callback_va,
+    std::uint64_t callback_context, bool canceled)>;
+
 struct ApiContext {
     // The calling process (0 = runtime-global / no process).
     std::uint64_t process_id = 0;
+    // Calling guest thread (0 = unavailable/runtime-global). Distinct from
+    // process_id: thread-scoped APIs must never overload process identity.
+    std::uint64_t thread_id = 0;
     // Argument slots (up to 8; documented x64 register parameters).
     static constexpr std::size_t kMaxArgs = 8;
     std::uint64_t args[kMaxArgs] = {0};
     std::size_t arg_count = 0;
+    // Guest arrays decoded by the execution bridge; indexed by pointer argument slot.
+    std::array<std::vector<std::uint64_t>, kMaxArgs> pointer_arrays;
     // Time-sensitive-thread check (XThreadIsTimeSensitive semantics):
     // APIs documented as unsafe on time-sensitive threads refuse when
     // the context thread is marked time-sensitive.
     bool thread_time_sensitive = false;
+    // Present only while a guest execution backend is dispatching an API.
+    // Lets manual task-queue dispatch re-enter the same bounded guest backend
+    // without exposing a host function pointer to guest memory.
+    GuestCallbackInvoker invoke_guest_callback;
 };
 
 struct ApiCallResult {
@@ -247,6 +263,8 @@ private:
     std::map<std::string, Impl> impls_;
     // ordinal key: normalized library '\x1F' #ordinal (only verified ones)
     std::map<std::string, const ApiDescriptor*> ordinal_index_;
+    // Registry-wide monotonic ID prevents binding collisions across resolver instances.
+    std::uint32_t next_binding_id_ = 1;
 };
 
 // Convenience: the process-wide default registry (tests/CLI construct
@@ -256,10 +274,10 @@ ApiRegistry& default_registry();
 // ── the import resolver (M6 integration) ──────────────────────────────────
 
 // Binds imports to REGISTERED implementations. The binding value is a
-// synthetic dispatch address: (impl_counter << 32) | slot — an opaque id
-// into THIS resolver's table (never a host pointer; the loader writes it
-// into the IAT like any resolved value, and future execution-context work
-// would decode it through the dispatcher).
+// synthetic guest dispatch address in the reserved GDK/Win32 ranges; it is
+// never a host pointer. The loader preserves the exact ImportLookup and
+// value in LoadDiagnostics, and ExecutionContext copies that identity into
+// ExecutionRequest so the engine can resolve the descriptor safely.
 class ApiResolver : public loader::IImportResolver {
 public:
     explicit ApiResolver(ApiRegistry& reg) : reg_(reg) {}
@@ -268,11 +286,11 @@ public:
     bool resolve_module(const std::string& dll) override;
 
     // Number of bindings issued (deterministic counter).
-    std::uint64_t bindings_issued() const { return next_id_; }
+    std::uint64_t bindings_issued() const { return bindings_issued_.load(std::memory_order_relaxed); }
 
 private:
     ApiRegistry& reg_;
-    std::uint64_t next_id_ = 1;
+    std::atomic<std::uint64_t> bindings_issued_{0};
 };
 
 // ── delay-load imports ────────────────────────────────────────────────────

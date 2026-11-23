@@ -38,7 +38,7 @@ int main() {
     xbox2pc::rt::RuntimeCore core;
     xbox2pc::rt::ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<GameRuntimeService>(reg);
+        auto grt = std::make_unique<GameRuntimeService>(reg, pm);
         auto tq = std::make_unique<TaskQueueService>(reg, pm);
         auto tim = std::make_unique<TimingService>(reg);
         (void)core.services().register_service(std::move(grt));

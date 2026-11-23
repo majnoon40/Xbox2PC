@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -109,6 +110,8 @@ private:
     mutable std::mutex detail_lock_;
     std::vector<ModuleDescriptor> modules_;
     std::vector<std::uint64_t> threads_;
+    // Threads paused by ProcessManager (not manually suspended beforehand).
+    std::vector<std::uint64_t> process_suspended_threads_;
 };
 
 // ── process manager ────────────────────────────────────────────────────────
@@ -117,6 +120,9 @@ class ProcessManager {
 public:
     explicit ProcessManager(ObjectManager& objects);
     ~ProcessManager();
+
+    // Shared runtime object owner used by process-scoped kernel objects.
+    ObjectManager& objects() { return objects_; }
 
     ProcessManager(const ProcessManager&) = delete;
     ProcessManager& operator=(const ProcessManager&) = delete;
@@ -133,13 +139,19 @@ public:
                                     const RuntimeConfig& config);
     // start_process: Created/Initializing -> Running.
     Result<void> start_process(Handle process);
-    // suspend/resume abstractions (state transitions on all threads:
-    // request_stop on suspend, clear on resume — cooperative).
+    // suspend/resume abstractions (resumable cooperative gates across owned threads).
     Result<void> suspend_process(Handle process);
     Result<void> resume_process(Handle process);
     // terminate_process: drives the EXACT cleanup ordering (header top).
-    // exit status recorded; idempotent.
+    // Observers run only after cleanup succeeds and state becomes Terminated.
     Result<void> terminate_process(Handle process, std::uint64_t exit_code);
+
+    // Observers receive the stable process ID and execute under the manager
+    // lock. They must be short, non-throwing, and MUST NOT re-enter
+    // ProcessManager. Unregistration waits for any active callback to finish.
+    using ProcessExitObserver = std::function<void(std::uint64_t)>;
+    Result<std::uint64_t> add_process_exit_observer(ProcessExitObserver observer);
+    Result<void> remove_process_exit_observer(std::uint64_t observer_id);
 
     // ── thread management per process ──
     // spawn_thread: creates an RtThread object owned by this process,
@@ -156,10 +168,20 @@ public:
     Result<void> protect_region(Handle process, std::uint64_t xbox_va,
                                 MemProtect prot, const ResourceLimits& global);
     Result<void> release_region(Handle process, std::uint64_t xbox_va);
+    Result<std::uint64_t> reserve_region_by_pid(std::uint64_t pid, std::uint64_t size, const std::string& name);
+    Result<std::uint64_t> reserve_region_at_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, const std::string& name);
+    Result<void> set_allocation_protection_by_pid(std::uint64_t pid, std::uint64_t xbox_va, MemProtect protection);
+    Result<void> commit_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va,
+                                      std::uint64_t size,
+                                      MemProtect protection = MemProtect::ReadWrite);
+    Result<void> decommit_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size);
+    Result<MemProtect> protect_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, MemProtect prot);
+    Result<void> release_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va);
     std::vector<VmRegion> list_regions(Handle process);
 
     // ── lookup ──
     Result<RefGuard> find_process(Handle process) const;
+    Result<RefGuard> find_process_by_pid(std::uint64_t pid) const;
     Result<std::uint64_t> resolve_pid(Handle process) const;
 
     // ── accounting ──
@@ -191,6 +213,8 @@ private:
     // Spawn reservations counted while a thread is being registered/attached.
     // Protected by lock_ so concurrent spawns cannot bypass the global limit.
     std::uint64_t pending_threads_ = 0;
+    std::map<std::uint64_t, ProcessExitObserver> exit_observers_;
+    std::uint64_t next_exit_observer_ = 1;  // protected by lock_
     // Global totals maintained incrementally for fast limit checks.
     mutable std::atomic<std::uint64_t> committed_total_{0};
     mutable std::atomic<std::uint64_t> reserved_total_{0};

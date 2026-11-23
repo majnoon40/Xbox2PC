@@ -102,6 +102,10 @@ void ManagedProcess::set_memory_limits(const MemoryLimits& limits) {
 ProcessManager::ProcessManager(ObjectManager& objects) : objects_(objects) {}
 
 ProcessManager::~ProcessManager() {
+    {
+        std::lock_guard lock(lock_);
+        exit_observers_.clear();
+    }
     // Snapshot ids under the map lock; never index pid_to_object_id_ after
     // releasing it. Drain every host thread before releasing its address
     // space, because a cooperative thread may still be executing guest code.
@@ -228,15 +232,34 @@ Result<void> ProcessManager::suspend_process(Handle process) {
     }
     auto r = proc->suspend();
     if (!r.ok()) return r;
-    // Cooperative suspension across owned threads: request stop so their
-    // safe points observe it (never forced).
-    for (std::uint64_t tid : proc->thread_ids()) {
+    // Suspend each owned live thread through its resumable gate. This is
+    // deliberately not request_stop(): stop is terminal cancellation.
+    std::vector<RefGuard> suspended;
+    std::vector<std::uint64_t> suspended_ids;
+    for (const std::uint64_t tid : proc->thread_ids()) {
         auto t = objects_.lookup_id(tid);
-        if (t.ok() && t.value().get() != nullptr) {
-            if (auto* thread = t.value().get()->as<RtThread>()) {
-                thread->request_stop();
+        if (!t.ok() || t.value().get() == nullptr) continue;
+        auto* thread = t.value().get()->as<RtThread>();
+        if (thread == nullptr) continue;
+        const auto state = thread->state();
+        if (state == ThreadState::Suspended || state == ThreadState::Terminated ||
+            state == ThreadState::Failed || state == ThreadState::Created) continue;
+        auto paused = thread->suspend();
+        if (!paused.ok()) {
+            for (auto it = suspended.rbegin(); it != suspended.rend(); ++it) {
+                auto* previous = it->get()->as<RtThread>();
+                if (previous != nullptr) (void)previous->resume();
             }
+            (void)proc->resume();
+            return Result<void>(paused.errc(),
+                                "process suspension rolled back: " + paused.context());
         }
+        suspended_ids.push_back(tid);
+        suspended.push_back(std::move(t.value()));
+    }
+    {
+        std::lock_guard detail_guard(proc->detail_lock_);
+        proc->process_suspended_threads_ = std::move(suspended_ids);
     }
     return Result<void>::ok_result();
 }
@@ -249,14 +272,32 @@ Result<void> ProcessManager::resume_process(Handle process) {
     }
     auto r = proc->resume();
     if (!r.ok()) return r;
-    for (std::uint64_t tid : proc->thread_ids()) {
+    std::vector<std::uint64_t> suspended_ids;
+    {
+        std::lock_guard detail_guard(proc->detail_lock_);
+        suspended_ids = proc->process_suspended_threads_;
+    }
+    std::vector<RefGuard> resumed;
+    for (const std::uint64_t tid : suspended_ids) {
         auto t = objects_.lookup_id(tid);
-        if (t.ok() && t.value().get() != nullptr) {
-            if (auto* thread = t.value().get()->as<RtThread>()) {
-                // Clear the cooperative stop for resumable threads.
-                (void)thread->resume();
+        if (!t.ok() || t.value().get() == nullptr) continue;
+        auto* thread = t.value().get()->as<RtThread>();
+        if (thread == nullptr || thread->state() != ThreadState::Suspended) continue;
+        auto running = thread->resume();
+        if (!running.ok()) {
+            for (auto it = resumed.rbegin(); it != resumed.rend(); ++it) {
+                auto* previous = it->get()->as<RtThread>();
+                if (previous != nullptr) (void)previous->suspend();
             }
+            (void)proc->suspend();
+            return Result<void>(running.errc(),
+                                "process resume rolled back: " + running.context());
         }
+        resumed.push_back(std::move(t.value()));
+    }
+    {
+        std::lock_guard detail_guard(proc->detail_lock_);
+        proc->process_suspended_threads_.clear();
     }
     return Result<void>::ok_result();
 }
@@ -306,7 +347,47 @@ Result<void> ProcessManager::terminate_process(Handle process,
             return detached;
         }
     }
-    return proc->finish_termination(exit_code);
+    const std::uint64_t pid = proc->pid_value();
+    auto finished = proc->finish_termination(exit_code);
+    if (!finished.ok()) return finished;
+
+    {
+        // Serialize callback execution with observer removal. This ensures
+        // service shutdown cannot destroy a target while its callback is active.
+        // Observers must not re-enter ProcessManager (see the public contract).
+        std::lock_guard lock(lock_);
+        for (const auto& [observer_id, observer] : exit_observers_) {
+            (void)observer_id;
+            try { observer(pid); } catch (...) {
+                // A notification cannot undo or escape successful teardown.
+            }
+        }
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::uint64_t> ProcessManager::add_process_exit_observer(
+    ProcessExitObserver observer) {
+    if (!observer) return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                                "empty process-exit observer");
+    std::lock_guard lock(lock_);
+    if (next_exit_observer_ == 0 || next_exit_observer_ == ~std::uint64_t{0}) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "process-exit observer ID space exhausted");
+    }
+    const std::uint64_t id = next_exit_observer_++;
+    exit_observers_.emplace(id, std::move(observer));
+    return Result<std::uint64_t>(id);
+}
+
+Result<void> ProcessManager::remove_process_exit_observer(std::uint64_t observer_id) {
+    if (observer_id == 0) return Result<void>(RuntimeErrc::InvalidArgument,
+                                               "zero process-exit observer ID");
+    std::lock_guard lock(lock_);
+    if (exit_observers_.erase(observer_id) == 0) {
+        return Result<void>(RuntimeErrc::NotFound, "process-exit observer not registered");
+    }
+    return Result<void>::ok_result();
 }
 
 Result<Handle> ProcessManager::spawn_thread(Handle process,
@@ -355,7 +436,7 @@ Result<Handle> ProcessManager::spawn_thread(Handle process,
         ~PendingRelease() { release(); }
     } pending_release{release_pending};
 
-    auto thread = std::make_unique<RtThread>(main, arg, name);
+    auto thread = std::make_unique<RtThread>(main, arg, name, proc->pid_value());
     auto reg = objects_.register_object(std::move(thread));
     if (!reg.ok()) {
         return Result<Handle>(reg.errc(), reg.context());
@@ -488,6 +569,188 @@ Result<void> ProcessManager::release_region(Handle process, std::uint64_t xbox_v
     return proc->address_space().release_region(xbox_va);
 }
 
+
+Result<std::uint64_t> ProcessManager::reserve_region_by_pid(
+    std::uint64_t pid, std::uint64_t size, const std::string& name) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<std::uint64_t>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "invalid guest reservation size");
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (limits_.max_reserved_bytes_total != 0) {
+        std::uint64_t total = 0;
+        for (const auto& [other_pid, id] : pid_to_object_id_) {
+            (void)other_pid;
+            auto object = objects_.lookup_id(id);
+            if (!object.ok() || object.value().get() == nullptr) continue;
+            auto* managed = object.value().get()->as<ManagedProcess>();
+            if (managed == nullptr) continue;
+            const auto used = managed->address_space().stats().reserved_bytes;
+            total = used > (~0ull) - total ? ~0ull : total + used;
+        }
+        if (total > limits_.max_reserved_bytes_total || aligned > limits_.max_reserved_bytes_total - total)
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "global reserved-bytes limit");
+    }
+    return proc->address_space().reserve_region_auto(size, name);
+}
+
+Result<std::uint64_t> ProcessManager::reserve_region_at_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size,
+    const std::string& name) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<std::uint64_t>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
+                                     "guest process is not running");
+    std::lock_guard lock(lock_);
+    const auto page = proc->address_space().page_size();
+    if (xbox_va == 0 || size == 0 || page == 0 ||
+        size > (~0ull) - (page - 1)) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "invalid fixed guest reservation");
+    }
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (limits_.max_reserved_bytes_total != 0) {
+        std::uint64_t total = 0;
+        for (const auto& [other_pid, id] : pid_to_object_id_) {
+            (void)other_pid;
+            auto object = objects_.lookup_id(id);
+            if (!object.ok() || object.value().get() == nullptr) continue;
+            auto* managed = object.value().get()->as<ManagedProcess>();
+            if (managed == nullptr) continue;
+            const auto used = managed->address_space().stats().reserved_bytes;
+            total = used > (~0ull) - total ? ~0ull : total + used;
+        }
+        if (total > limits_.max_reserved_bytes_total ||
+            aligned > limits_.max_reserved_bytes_total - total) {
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                         "global reserved-bytes limit");
+        }
+    }
+    return proc->address_space().reserve_region(xbox_va, size, name);
+}
+
+Result<void> ProcessManager::set_allocation_protection_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, MemProtect protection) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated,
+                            "guest process is not running");
+    std::lock_guard lock(lock_);
+    return proc->address_space().set_allocation_protection(xbox_va, protection);
+}
+
+Result<void> ProcessManager::commit_region_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size,
+    MemProtect protection) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    if (protection == MemProtect::Full && !limits_.allow_wx_pages)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "RWX protection requires allow_wx_pages");
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || xbox_va % page != 0 ||
+        size > (~0ull) - (page - 1))
+        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest commit range");
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (xbox_va > (~0ull) - aligned)
+        return Result<void>(RuntimeErrc::InvalidArgument, "guest commit range overflows");
+    const auto region = proc->address_space().find_containing(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    const auto allocation = region.value().allocation_base;
+    if (allocation == 0 || xbox_va < allocation)
+        return Result<void>(RuntimeErrc::InvalidArgument, "commit range is outside its reservation");
+
+    std::uint64_t newly_committed = 0;
+    const auto range_end = xbox_va + aligned;
+    for (const auto& segment : proc->address_space().list_regions()) {
+        const auto segment_end = segment.xbox_va + segment.size;
+        if (segment_end <= xbox_va || segment.xbox_va >= range_end) continue;
+        if (segment.allocation_base != allocation)
+            return Result<void>(RuntimeErrc::InvalidState,
+                                "commit range crosses reservation boundaries");
+        if (segment.state == RegionState::Reserved) {
+            const auto begin = std::max(xbox_va, segment.xbox_va);
+            const auto finish = std::min(range_end, segment_end);
+            const auto bytes = finish - begin;
+            newly_committed = bytes > (~0ull) - newly_committed
+                ? ~0ull : newly_committed + bytes;
+        }
+    }
+    if (limits_.max_committed_bytes_total != 0 && newly_committed != 0) {
+        std::uint64_t total = 0;
+        for (const auto& [other_pid, id] : pid_to_object_id_) {
+            (void)other_pid;
+            auto object = objects_.lookup_id(id);
+            if (!object.ok() || object.value().get() == nullptr) continue;
+            auto* managed = object.value().get()->as<ManagedProcess>();
+            if (managed == nullptr) continue;
+            const auto used = managed->address_space().stats().committed_bytes;
+            total = used > (~0ull) - total ? ~0ull : total + used;
+        }
+        if (total > limits_.max_committed_bytes_total ||
+            newly_committed > limits_.max_committed_bytes_total - total)
+            return Result<void>(RuntimeErrc::OutOfResources, "global committed-bytes limit");
+    }
+    return proc->address_space().commit_range(xbox_va, aligned, protection);
+}
+
+Result<void> ProcessManager::decommit_region_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || xbox_va % page != 0 ||
+        size > (~0ull) - (page - 1))
+        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest decommit range");
+    const auto aligned = ((size + page - 1) / page) * page;
+    return proc->address_space().decommit_range(xbox_va, aligned);
+}
+
+Result<MemProtect> ProcessManager::protect_region_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, MemProtect prot) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<MemProtect>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<MemProtect>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    if (prot == MemProtect::Full && !limits_.allow_wx_pages)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "RWX protection requires allow_wx_pages");
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || xbox_va % page != 0 ||
+        size > (~0ull) - (page - 1))
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument, "invalid guest protection range");
+    const auto aligned = ((size + page - 1) / page) * page;
+    return proc->address_space().protect_range(xbox_va, aligned, prot);
+}
+
+Result<void> ProcessManager::release_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    return proc->address_space().release_region(xbox_va);
+}
+
 std::vector<VmRegion> ProcessManager::list_regions(Handle process) {
     RefGuard guard;
     ManagedProcess* proc = find_locked(process, guard);
@@ -499,6 +762,14 @@ std::vector<VmRegion> ProcessManager::list_regions(Handle process) {
 
 Result<RefGuard> ProcessManager::find_process(Handle process) const {
     return objects_.lookup_handle(process);
+}
+
+Result<RefGuard> ProcessManager::find_process_by_pid(std::uint64_t pid) const {
+    if (pid == 0) return Result<RefGuard>(RuntimeErrc::InvalidArgument, "process ID zero is not a guest process");
+    std::lock_guard lock(lock_);
+    const auto it = pid_to_object_id_.find(pid);
+    if (it == pid_to_object_id_.end()) return Result<RefGuard>(RuntimeErrc::NotFound, "unknown or terminated process ID");
+    return objects_.lookup_id(it->second);
 }
 
 Result<std::uint64_t> ProcessManager::resolve_pid(Handle process) const {

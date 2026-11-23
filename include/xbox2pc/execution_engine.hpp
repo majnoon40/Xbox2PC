@@ -61,6 +61,8 @@
 // Nothing below links upward.
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -75,6 +77,7 @@
 #include "xbox2pc/guest_exceptions.hpp"
 #include "xbox2pc/guest_memory.hpp"
 #include "xbox2pc/runtime_error.hpp"
+#include "xbox2pc/thread_model.hpp"
 #include "xbox2pc/xbox_abi.hpp"
 
 namespace xbox2pc::rt::exec {
@@ -131,20 +134,36 @@ struct ExecutionResult {
 // A prepared guest call to run (from the execution context). Carries
 // NO raw host pointers: entry + stack are guest VAs; the API side
 // resolves through the registry.
+struct ApiBindingInfo {
+    std::uint64_t value = 0;
+    std::string library;
+    std::string export_name;
+    bool by_ordinal = false;
+    std::uint32_t ordinal = 0;
+};
+
+// Alias the M3-managed-thread gate for execution requests and backends.
+using ExecutionControl = CooperativeExecutionGate;
+
 struct ExecutionRequest {
     std::uint64_t entry_va = 0;
     std::uint64_t stack_top_va = 0;     // 16-aligned free stack top
     std::uint64_t stack_size = 0;       // guard floor = top - size
     // Imported-API binding values the image's IAT entries hold (M7
-    // ApiResolver-issued); landing on one enters the marshalling
-    // bridge. The engine treats anything in binding range as a call.
+    // ApiResolver-issued); retained for diagnostics and compatibility.
+    // Dispatch requires a matching exact ApiBindingInfo below.
     std::vector<std::uint64_t> api_binding_values;
+    // Exact import identity for every resolved binding. This is the
+    // authoritative dispatch map; binding-range addresses alone are not.
+    std::vector<ApiBindingInfo> api_bindings;
     // Completion sentinel: executing a `RET` with the sentinel address
     // as the return target completes the run (documented contract).
     std::uint64_t completion_va = 0;
     // Optional entry arguments (prepared via the ABI by the context).
     std::vector<abi::ArgValue> entry_args;
     abi::CallSpec entry_spec;
+    // Optional cooperative suspend/resume control shared with the owning thread.
+    std::shared_ptr<ExecutionControl> control;
 };
 
 class IExecutionEngine {
@@ -158,6 +177,19 @@ public:
     // Run one request to completion / fault / budget. `interrupted`
     // is polled between instructions: setting it yields Outcome::
     // Interrupted (cancellation is observable).
+    // Bind the identity and address space of the guest context before each
+    // run/step. Backends that dispatch guest APIs must override this hook.
+    // The default preserves compatibility for backends that do not yet
+    // consume runtime context.
+    virtual Result<void> bind_execution_context(std::uint64_t process_id,
+                                                std::uint64_t thread_id,
+                                                AddressSpace& space) {
+        (void)process_id;
+        (void)thread_id;
+        (void)space;
+        return Result<void>::ok_result();
+    }
+
     virtual ExecutionResult run(const ExecutionRequest& req,
                                 cpu::CpuState& io_cpu,
                                 const std::atomic<bool>& interrupted) = 0;
@@ -186,11 +218,23 @@ public:
     }
 
     // NOTE: guest memory access is provided per-run via the context's
-    // process address space; run() takes the space reference here.
+    // process address space. ExecutionContext invokes bind_execution_context
+    // automatically before run/step/callback execution.
     void bind_space(AddressSpace& space) { mem_ = std::make_unique<guest::GuestMemory>(space); }
     void bind_process(std::uint64_t pid, std::uint64_t tid) {
         pid_ = pid;
         tid_ = tid;
+    }
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space) override {
+        if (process_id == 0 || thread_id == 0) {
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "guest process and thread identities must be nonzero");
+        }
+        bind_space(space);
+        bind_process(process_id, thread_id);
+        return Result<void>::ok_result();
     }
 
     ExecutionResult run(const ExecutionRequest& req,
@@ -226,6 +270,8 @@ struct MarshalPlan {
     // For pointer outputs: which argument INDEX is an out buffer whose
     // bytes the bridge writes from the ApiCallResult out_value slot.
     std::vector<std::uint32_t> out_buffer_args;
+    struct PointerArrayArg { std::uint32_t pointer_arg = 0; std::uint32_t count_arg = 0; std::uint32_t max_count = 0; std::uint32_t element_size = 0; };
+    std::vector<PointerArrayArg> pointer_array_args;
     // String input argument indexes (read as guest C strings).
     std::vector<std::uint32_t> string_args;
 };
@@ -251,12 +297,14 @@ Result<MarshalResult> marshal_and_dispatch(cpu::CpuState& io_cpu,
                                            const MarshalPlan& plan,
                                            std::uint64_t pid,
                                            std::uint32_t depth,
-                                           std::uint32_t max_depth);
+                                           std::uint32_t max_depth,
+                                           std::uint64_t tid = 0,
+                                           const api::GuestCallbackInvoker& invoke_callback = {});
 
 // ── completion sentinel + binding range ──────────────────────────────────
 
 inline constexpr std::uint64_t kBindingBase = 0x51000000ull;
-inline constexpr std::uint64_t kBindingRange = 0x00010000ull;
+inline constexpr std::uint64_t kBindingRange = 0x00020000ull;
 inline constexpr std::uint64_t kCompletionSentinel = 0x5100FFFFull;
 inline bool is_api_binding(std::uint64_t va) {
     return va >= kBindingBase && va < kBindingBase + kBindingRange &&

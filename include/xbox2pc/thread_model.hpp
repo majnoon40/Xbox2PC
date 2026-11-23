@@ -20,6 +20,7 @@
 // atomic state(). The joined exit status is written once at termination.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -32,6 +33,25 @@
 #include "xbox2pc/platform.hpp"
 
 namespace xbox2pc::rt {
+
+// Shared cooperative gate used by managed threads and execution backends.
+// Suspension is resumable; cancellation is terminal and always wakes a parked
+// checkpoint. Safe points are explicit: callers must check between work units.
+class CooperativeExecutionGate {
+public:
+    void request_suspend();
+    void resume();
+    void cancel();
+    bool is_suspend_requested() const;
+    bool is_parked() const;
+    bool checkpoint(const std::atomic<bool>& interrupted);
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable changed_;
+    bool suspend_requested_ = false;
+    std::atomic<bool> cancelled_{false};
+    std::atomic<bool> parked_{false};
+};
 
 // ── thread states ─────────────────────────────────────────────────────────
 enum class ThreadState {
@@ -65,13 +85,20 @@ public:
 
     using ThreadMain = void* (*)(RtThread& self, void* user_arg);
 
-    RtThread(ThreadMain main, void* arg, std::string name);
+    RtThread(ThreadMain main, void* arg, std::string name,
+             std::uint64_t owner_process_id = 0);
     ~RtThread() override;
 
     // Lifecycle control.
     Result<void> start();           // Created -> Ready (host thread spawned)
     Result<void> suspend();         // Running/Ready -> Suspended (cooperative)
     Result<void> resume();          // Suspended -> Ready
+    // Cooperative safe point for thread mains. Returns false after stop.
+    // A suspended thread parks here until resume() or request_stop().
+    bool suspension_point();
+    std::shared_ptr<CooperativeExecutionGate> execution_control() const {
+        return execution_control_;
+    }
     Result<void> block_note();      // Running -> Blocked (called by sync waits)
     Result<void> unblock_note();    // Blocked -> Running/Ready
     Result<void> terminate(std::uint64_t exit_code);  // -> Terminated
@@ -112,6 +139,8 @@ public:
     // Introspection.
     ThreadState state() const { return state_.load(std::memory_order_acquire); }
     std::uint64_t thread_id() const { return thread_id_; }
+    // Stable guest process identity assigned by ProcessManager before start.
+    std::uint64_t owner_process_id() const { return owner_process_id_; }
     std::uint64_t exit_code() const;
     ThreadPriority priority() const { return sched_.priority; }
     void set_priority(ThreadPriority p);   // abstract; host mapping later
@@ -137,6 +166,7 @@ private:
     void on_destroy() override;
 
     const std::uint64_t thread_id_;        // runtime id (unique, never zero)
+    const std::uint64_t owner_process_id_; // zero only for unmanaged/test threads
     ThreadMain const main_;
     void* const arg_;
     std::string name_;
@@ -145,6 +175,7 @@ private:
     std::unique_ptr<pal::PalThread> host_;
     mutable std::mutex transition_lock_;   // serializes transitions (const readers lock too)
     std::atomic<bool> stop_flag_{false};
+    std::shared_ptr<CooperativeExecutionGate> execution_control_;
     std::atomic<std::uint64_t> exit_code_{0};
     std::atomic<bool> exited_{false};
     std::string fail_reason_;

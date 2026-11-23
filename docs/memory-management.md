@@ -48,8 +48,8 @@ Rules (all tested):
   `ResourceLimits{allow_wx_pages=true}` (`ProcessManager::protect_region`
   enforces it — `WxProtectionDiscipline` test);
 - reserved regions cannot be re-protected (commit first);
-- `NoAccess` on a committed region is rejected — that is a release
-  (`InvalidArgument` with context);
+- `NoAccess` on a committed region is a valid inaccessible committed
+  state; `release_region` remains the separate deallocation path;
 - `validate_access(va, write, exec)` answers legality from the
   descriptor's protection (`MemoryTest.ReserveCommitProtectRelease`).
 
@@ -110,3 +110,56 @@ Inferred (xbox2pc design decisions — no Xbox documentation consulted):
 - Reserved/Committed two-state region model,
 - W^X-by-default discipline and the `allow_wx_pages` opt-in,
 - allocator id/metadata/tracking model.
+
+
+## Guest decommit model
+
+AddressSpace supports page-aligned partial commit, decommit, and protection operations. Range changes split region metadata while retaining the original allocation base, so VirtualFree(MEM_RELEASE) still releases the complete reservation. On Linux, decommit also uses MADV_DONTNEED after making the range inaccessible, discarding the anonymous backing pages; this is a host PAL behavior, not a claim of Xbox physical-memory fidelity.
+
+
+## M10 VirtualAlloc W^X enforcement
+
+The Win32 VirtualAlloc adapter applies the runtime's W^X policy before
+mutating address-space state. PAGE_EXECUTE_READWRITE is rejected for
+MEM_RESERVE, MEM_COMMIT, and MEM_RESERVE | MEM_COMMIT unless the runtime's
+explicit allow_wx_pages policy is enabled. In particular, the combined
+reserve-and-commit form must not bypass the same protection gate used by the
+separate reserve/commit paths. Regression coverage verifies that a rejected
+commit leaves the existing reservation intact and uncommitted.
+
+
+VirtualQuery returns the full contiguous tracked region boundaries for an
+address inside a multi-page allocation. Its BaseAddress and RegionSize are not
+truncated to the queried page; free-gap queries similarly return the complete
+gap bounded by the previous and next tracked regions.
+
+
+## M10 fixed-address VirtualAlloc reservations
+
+The Win32 adapter now supports fixed-address MEM_RESERVE and
+MEM_RESERVE | MEM_COMMIT. A non-null reservation address is rounded down to
+the Windows 64-KiB allocation-granularity boundary; the address-space manager
+then validates bounds, overlap, page alignment, and global reservation limits.
+MEM_COMMIT accepts page ranges within one tracked reservation. Regression
+coverage checks address rounding, overlap rejection, separate and partial
+commit, combined reserve-and-commit, and release.
+
+
+## M10 VirtualQuery allocation protection
+
+Tracked guest regions retain the initial allocation protection separately from their current page protection. Win32 VirtualAlloc records the requested protection when creating a reservation; later VirtualProtect calls change only the current protection. VirtualQuery reports the retained value in MEMORY_BASIC_INFORMATION.AllocationProtect, including while reserved and after a later commit/protection change. Generic M4 reservations use the runtime's PAGE_READWRITE default.
+
+
+## Region memory type
+
+Address-space regions retain a memory type independently from their state and page protection. Generic reservations are MEM_PRIVATE. The PE image loader tags its headers and each mapped section as MEM_IMAGE before commit. VirtualQuery reports MEM_PRIVATE, MEM_MAPPED, or MEM_IMAGE from this metadata; MEM_MAPPED is representable for future file-mapping support but is not currently created by the runtime.
+
+
+## M10 page-range virtual memory
+
+- `VirtualAlloc(MEM_COMMIT)` commits page-rounded ranges inside one existing reservation. The address is rounded down to the containing page and the complete byte span is rounded up. Already-committed pages are a no-op and retain their current protection; only newly committed pages receive the requested protection.
+- `VirtualFree(MEM_DECOMMIT)` decommits a page range while retaining the reservation. The address must be page-aligned and the size is rounded up.
+- `VirtualProtect` rounds the start down to its containing page and rounds up the complete byte span (`address offset + size`), so an unaligned range crossing a page boundary affects both pages; the prior protection reported is that of the first page.
+- Range metadata is split at boundaries. Every segment retains the original allocation base, and `MEM_RELEASE` is accepted only at that original base and releases all segments.
+- A range may not cross reservation boundaries or include pages in an incompatible state. Partial operations are validated before host mapping changes.
+- Linux decommit marks the range PROT_NONE and uses MADV_DONTNEED to discard anonymous backing pages. The PAL currently exposes this operation for the Linux host backend only.

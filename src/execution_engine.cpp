@@ -157,8 +157,14 @@ ExecutionResult DeterministicBackend::run(
     std::uint64_t executed = 0;
 
     while (true) {
-        // Cancellation is observable between instructions.
-        if (interrupted.load()) {
+        // Suspension and cancellation are separate states. The control
+        // gate parks only at instruction boundaries; cancellation always
+        // wins and releases a parked execution.
+        if (req.control != nullptr && !req.control->checkpoint(interrupted)) {
+            res.outcome = Outcome::Interrupted;
+            break;
+        }
+        if (interrupted.load(std::memory_order_acquire)) {
             res.outcome = Outcome::Interrupted;
             break;
         }
@@ -173,25 +179,145 @@ ExecutionResult DeterministicBackend::run(
 
         const std::uint64_t rip = io_cpu.rip;
 
-        // Imported-API entry: landing on a binding value.
+        // Imported-API entry: resolve the exact import identity captured
+        // by ExecutionContext from the loader diagnostics, then marshal
+        // through the same GuestMemory + ApiRegistry path used by tests.
         if (is_api_binding(rip)) {
-            // Find the plan: the binding value encodes an id into the
-            // resolver table; the engine resolves the API by matching
-            // the binding VALUE against the request's list, then asks
-            // the M7 registry for the descriptor by index. The request
-            // carries binding values in IAT order; we map binding ->
-            // (library, export) by asking the registry for what is
-            // registered — the bridge needs a plan per call.
-            // (See marshal path: the context supplies the plan list.)
-            res.exception = std::nullopt;
-            // Handled at the context level; the engine-level fallback:
-            // a binding hit with no plan is an InvalidState fault.
-            fault(GuestFault::InvalidState, io_cpu, AccessType::None, rip,
-                  pid_, tid_, Recoverability::Fatal,
-                  "API binding hit with no marshal plan bound",
-                  res.exception);
-            res.outcome = Outcome::Faulted;
-            break;
+            const auto matches = static_cast<std::size_t>(std::count_if(
+                req.api_bindings.begin(), req.api_bindings.end(),
+                [rip](const ApiBindingInfo& item) { return item.value == rip; }));
+            const auto binding = std::find_if(
+                req.api_bindings.begin(), req.api_bindings.end(),
+                [rip](const ApiBindingInfo& item) { return item.value == rip; });
+            if (matches != 1 || binding == req.api_bindings.end()) {
+                fault(GuestFault::InvalidState, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      matches == 0
+                          ? "API binding has no matching resolved import identity"
+                          : "API binding has ambiguous duplicate import identities",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            const auto* descriptor = binding->by_ordinal
+                ? registry_.find_ordinal(binding->library, binding->ordinal)
+                : registry_.find(binding->library, binding->export_name);
+            if (descriptor == nullptr) {
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "resolved API import no longer has a verified descriptor",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            auto plan = plan_for_descriptor(*descriptor);
+            if (!plan.ok()) {
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API marshalling plan unavailable: " + plan.error_string(),
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            const auto rsp = rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+            auto return_address = mem.read_u64(rsp);
+            if (!return_address.ok()) {
+                fault(GuestFault::InvalidAccess, io_cpu, AccessType::Read, rsp,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API call return address is unreadable",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            const auto return_valid = mem.validate_exec(return_address.value());
+            if (!return_valid.ok()) {
+                const auto kind = return_valid.err == guest::GuestMemErrc::PermissionDenied
+                    ? GuestFault::PermissionExec : GuestFault::InvalidAccess;
+                fault(kind, io_cpu, AccessType::Execute, return_address.value(),
+                      pid_, tid_, Recoverability::Fatal,
+                      "API call return address is not executable",
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            const auto depth = impl_->dispatch_depth;
+            ++impl_->dispatch_depth;
+            // Manual task-queue callbacks execute on this guest thread.
+            // Carve a bounded nested frame below the suspended caller RSP;
+            // preserve the caller CPU state and use the normal interpreter,
+            // API bindings, instruction budget, and cooperative gate.
+            api::GuestCallbackInvoker callback_invoker =
+                [this, &req, &io_cpu, &mem, &interrupted, stack_floor](
+                    std::uint64_t callback_va, std::uint64_t callback_context,
+                    bool canceled) -> Result<void> {
+                    if (callback_va == 0 || req.completion_va == 0)
+                        return Result<void>(RuntimeErrc::InvalidArgument,
+                                            "guest callback or completion sentinel is null");
+                    const std::uint64_t parent_rsp =
+                        rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+                    constexpr std::uint64_t kCallbackFrameReserve = 0x100;
+                    if (parent_rsp < stack_floor ||
+                        parent_rsp - stack_floor < kCallbackFrameReserve + 0x100)
+                        return Result<void>(RuntimeErrc::OutOfResources,
+                                            "insufficient guest stack for nested task callback");
+                    const std::uint64_t callback_rsp =
+                        parent_rsp - kCallbackFrameReserve;
+                    if ((callback_rsp & 0xFull) != 8)
+                        return Result<void>(RuntimeErrc::InvalidState,
+                                            "nested callback stack violates x64 entry alignment");
+                    const auto stack_write = mem.write_u64(callback_rsp, req.completion_va);
+                    if (!stack_write.ok())
+                        return Result<void>(RuntimeErrc::PlatformError,
+                                            "cannot prepare nested callback return slot");
+                    ExecutionRequest callback_request = req;
+                    callback_request.entry_va = callback_va;
+                    callback_request.stack_top_va = callback_rsp + 0x80;
+                    callback_request.stack_size = callback_request.stack_top_va - stack_floor;
+                    callback_request.entry_args.clear();
+                    callback_request.control = req.control;
+                    CpuState callback_cpu = io_cpu;
+                    callback_cpu.set_reg(Gpr::Sp, callback_rsp);
+                    callback_cpu.set_reg(Gpr::Rcx, callback_context);
+                    callback_cpu.set_reg(Gpr::Rdx, canceled ? 1u : 0u);
+                    callback_cpu.rip = callback_va;
+                    const auto callback_result =
+                        this->run(callback_request, callback_cpu, interrupted);
+                    if (callback_result.outcome != Outcome::Returned) {
+                        const std::string detail = callback_result.exception.has_value()
+                            ? format_exception(*callback_result.exception)
+                            : std::string("guest callback did not return normally");
+                        return Result<void>(RuntimeErrc::PlatformError, detail);
+                    }
+                    return Result<void>::ok_result();
+                };
+            auto dispatched = marshal_and_dispatch(
+                io_cpu, mem, registry_, plan.value(), pid_, depth,
+                cfg_.max_dispatch_depth, tid_, callback_invoker);
+            --impl_->dispatch_depth;
+            if (!dispatched.ok()) {
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal,
+                      "API marshalling/dispatch failed: " + dispatched.error_string(),
+                      res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            if (!dispatched.value().dispatched || !dispatched.value().api_result.ok) {
+                const auto detail = dispatched.value().api_result.error.empty()
+                    ? std::string("API implementation rejected the call")
+                    : dispatched.value().api_result.error;
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Fatal, detail, res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            io_cpu.rip = return_address.value();
+            ++res.api_calls;
+            continue;
         }
 
         // Completion sentinel check happens on RET target (below).
@@ -319,7 +445,9 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
                                           const MarshalPlan& plan,
                                           std::uint64_t pid,
                                           std::uint32_t depth,
-                                          std::uint32_t max_depth) {
+                                          std::uint32_t max_depth,
+                                          std::uint64_t tid,
+                                          const api::GuestCallbackInvoker& invoke_callback) {
     using Ret = Result<MarshalResult>;
     if (depth >= max_depth) {
         return Ret(RuntimeErrc::OutOfResources,
@@ -341,9 +469,27 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
         return Ret(RuntimeErrc::InvalidArgument,
                    "argument extraction: " + args.error_string());
     }
+    // Function pointers are not ordinary data pointers: a zero-sized Ptr
+    // argument deliberately skips generic range checks, so validate the
+    // submitted callback as executable guest memory before it enters a queue.
+    if (plan.library == "xgameruntime" &&
+        plan.export_name == "XTaskQueueSubmitCallback") {
+        if (args.value().size() != 4 || args.value()[3].ptr_va == 0) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "task-queue callback address is null or missing");
+        }
+        const auto executable = mem.validate(args.value()[3].ptr_va, 1, false, true);
+        if (!executable.ok()) {
+            return Ret(RuntimeErrc::NotFound,
+                       std::string("task-queue callback is not executable guest memory: ") +
+                           guest::guest_mem_errc_to_name(executable.err));
+        }
+    }
     // 2. Build the M7 ApiContext from the values (validated pointers).
     api::ApiContext ctx;
     ctx.process_id = pid;
+    ctx.thread_id = tid;
+    ctx.invoke_guest_callback = invoke_callback;
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&
                             i < api::ApiContext::kMaxArgs;
@@ -368,6 +514,32 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
             default:
                 ctx.args[ctx.arg_count++] = v.int_v;
                 break;
+        }
+    }
+
+    // Decode explicitly planned, bounded guest pointer arrays through GuestMemory.
+    for (const auto& array : plan.pointer_array_args) {
+        if (array.pointer_arg >= args.value().size() ||
+            array.count_arg >= ctx.arg_count || array.element_size != sizeof(std::uint64_t) ||
+            array.max_count == 0 || array.max_count > 64) {
+            return Ret(RuntimeErrc::InvalidArgument, "invalid pointer-array marshalling plan");
+        }
+        const auto count = ctx.args[array.count_arg];
+        if (count == 0 || count > array.max_count) {
+            return Ret(RuntimeErrc::InvalidArgument, "guest pointer-array count is outside the supported bound");
+        }
+        const auto ptr = args.value()[array.pointer_arg].ptr_va;
+        const auto bytes = count * array.element_size;
+        const auto valid = mem.validate(ptr, bytes, false, false);
+        if (!valid.ok()) return Ret(RuntimeErrc::NotFound, "guest pointer array is not readable");
+        auto& values = ctx.pointer_arrays[array.pointer_arg];
+        values.reserve(static_cast<std::size_t>(count));
+        for (std::uint64_t i = 0; i < count; ++i) {
+            if (i > (UINT64_MAX - ptr) / array.element_size)
+                return Ret(RuntimeErrc::InvalidArgument, "guest pointer-array address overflow");
+            auto value = mem.read_u64(ptr + i * array.element_size);
+            if (!value.ok()) return Ret(RuntimeErrc::NotFound, "guest pointer-array element is unreadable");
+            values.push_back(value.value());
         }
     }
 
@@ -449,7 +621,7 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     plan.library = d.library;
     plan.export_name = d.export_name;
     // Plan the call from the DOCUMENTED signature (param kinds follow
-    // the signature's parameter types for the 16 built-in APIs; any
+    // the signature's parameter types for the explicitly whitelisted APIs; any
     // other API yields a typed error — never guessed).
     //
     // Built-in signatures and their marshalling kinds:
@@ -469,6 +641,7 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     //   XTaskQueueTerminate(queue, bool, ptr, ptr)     -> int, int, ptr, ptr
     //   QueryPerformanceCounter(ptr)                   -> ptr out, BOOL
     //   QueryPerformanceFrequency(ptr)                 -> ptr out, BOOL
+    //   WaitForMultipleObjects(count, handles, waitAll, timeout) -> wait-any subset
     const std::string id = d.export_name;
     auto int_arg = [&] { abi::ArgSpec a; a.kind = abi::ArgKind::Int; return a; };
     auto ptr_in = [&](std::uint64_t sz) {
@@ -523,8 +696,82 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(ptr_in(0));
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "QueryPerformanceCounter" || id == "QueryPerformanceFrequency") {
-        plan.call.args.push_back(ptr_out(8));
-        plan.out_buffer_args.push_back(0);
+        plan.call.args.push_back(ptr_out(8)); plan.out_buffer_args.push_back(0);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "GetCurrentProcessId" || id == "GetCurrentThreadId") {
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateMutexW") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(ptr_in(0)); plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "ReleaseMutex") {
+        plan.call.args.push_back(int_arg()); plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateSemaphoreW") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(ptr_in(0));
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "ReleaseSemaphore") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(ptr_out(4)); plan.out_buffer_args.push_back(2);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateEventW") {
+        plan.call.args.push_back(ptr_in(0));
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(ptr_in(0));
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "SetEvent" || id == "ResetEvent" || id == "CloseHandle") {
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "WaitForSingleObject") {
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XTaskQueueDuplicateHandle") {
+        plan.call.args.push_back(int_arg()); // queueHandle
+        plan.call.args.push_back(ptr_out(8)); // duplicatedHandle
+        plan.out_buffer_args.push_back(1);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XTaskQueueSubmitCallback") {
+        // The service retains the guest callback VA and context. Dispatch
+        // supplies a bounded invoker that runs the callback on this guest
+        // thread while preserving the suspended caller CPU state.
+        plan.call.args.push_back(int_arg()); // queue handle
+        plan.call.args.push_back(int_arg()); // port enum
+        plan.call.args.push_back(ptr_in(0)); // callback context
+        plan.call.args.push_back(ptr_in(0)); // guest callback address
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XTaskQueueSubmitDelayedCallback") {
+        // Delayed callback registration is recognized for safe ABI decoding
+        // only. The service does not schedule or invoke guest callbacks.
+        plan.call.args.push_back(int_arg()); // queue handle
+        plan.call.args.push_back(int_arg()); // port enum
+        plan.call.args.push_back(int_arg()); // delay in milliseconds
+        plan.call.args.push_back(ptr_in(0)); // callback context
+        plan.call.args.push_back(ptr_in(0)); // guest callback address
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "WaitForMultipleObjects") {
+        plan.call.args.push_back(int_arg()); // nCount
+        plan.call.args.push_back(ptr_in(0)); // lpHandles
+        plan.call.args.push_back(int_arg()); // bWaitAll
+        plan.call.args.push_back(int_arg()); // dwMilliseconds
+        plan.pointer_array_args.push_back({1, 0, 64, 8});
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualQuery") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(ptr_out(48));
+        plan.call.args.push_back(int_arg()); plan.out_buffer_args.push_back(1);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualAlloc") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualFree") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "VirtualProtect") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(ptr_out(4));
+        plan.out_buffer_args.push_back(3);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else {
         return Ret(RuntimeErrc::NotFound,

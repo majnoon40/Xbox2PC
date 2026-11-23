@@ -330,6 +330,12 @@ TEST(LoaderMappingTest, AutoRelocationWhenPreferredUnavailable) {
     ASSERT_TRUE(dst.ok());
     EXPECT_EQ(static_cast<const std::uint8_t*>(dst.value())[0], 'M');
     EXPECT_EQ(static_cast<const std::uint8_t*>(dst.value())[1], 'Z');
+    const auto headers = proc->address_space().find_region(lay.value().headers_region_xbox_va);
+    ASSERT_TRUE(headers.ok());
+    EXPECT_EQ(headers.value().region_type, xbox2pc::rt::VmRegionType::Image);
+    const auto text_region = proc->address_space().find_region(lay.value().sections.front().mapped_base);
+    ASSERT_TRUE(text_region.ok());
+    EXPECT_EQ(text_region.value().region_type, xbox2pc::rt::VmRegionType::Image);
 }
 
 TEST(LoaderMappingTest, ZeroFillBeyondRawData) {

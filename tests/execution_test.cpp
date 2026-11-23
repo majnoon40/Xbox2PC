@@ -24,8 +24,10 @@
 // for the documented subset — no claim of general emulation).
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -56,12 +58,18 @@ struct ExecWorld {
     RuntimeCore core;
     ProcessManager pm;
     api::GameRuntimeService* grt = nullptr;
+    api::TaskQueueService* tq = nullptr;
 
     ExecWorld() : pm(core.objects()) {
         {
-            auto grt_s = std::make_unique<api::GameRuntimeService>(reg);
+            auto grt_s = std::make_unique<api::GameRuntimeService>(reg, pm);
             grt = grt_s.get();
             EXPECT_TRUE(core.services().register_service(std::move(grt_s)).ok());
+        }
+        {
+            auto tq_s = std::make_unique<api::TaskQueueService>(reg, pm);
+            tq = tq_s.get();
+            EXPECT_TRUE(core.services().register_service(std::move(tq_s)).ok());
         }
         EXPECT_TRUE(core.initialize().ok());
     }
@@ -89,6 +97,43 @@ Handle scratch_region(ManagedProcess& proc, std::uint64_t size,
     return {};
 }
 
+class ContextBindingProbe final : public IExecutionEngine {
+public:
+    const char* engine_kind() const override { return "context-binding-probe"; }
+    const char* engine_description() const override { return "test probe"; }
+    Result<void> bind_execution_context(std::uint64_t pid, std::uint64_t tid,
+                                        AddressSpace& space) override {
+        bound_pid = pid;
+        bound_tid = tid;
+        bound_space = &space;
+        ++bind_count;
+        return Result<void>::ok_result();
+    }
+    ExecutionResult run(const ExecutionRequest& request, cpu::CpuState& state,
+                        const std::atomic<bool>&) override {
+        run_called = true;
+        run_control = request.control.get();
+        ExecutionResult result;
+        result.outcome = Outcome::Returned;
+        result.cpu.state = state;
+        return result;
+    }
+    bool supports_single_step() const override { return true; }
+    Result<std::uint64_t> single_step(cpu::CpuState&, const ExecutionRequest& request) override {
+        step_called = true;
+        step_control = request.control.get();
+        return Result<std::uint64_t>(0x1234u);
+    }
+    const ExecutionControl* run_control = nullptr;
+    const ExecutionControl* step_control = nullptr;
+    std::uint64_t bound_pid = 0;
+    std::uint64_t bound_tid = 0;
+    AddressSpace* bound_space = nullptr;
+    unsigned bind_count = 0;
+    bool run_called = false;
+    bool step_called = false;
+};
+
 // Code emitter helpers (subset).
 std::vector<std::uint8_t> mov_rax_imm(std::uint64_t v) {
     std::vector<std::uint8_t> b{0x48, 0xB8};
@@ -97,6 +142,60 @@ std::vector<std::uint8_t> mov_rax_imm(std::uint64_t v) {
 }
 
 }  // namespace
+
+// ── M10 cooperative execution control ────────────────────────────────────
+
+TEST(ExecutionControlTest, SuspendResumeAndCancellationAreDistinct) {
+    ExecutionControl control;
+    std::atomic<bool> interrupted{false};
+    std::atomic<bool> completed{false};
+    std::atomic<bool> checkpoint_result{false};
+
+    control.request_suspend();
+    std::thread worker([&] {
+        checkpoint_result.store(control.checkpoint(interrupted),
+                                std::memory_order_release);
+        completed.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (!control.is_parked() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool parked = control.is_parked();
+    EXPECT_TRUE(parked) << "suspend request did not park at checkpoint";
+    EXPECT_FALSE(completed.load(std::memory_order_acquire));
+    control.resume();
+    worker.join();
+    EXPECT_TRUE(checkpoint_result.load(std::memory_order_acquire));
+    EXPECT_TRUE(completed.load(std::memory_order_acquire));
+    EXPECT_FALSE(control.is_parked());
+
+    // A terminal interrupt must also release a parked checkpoint without
+    // being mistaken for a resume request.
+    completed.store(false, std::memory_order_release);
+    checkpoint_result.store(true, std::memory_order_release);
+    control.request_suspend();
+    std::thread cancelled_worker([&] {
+        checkpoint_result.store(control.checkpoint(interrupted),
+                                std::memory_order_release);
+        completed.store(true, std::memory_order_release);
+    });
+    const auto cancel_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (!control.is_parked() &&
+           std::chrono::steady_clock::now() < cancel_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool cancellation_parked = control.is_parked();
+    EXPECT_TRUE(cancellation_parked);
+    interrupted.store(true, std::memory_order_release);
+    cancelled_worker.join();
+    EXPECT_FALSE(checkpoint_result.load(std::memory_order_acquire));
+    EXPECT_TRUE(completed.load(std::memory_order_acquire));
+    EXPECT_FALSE(control.is_parked());
+}
 
 // ── CPU state ─────────────────────────────────────────────────────────────
 
@@ -525,10 +624,40 @@ TEST(BridgeTest, PlanForDescriptorsAndErrors) {
     ExecWorld w;
     for (const auto* d : w.reg.all()) {
         auto p = plan_for_descriptor(*d);
-        // All 16 built-ins have documented plans.
+        // Every descriptor has an explicit plan or is rejected by the whitelist.
         ASSERT_TRUE(p.ok()) << d->export_name << ": " << p.error_string();
         EXPECT_TRUE(rt::abi::validate_call(p.value().call).ok());
     }
+    const auto* multi = w.reg.find("kernel32", "WaitForMultipleObjects");
+    ASSERT_NE(multi, nullptr);
+    auto multi_plan = plan_for_descriptor(*multi);
+    ASSERT_TRUE(multi_plan.ok());
+    ASSERT_EQ(multi_plan.value().pointer_array_args.size(), 1u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].pointer_arg, 1u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].count_arg, 0u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].max_count, 64u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].element_size, 8u);
+    const auto* submit_callback = w.reg.find(
+        "xgameruntime", "XTaskQueueSubmitCallback");
+    ASSERT_NE(submit_callback, nullptr);
+    const auto submit_plan = plan_for_descriptor(*submit_callback);
+    ASSERT_TRUE(submit_plan.ok()) << submit_plan.error_string();
+    ASSERT_EQ(submit_plan.value().call.args.size(), 4u);
+    EXPECT_EQ(submit_plan.value().call.args[0].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(submit_plan.value().call.args[1].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(submit_plan.value().call.args[2].kind, rt::abi::ArgKind::Ptr);
+    EXPECT_EQ(submit_plan.value().call.args[3].kind, rt::abi::ArgKind::Ptr);
+    const auto* delayed = w.reg.find("xgameruntime",
+                                     "XTaskQueueSubmitDelayedCallback");
+    ASSERT_NE(delayed, nullptr);
+    auto delayed_plan = plan_for_descriptor(*delayed);
+    ASSERT_TRUE(delayed_plan.ok()) << delayed_plan.error_string();
+    ASSERT_EQ(delayed_plan.value().call.args.size(), 5u);
+    EXPECT_EQ(delayed_plan.value().call.args[0].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[1].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[2].kind, rt::abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[3].kind, rt::abi::ArgKind::Ptr);
+    EXPECT_EQ(delayed_plan.value().call.args[4].kind, rt::abi::ArgKind::Ptr);
     // An unknown descriptor is refused.
     api::ApiDescriptor fake;
     fake.library = "fakelib";
@@ -567,6 +696,144 @@ TEST(BridgeTest, MarshalIntegerCall) {
     EXPECT_TRUE(r.value().dispatched);
     EXPECT_EQ(r.value().api_result.return_value, api::kSOk);
     EXPECT_EQ(c.reg(cpu::Gpr::Rax), api::kSOk);   // marshalled into guest RAX
+}
+
+TEST(BridgeTest, ThreadIdentityReachesGdkService) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("thread-identity.exe");
+    guest::GuestMemory mem(proc->address_space());
+    auto plan = plan_for_descriptor(
+        *w.reg.find("xgameruntime", "XThreadSetTimeSensitive"));
+    ASSERT_TRUE(plan.ok());
+    cpu::CpuState c;
+    c.reset();
+    c.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack st(0x2003F000ull, 0x1000);
+    std::vector<rt::abi::ArgValue> args(1);
+    args[0].int_v = 1;
+    auto prep = rt::abi::prepare_call(
+        c, 0x51000001, plan.value().call, args, HostStack::writer(&st));
+    ASSERT_TRUE(prep.ok()) << prep.error_string();
+
+    auto dispatched = marshal_and_dispatch(
+        c, mem, w.reg, plan.value(), 42, 0, 64, 7);
+    ASSERT_TRUE(dispatched.ok()) << dispatched.error_string();
+    EXPECT_TRUE(dispatched.value().api_result.ok);
+    EXPECT_EQ(dispatched.value().api_result.return_value, api::kSOk);
+
+    api::ApiContext query;
+    query.process_id = 42;
+    query.thread_id = 7;
+    auto same_thread = w.reg.dispatch(
+        "xgameruntime", "XThreadIsTimeSensitive", query);
+    ASSERT_TRUE(same_thread.ok);
+    EXPECT_EQ(same_thread.return_value, 1u);
+    query.process_id = 43;
+    auto other_process = w.reg.dispatch(
+        "xgameruntime", "XThreadIsTimeSensitive", query);
+    ASSERT_TRUE(other_process.ok);
+    EXPECT_EQ(other_process.return_value, 0u);
+}
+
+TEST(BridgeTest, MarshalWaitForMultipleObjectsReadsGuestHandleArray) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("wait-multiple.exe");
+    const auto resolved_pid = w.pm.resolve_pid(ph);
+    ASSERT_TRUE(resolved_pid.ok());
+    const auto pid = resolved_pid.value();
+    ModuleDescriptor module;
+    module.module_name = "wait-multiple.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(ph, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(ph).ok());
+    guest::GuestMemory mem(proc->address_space());
+    auto first = w.grt->create_event(pid, true, false);
+    auto second = w.grt->create_event(pid, true, true);
+    ASSERT_TRUE(first.ok());
+    ASSERT_TRUE(second.ok());
+
+    std::uint64_t handles_va = 0;
+    scratch_region(*proc, 0x1000, &handles_va);
+    ASSERT_TRUE(mem.write_u64(handles_va, first.value()).ok());
+    ASSERT_TRUE(mem.write_u64(handles_va + 8, second.value()).ok());
+
+    const auto* descriptor = w.reg.find("kernel32", "WaitForMultipleObjects");
+    ASSERT_NE(descriptor, nullptr);
+    auto plan = plan_for_descriptor(*descriptor);
+    ASSERT_TRUE(plan.ok());
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack host_stack(0x2003F000ull, 0x1000);
+    std::vector<rt::abi::ArgValue> values(4);
+    values[0].int_v = 2; // nCount
+    values[1].ptr_va = handles_va;
+    values[1].int_v = handles_va;
+    values[1].kind = rt::abi::ArgKind::Ptr;
+    values[2].int_v = 0; // wait-any
+    values[3].int_v = 0; // poll
+    auto prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000004, plan.value().call, values,
+        HostStack::writer(&host_stack));
+    ASSERT_TRUE(prepared.ok()) << prepared.error_string();
+
+    auto result = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    ASSERT_TRUE(result.ok()) << result.error_string();
+    EXPECT_TRUE(result.value().dispatched);
+    EXPECT_EQ(result.value().api_result.return_value, 1u);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 1u);
+
+    // The same guest array now exercises transactional wait-all through
+    // the guest-memory marshalling bridge. The first event is initially
+    // unsignaled, so the initial attempt times out without consuming the
+    // second manual-reset event.
+    values[2].int_v = 1;
+    auto wait_all_prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000005, plan.value().call, values,
+        HostStack::writer(&host_stack));
+    ASSERT_TRUE(wait_all_prepared.ok());
+    auto wait_all_timeout = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    ASSERT_TRUE(wait_all_timeout.ok());
+    EXPECT_EQ(wait_all_timeout.value().api_result.return_value, 0x102u);
+
+    ASSERT_TRUE(w.grt->set_event(pid, first.value()).ok());
+    auto wait_all_ready = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    ASSERT_TRUE(wait_all_ready.ok());
+    EXPECT_EQ(wait_all_ready.value().api_result.return_value, 0u);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 0u);
+
+    // Counts above the explicit ABI bridge bound are rejected before reading.
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    values[0].int_v = 65;
+    values[2].int_v = 0;
+    HostStack oversized_stack(0x2003F000ull, 0x1000);
+    auto oversized_prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000006, plan.value().call, values,
+        HostStack::writer(&oversized_stack));
+    ASSERT_TRUE(oversized_prepared.ok());
+    auto oversized = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    EXPECT_FALSE(oversized.ok());
+
+    // An unreadable guest handle array is rejected by GuestMemory validation.
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    values[0].int_v = 2;
+    values[1].ptr_va = 0xDEAD0000;
+    values[1].int_v = 0xDEAD0000;
+    HostStack invalid_stack(0x2003F000ull, 0x1000);
+    auto invalid_prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000007, plan.value().call, values,
+        HostStack::writer(&invalid_stack));
+    ASSERT_TRUE(invalid_prepared.ok());
+    auto invalid = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    EXPECT_FALSE(invalid.ok());
 }
 
 TEST(BridgeTest, MarshalPointerCallWithOutBuffer) {
@@ -662,7 +929,16 @@ struct LoadedGuest {
     ManagedProcess* proc;
     Handle image;
     loader::LoadResult out;
+    loader::LoadDiagnostics diagnostics;
+    bool parsed_imports_present = false;
+    std::size_t parsed_import_count = 0;
+    std::size_t parsed_import_function_count = 0;
+    std::size_t parsed_import_ordinal_count = 0;
+    std::uint32_t parsed_import_int_rva = 0;
+    std::uint32_t parsed_import_iat_rva = 0;
+    std::uint32_t parsed_import_directory_size = 0;
     std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> original_bytes;
     loader::ImageLoader loader;
     api::ApiResolver resolver;
     bool load_ok = false;
@@ -681,12 +957,22 @@ struct LoadedGuest {
             spec.imports = {{"xgameruntime", {{"XGameRuntimeInitialize", 1}}}};
         }
         bytes = test::PeBuilder(spec).build();
+        original_bytes = bytes;
         diag::Diagnostics pd;
         auto img = pe::parse(bytes.data(), bytes.size(), name, pd);
-        loader::LoadDiagnostics ld;
+        parsed_imports_present = img.imports.present;
+        parsed_import_count = img.imports.entries.size();
+        if (!img.imports.entries.empty()) {
+            parsed_import_function_count = img.imports.entries.front().functions.size();
+            parsed_import_ordinal_count = img.imports.entries.front().ordinal_only.size();
+            parsed_import_int_rva = img.imports.entries.front().int_rva;
+            parsed_import_iat_rva = img.imports.entries.front().iat_rva;
+        }
+        parsed_import_directory_size = img.directories.size() > pe::kDirImport
+            ? img.directories[pe::kDirImport].size : 0;
         auto h = loader.load_image(w.pm, w.core.objects(), ph, img,
                                    bytes.data(), bytes.size(), &resolver,
-                                   ld, out);
+                                   diagnostics, out);
         load_ok = h.ok();
         load_error = out.error;
         image = load_ok ? h.value() : Handle{};
@@ -696,6 +982,511 @@ struct LoadedGuest {
     }
 };
 }  // namespace
+
+TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
+    ExecWorld world;
+    const std::vector<std::uint8_t> loop_code{0xE9, 0xFB, 0xFF, 0xFF, 0xFF};
+    LoadedGuest guest(world, loop_code, "suspend-loop.exe");
+    ASSERT_TRUE(guest.load_ok) << guest.load_error;
+
+    const auto pid = world.pm.resolve_pid(guest.ph);
+    ASSERT_TRUE(pid.ok());
+    auto cfg = ExecutionConfig::default_validated();
+    ASSERT_TRUE(cfg.ok());
+    ExecutionContext context(pid.value(), 0xA10, guest.proc->address_space(),
+                             world.reg, cfg.value(), "suspend-loop");
+    ASSERT_TRUE(context.initialize().ok());
+
+    DeterministicBackend backend(world.reg, cfg.value());
+    ExecutionRequest request;
+    request.entry_va = guest.out.exec.entry_va;
+    request.stack_top_va = context.info().stack_top;
+    request.stack_size = context.info().stack_size;
+    context.cpu_mut().set_reg(cpu::Gpr::Sp, context.info().stack_top - 0x20);
+    context.cpu_mut().rip = request.entry_va;
+    std::atomic<bool> interrupted{false};
+    std::atomic<bool> entered_invoke{false};
+    std::atomic<bool> finished{false};
+    std::atomic<int> outcome{static_cast<int>(Outcome::Faulted)};
+    struct RunnerState {
+        ExecutionContext* context;
+        DeterministicBackend* backend;
+        ExecutionRequest* request;
+        std::atomic<bool>* interrupted;
+        std::atomic<bool>* entered_invoke;
+        std::atomic<bool>* finished;
+        std::atomic<int>* outcome;
+    } runner{&context, &backend, &request, &interrupted, &entered_invoke,
+             &finished, &outcome};
+
+    auto handle = world.core.create_thread(
+        [](RtThread&, void* raw) -> void* {
+            auto& run = *static_cast<RunnerState*>(raw);
+            run.entered_invoke->store(true, std::memory_order_release);
+            const auto result = run.context->invoke(*run.request, *run.backend,
+                                                     *run.interrupted);
+            run.outcome->store(result.ok()
+                ? static_cast<int>(result.value().outcome)
+                : static_cast<int>(Outcome::Faulted), std::memory_order_release);
+            run.finished->store(true, std::memory_order_release);
+            return nullptr;
+        },
+        &runner, "guest-execution-thread");
+    ASSERT_TRUE(handle.ok());
+    auto thread_guard = world.core.objects().lookup_handle(handle.value());
+    ASSERT_TRUE(thread_guard.ok());
+    auto* thread = thread_guard.value().get()->as<RtThread>();
+    ASSERT_NE(thread, nullptr);
+    ASSERT_TRUE(context.bind_thread_control(thread->execution_control()).ok());
+    ASSERT_TRUE(thread->start().ok());
+    const auto entry_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (!entered_invoke.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < entry_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(entered_invoke.load(std::memory_order_acquire));
+    ASSERT_TRUE(thread->suspend().ok());
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (!thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool parked = thread->execution_control()->is_parked();
+    EXPECT_TRUE(parked) << "managed suspend did not park guest execution";
+    EXPECT_FALSE(finished.load(std::memory_order_acquire));
+    EXPECT_EQ(thread->state(), rt::ThreadState::Suspended);
+
+    ASSERT_TRUE(thread->resume().ok());
+    const auto resume_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_FALSE(thread->execution_control()->is_parked());
+
+    // Terminal stop is distinct from resume and wakes the running backend.
+    thread->request_stop();
+    const auto joined = thread->join_ns(2'000'000'000LL);
+    ASSERT_TRUE(joined.ok());
+    EXPECT_TRUE(finished.load(std::memory_order_acquire));
+    EXPECT_EQ(outcome.load(std::memory_order_acquire),
+              static_cast<int>(Outcome::Interrupted));
+    EXPECT_EQ(thread->state(), rt::ThreadState::Terminated);
+}
+
+TEST(ContextTest, AutomaticallyBindsProcessThreadAndAddressSpaceToEngine) {
+    ExecWorld w;
+    auto [handle, process] = w.new_process("context-binding.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = w.pm.resolve_pid(handle);
+    ASSERT_TRUE(pid.ok());
+
+    auto cfg = ExecutionConfig::default_validated().value();
+    ExecutionContext ctx(pid.value(), 0x5678, process->address_space(),
+                         w.reg, cfg, "context-binding");
+    ASSERT_TRUE(ctx.initialize().ok());
+
+    ExecutionRequest req;
+    req.stack_top_va = ctx.info().stack_top;
+    req.stack_size = ctx.info().stack_size;
+    ContextBindingProbe engine;
+    std::atomic<bool> stop{false};
+
+    const auto invoked = ctx.invoke(req, engine, stop);
+    ASSERT_TRUE(invoked.ok()) << invoked.error_string();
+    EXPECT_TRUE(engine.run_called);
+    EXPECT_EQ(engine.bound_pid, pid.value());
+    EXPECT_EQ(engine.bound_tid, 0x5678u);
+    EXPECT_EQ(engine.bound_space, &process->address_space());
+
+    const auto stepped = ctx.step(req, engine);
+    ASSERT_TRUE(stepped.ok()) << stepped.error_string();
+    EXPECT_TRUE(engine.step_called);
+    EXPECT_EQ(engine.bind_count, 2u);
+    EXPECT_EQ(engine.bound_pid, pid.value());
+    EXPECT_EQ(engine.bound_tid, 0x5678u);
+
+    EXPECT_TRUE(ctx.destroy().ok());
+    EXPECT_TRUE(w.pm.terminate_process(handle, 0).ok());
+}
+
+TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("api-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "api-binding.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok()); // guest RET
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t binding = 0x51000001ull;
+    EXPECT_TRUE(is_api_binding(0x51010001ull)); // Win32 bindings occupy the second synthetic range
+    constexpr std::uint64_t tid = 0x91;
+    const std::uint64_t rsp = stack_va + 0x100;
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(
+        ApiBindingInfo{binding, "xgameruntime", "XGameRuntimeInitialize", false, 0});
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    EXPECT_EQ(result.outcome, Outcome::Returned);
+    EXPECT_EQ(result.api_calls, 1u);
+    EXPECT_EQ(result.return_value, api::kSOk);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), api::kSOk);
+    EXPECT_EQ(cpu_state.rip, code_va + 0x100); // RET sentinel pre-check stops at the return instruction
+}
+
+TEST(EngineTest, DispatchesWin32EventApiBinding) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("win32-api-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "win32-api-binding.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t binding = 0x51010001ull;
+    constexpr std::uint64_t tid = 0x94;
+    const std::uint64_t rsp = stack_va + 0x100;
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(
+        ApiBindingInfo{binding, "kernel32", "CreateEventW", false, 0});
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, 0); // null security attributes
+    cpu_state.set_reg(cpu::Gpr::Rdx, 1); // manual-reset event
+    cpu_state.set_reg(cpu::Gpr::R8, 1);  // initially signaled
+    cpu_state.set_reg(cpu::Gpr::R9, 0);  // unnamed
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    EXPECT_EQ(result.outcome, Outcome::Returned);
+    EXPECT_EQ(result.api_calls, 1u);
+    ASSERT_NE(result.return_value, 0u);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), result.return_value);
+    auto signaled = w.grt->wait_object(pid, tid, result.return_value, 0);
+    ASSERT_TRUE(signaled.ok());
+    EXPECT_EQ(signaled.value(), 0u);
+    EXPECT_TRUE(w.grt->close_sync_handle(pid, result.return_value).ok());
+}
+
+TEST(EngineTest, DispatchesTaskQueueDuplicateHandleAndWritesGuestOutput) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("task-queue-duplicate-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "task-queue-duplicate-binding.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    const auto original = w.tq->create_queue(
+        pid,
+        static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(original.ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    std::uint64_t output_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    scratch_region(*process, 0x1000, &output_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+    ASSERT_TRUE(mem.write_u64(output_va, 0).ok());
+
+    constexpr std::uint64_t binding = 0x51000001ull;
+    constexpr std::uint64_t tid = 0x95;
+    const std::uint64_t rsp = stack_va + 0x100;
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(ApiBindingInfo{
+        binding, "xgameruntime", "XTaskQueueDuplicateHandle", false, 0});
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, original.value());
+    cpu_state.set_reg(cpu::Gpr::Rdx, output_va);
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    ASSERT_EQ(result.outcome, Outcome::Returned);
+    ASSERT_EQ(result.api_calls, 1u);
+    EXPECT_EQ(result.return_value, api::kSOk);
+    auto duplicated = mem.read_u64(output_va);
+    ASSERT_TRUE(duplicated.ok());
+    ASSERT_NE(duplicated.value(), 0u);
+    EXPECT_NE(duplicated.value(), original.value());
+
+    ASSERT_TRUE(w.tq->close_queue(pid, original.value()).ok());
+    EXPECT_TRUE(w.tq->dispatch(pid, duplicated.value(),
+                              api::XTaskQueuePort::Work, 0).ok());
+    ASSERT_TRUE(w.tq->close_queue(pid, duplicated.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    ASSERT_TRUE(w.pm.terminate_process(process_handle, 0).ok());
+}
+
+TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("task-queue-guest-callback.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+    ModuleDescriptor module;
+    module.module_name = "task-queue-guest-callback.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    const auto queue = w.tq->create_queue(
+        pid, static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0, stack_va = 0, output_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    scratch_region(*process, 0x1000, &output_va);
+    const std::uint64_t callback_va = code_va + 0x100;
+    const std::uint64_t continuation_va = code_va + 0x200;
+    // Callback writes a marker through RCX and the canceled flag from RDX.
+    const std::uint8_t callback_code[] = {
+        0x48, 0xB8, 0x2A, 0, 0, 0, 0, 0, 0, 0, // mov rax, 42
+        0x48, 0x89, 0x01,                       // mov [rcx], rax
+        0x48, 0x89, 0x51, 0x08,                 // mov [rcx+8], rdx
+        0xC3
+    };
+    ASSERT_TRUE(mem.write(callback_va, callback_code, sizeof(callback_code)).ok());
+    ASSERT_TRUE(mem.write_u8(continuation_va, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+    for (std::uint64_t offset : {0ull, 8ull, 16ull, 24ull})
+        ASSERT_TRUE(mem.write_u64(output_va + offset, 0).ok());
+
+    constexpr std::uint64_t submit_binding = 0x51000020ull;
+    constexpr std::uint64_t dispatch_binding = 0x51000021ull;
+    constexpr std::uint64_t tid = 0xA5;
+    const std::uint64_t rsp = stack_va + 0x808; // x64 function-entry alignment;
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+    ExecutionRequest request;
+    request.entry_va = submit_binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values = {submit_binding, dispatch_binding};
+    request.api_bindings.push_back(ApiBindingInfo{
+        submit_binding, "xgameruntime", "XTaskQueueSubmitCallback", false, 0});
+    request.api_bindings.push_back(ApiBindingInfo{
+        dispatch_binding, "xgameruntime", "XTaskQueueDispatch", false, 0});
+    std::atomic<bool> interrupted{false};
+
+    const auto run_guest_api = [&](std::uint64_t binding, std::uint64_t rcx,
+                                   std::uint64_t rdx, std::uint64_t r8,
+                                   std::uint64_t r9) {
+        EXPECT_TRUE(mem.write_u64(rsp, continuation_va).ok());
+        EXPECT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+        cpu::CpuState state;
+        state.reset();
+        state.set_reg(cpu::Gpr::Sp, rsp);
+        state.set_reg(cpu::Gpr::Rcx, rcx);
+        state.set_reg(cpu::Gpr::Rdx, rdx);
+        state.set_reg(cpu::Gpr::R8, r8);
+        state.set_reg(cpu::Gpr::R9, r9);
+        state.rip = binding;
+        return backend.run(request, state, interrupted);
+    };
+    const auto port = static_cast<std::uint32_t>(api::XTaskQueuePort::Work);
+
+    // Reject a non-executable callback pointer before storing it in the queue.
+    const auto invalid_callback = run_guest_api(
+        submit_binding, queue.value(), port, output_va, 0x7FFF00000000ull);
+    EXPECT_EQ(invalid_callback.outcome, Outcome::Faulted);
+    ASSERT_TRUE(invalid_callback.exception.has_value());
+    EXPECT_EQ(invalid_callback.exception->fault, GuestFault::MarshalFailure);
+
+    // Submit through the real guest ABI bridge (RCX/RDX/R8/R9).
+    const auto submitted = run_guest_api(
+        submit_binding, queue.value(), port, output_va, callback_va);
+    ASSERT_EQ(submitted.outcome, Outcome::Returned)
+        << (submitted.exception.has_value() ? format_exception(*submitted.exception) : "");
+    EXPECT_EQ(submitted.return_value, 0u); // S_OK
+
+    // Dispatch invokes the callback on this guest thread with context in RCX
+    // and canceled=false in RDX, then returns to the suspended caller.
+    const auto dispatched = run_guest_api(
+        dispatch_binding, queue.value(), port, 0, 0);
+    ASSERT_EQ(dispatched.outcome, Outcome::Returned)
+        << (dispatched.exception.has_value() ? format_exception(*dispatched.exception) : "");
+    EXPECT_EQ(dispatched.return_value, 1u);
+    ASSERT_EQ(mem.read_u64(output_va).value(), 42u);
+    ASSERT_EQ(mem.read_u64(output_va + 8).value(), 0u);
+
+    // Termination marks a queued callback canceled. The nested guest callback
+    // must observe canceled=true through RDX.
+    const auto submitted_canceled = run_guest_api(
+        submit_binding, queue.value(), port, output_va + 16, callback_va);
+    ASSERT_EQ(submitted_canceled.outcome, Outcome::Returned)
+        << (submitted_canceled.exception.has_value()
+                ? format_exception(*submitted_canceled.exception) : "");
+    EXPECT_EQ(submitted_canceled.return_value, 0u);
+    ASSERT_TRUE(w.tq->terminate_queue(pid, queue.value(), false).ok());
+    const auto dispatched_canceled = run_guest_api(
+        dispatch_binding, queue.value(), port, 0, 0);
+    ASSERT_EQ(dispatched_canceled.outcome, Outcome::Returned)
+        << (dispatched_canceled.exception.has_value()
+                ? format_exception(*dispatched_canceled.exception) : "");
+    EXPECT_EQ(dispatched_canceled.return_value, 1u);
+    ASSERT_EQ(mem.read_u64(output_va + 16).value(), 42u);
+    ASSERT_EQ(mem.read_u64(output_va + 24).value(), 1u);
+
+    EXPECT_TRUE(w.tq->close_queue(pid, queue.value()).ok());
+    ASSERT_TRUE(w.pm.terminate_process(process_handle, 0).ok());
+}
+
+TEST(EngineTest, RejectsUnmappedSyntheticApiBinding) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("unmapped-api.exe");
+    const auto pid = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid.ok());
+    ModuleDescriptor module;
+    module.module_name = "unmapped-api.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &stack_va);
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid.value(), 0x93, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = 0x51000001ull;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, stack_va + 0x100);
+    cpu_state.rip = request.entry_va;
+    std::atomic<bool> interrupted{false};
+
+    const auto result = backend.run(request, cpu_state, interrupted);
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::InvalidState);
+    EXPECT_EQ(result.api_calls, 0u);
+
+    // A duplicated value with two different import identities is ambiguous
+    // and must be rejected rather than dispatching whichever appears first.
+    request.api_bindings.push_back(
+        ApiBindingInfo{request.entry_va, "xgameruntime", "XGameRuntimeInitialize", false, 0});
+    request.api_bindings.push_back(
+        ApiBindingInfo{request.entry_va, "xgameruntime", "XGameRuntimeUninitialize", false, 0});
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, stack_va + 0x100);
+    cpu_state.rip = request.entry_va;
+    const auto duplicate = backend.run(request, cpu_state, interrupted);
+    EXPECT_EQ(duplicate.outcome, Outcome::Faulted);
+    ASSERT_TRUE(duplicate.exception.has_value());
+    EXPECT_EQ(duplicate.exception->fault, GuestFault::InvalidState);
+    EXPECT_EQ(duplicate.api_calls, 0u);
+}
 
 TEST(EngineTest, ExecutesSubsetProgram) {
     ExecWorld w;
@@ -963,6 +1754,85 @@ TEST(EngineTest, SingleStepWalks) {
 
 // ── context lifecycle ────────────────────────────────────────────────────
 
+TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
+    ExecWorld w;
+    const std::vector<std::uint8_t> code{0xC3};
+    LoadedGuest guest(w, code, "import-map.exe", true);
+    ASSERT_TRUE(guest.load_ok) << guest.load_error;
+
+    EXPECT_EQ(guest.bytes, guest.original_bytes)
+        << "ImageLoader must not modify the caller-owned PE file buffer";
+    diag::Diagnostics parsed_diags;
+    const auto parsed = pe::parse(guest.original_bytes.data(),
+                                  guest.original_bytes.size(),
+                                  "import-map.exe", parsed_diags);
+    ASSERT_GT(parsed.directories.size(), pe::kDirImport);
+    ASSERT_NE(parsed.directories[pe::kDirImport].rva, 0u);
+    ASSERT_NE(parsed.directories[pe::kDirImport].size, 0u);
+    ASSERT_TRUE(parsed.imports.present);
+    ASSERT_EQ(parsed.imports.entries.size(), 1u);
+    loader::LoadDiagnostics probe_diagnostics;
+    auto probed_imports = guest.loader.resolve_imports(
+        guest.proc->address_space(), guest.out.layout, parsed,
+        guest.original_bytes.data(), guest.original_bytes.size(),
+        guest.resolver, probe_diagnostics);
+    ASSERT_TRUE(probed_imports.ok()) << probed_imports.error_string();
+    ASSERT_EQ(probed_imports.value().size(), 1u)
+        << "raw PE thunk walk must resolve the fixture's single import";
+
+    // Loaded images are owned by the process handle table, not the
+    // global object-manager handle table.
+    auto loaded_ref = guest.proc->handle_table().lookup(guest.image);
+    ASSERT_TRUE(loaded_ref.ok());
+    auto* loaded = loaded_ref.value().get()->as<loader::LoadedImageObject>();
+    ASSERT_NE(loaded, nullptr);
+    ASSERT_TRUE(guest.parsed_imports_present)
+        << "fixture parse before load did not recognize import directory";
+    ASSERT_EQ(guest.parsed_import_count, 1u)
+        << "fixture parse before load import entry count";
+    ASSERT_EQ(guest.parsed_import_function_count, 1u)
+        << "fixture parse before load function count; ordinal count="
+        << guest.parsed_import_ordinal_count << ", INT RVA="
+        << guest.parsed_import_int_rva << ", IAT RVA="
+        << guest.parsed_import_iat_rva;
+    ASSERT_NE(guest.parsed_import_directory_size, 0u);
+    ASSERT_EQ(guest.diagnostics.imports.size(), 1u)
+        << "loader diagnostic imports; resolved count="
+        << guest.out.exec.imports_resolved << ", unresolved="
+        << guest.out.exec.imports_unresolved;
+    ASSERT_EQ(loaded->diagnostics().imports.size(), 1u)
+        << "loaded-image object did not retain loader import diagnostics";
+    ASSERT_EQ(loaded->diagnostics().imports[0].status, loader::ImportStatus::Resolved);
+
+    const auto pid = w.pm.resolve_pid(guest.ph);
+    ASSERT_TRUE(pid.ok());
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    ExecutionContext context(pid.value(), 0x92, guest.proc->address_space(),
+                             w.reg, config.value(), "import-map-context");
+    ASSERT_TRUE(context.initialize().ok());
+
+    rt::abi::CallSpec spec;
+    spec.ret = rt::abi::CallSpec::ReturnKind::Int;
+    auto request = context.prepare_entry(*loaded, 0, {}, spec);
+    ASSERT_TRUE(request.ok()) << request.error_string();
+    ASSERT_EQ(request.value().api_bindings.size(), 1u);
+    ASSERT_EQ(request.value().api_binding_values.size(), 1u);
+    EXPECT_EQ(request.value().api_bindings[0].value,
+              loaded->diagnostics().imports[0].value);
+    EXPECT_EQ(request.value().api_bindings[0].library, "xgameruntime");
+    EXPECT_EQ(request.value().api_bindings[0].export_name, "XGameRuntimeInitialize");
+    EXPECT_TRUE(is_api_binding(request.value().api_bindings[0].value));
+
+    // Drop the process-table object pin before unload_image destroys the
+    // loaded-image object. Keeping this RefGuard alive would self-deadlock
+    // ObjectManager::destroy while it waits for outstanding pins to drain.
+    loaded_ref.value().release();
+    (void)context.destroy();
+    (void)guest.loader.unload_image(w.pm, w.core.objects(), guest.ph, guest.image);
+    (void)w.pm.terminate_process(guest.ph, 0);
+}
+
 TEST(ContextTest, LifecycleTransitionsAndCleanup) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("lc.exe");
@@ -1225,6 +2095,7 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     spec2.ret = rt::abi::CallSpec::ReturnKind::Int;
     auto req = ctx->prepare_entry(*loaded, tls_index, {}, spec2);
     ASSERT_TRUE(req.ok()) << req.error_string();
+    EXPECT_EQ(ctx->info().tls_index, tls_index);
     DeterministicBackend engine(w.reg, cfg);
     engine.bind_space(proc->address_space());
     engine.bind_process(1, 1);
@@ -1252,6 +2123,47 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     (void)w.pm.terminate_process(p.value(), 0);
     EXPECT_EQ(st.region_count, 0u);
     EXPECT_EQ(st.committed_bytes, 0u);
+}
+
+TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
+    ExecWorld world;
+    auto [process_handle, process] = world.new_process("managed-thread-context.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = world.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid.ok());
+
+    RtThread managed_thread(
+        [](RtThread&, void*) -> void* { return nullptr; }, nullptr,
+        "managed-guest-thread", pid.value());
+    auto cfg = ExecutionConfig::default_validated();
+    ASSERT_TRUE(cfg.ok());
+
+    ExecutionContext context(managed_thread, process->address_space(),
+                             world.reg, cfg.value(), "managed-context");
+    ASSERT_TRUE(context.initialize().ok());
+    EXPECT_EQ(context.info().process_id, pid.value());
+    EXPECT_EQ(context.info().thread_id, managed_thread.thread_id());
+    EXPECT_EQ(context.execution_control(), managed_thread.execution_control());
+
+    ExecutionRequest request;
+    request.stack_top_va = context.info().stack_top;
+    request.stack_size = context.info().stack_size;
+    // A caller-supplied gate must not detach managed execution from its
+    // owning thread's suspend/terminate lifecycle.
+    request.control = std::make_shared<ExecutionControl>();
+    ContextBindingProbe engine;
+    std::atomic<bool> interrupted{false};
+    const auto result = context.invoke(request, engine, interrupted);
+    ASSERT_TRUE(result.ok()) << result.error_string();
+    EXPECT_EQ(engine.bound_pid, pid.value());
+    EXPECT_EQ(engine.bound_tid, managed_thread.thread_id());
+    EXPECT_EQ(engine.bound_space, &process->address_space());
+    EXPECT_EQ(engine.run_control, managed_thread.execution_control().get());
+
+    ASSERT_TRUE(context.step(request, engine).ok());
+    EXPECT_TRUE(engine.step_called);
+    EXPECT_EQ(engine.step_control, managed_thread.execution_control().get());
+    EXPECT_TRUE(context.destroy().ok());
 }
 
 int main(int argc, char** argv) {

@@ -33,6 +33,8 @@ const char* return_kind_to_name(ReturnKind r) {
         case ReturnKind::Void: return "void";
         case ReturnKind::HResult: return "HRESULT";
         case ReturnKind::Bool: return "BOOL";
+        case ReturnKind::Uint32: return "uint32";
+        case ReturnKind::Uint64: return "uint64";
         case ReturnKind::Uint32Enum: return "uint32-enum";
         case ReturnKind::Pointer: return "pointer-out";
         case ReturnKind::Unknown: return "unknown";
@@ -128,6 +130,30 @@ const char* kQpcUrl =
 const char* kQpfUrl =
     "https://learn.microsoft.com/en-us/windows/win32/api/profileapi/"
     "nf-profileapi-queryperformancefrequency";
+const char* kCurrentProcessIdUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/"
+    "nf-processthreadsapi-getcurrentprocessid";
+const char* kCurrentThreadIdUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/"
+    "nf-processthreadsapi-getcurrentthreadid";
+const char* kVirtualQueryUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/"
+    "nf-memoryapi-virtualquery";
+const char* kVirtualAllocUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc";
+const char* kVirtualFreeUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfree";
+const char* kVirtualProtectUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect";
+const char* kCreateEventWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw";
+const char* kSetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-setevent";
+const char* kResetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent";
+const char* kWaitForSingleObjectUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject";
+const char* kCloseHandleUrl = "https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle";
+const char* kCreateMutexWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw";
+const char* kReleaseMutexUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasemutex";
+const char* kCreateSemaphoreWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createsemaphorew";
+const char* kReleaseSemaphoreUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasesemaphore";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
@@ -359,9 +385,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ]";
         a.evidence_url = kTqDispatchUrl;
-        a.notes = "false when nothing dispatched / terminated; manual "
-                  "ports only (ThreadPool ports auto-dispatch — modeled "
-                  "unsupported)";
+        a.notes = "waits up to timeoutInMs for one manual-port callback; false when no callback is dispatched; terminated queues deliver pending callbacks with canceled=true; ThreadPool/Immediate modes unsupported";
         add(a);
     }
     {
@@ -396,12 +420,64 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ]";
         a.evidence_url = kTqTermUrl;
-        a.notes = "cancel callbacks + E_ABORT submissions documented; "
-                  "wait=true on a dispatching thread deadlocks (doc)";
+        a.notes = "prevents new submissions and marks pending callbacks canceled for manual dispatch; termination callback and wait=true draining are not implemented";
         add(a);
     }
 
-    // — kernel32 (Win32 timing; evidence: MS-QPC pages) —
+        // Guest callbacks are retained in the manual queue and invoked by
+    // XTaskQueueDispatch on the calling guest thread through the bounded
+    // execution backend. Delayed callbacks remain a separate unsupported API.
+    {
+        ApiDescriptor a;
+        a.library = "xgameruntime";
+        a.export_name = "XTaskQueueSubmitCallback";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, void* callbackContext, XTaskQueueCallback* callback)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[GDK-TQ]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueuesubmitcallback?view=gdk-2604";
+        a.notes = "manual-mode callback submission and guest invocation are implemented; callback signature is void(context, canceled); automatic dispatch, delayed callbacks, monitors, waiters, and scheduler-owned execution remain unsupported";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "xgameruntime";
+        a.export_name = "XTaskQueueSubmitDelayedCallback";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 5;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT XTaskQueueSubmitDelayedCallback(XTaskQueueHandle queue, XTaskQueuePort port, uint32_t delayMs, void* callbackContext, XTaskQueueCallback* callback)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::Unsupported;
+        a.evidence = "[GDK-TQ]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueuesubmitdelayedcallback?view=gdk-2604";
+        a.notes = "documented delayed callback API; timer scheduling and guest callback invocation are not implemented";
+        add(a);
+    }
+
+    {
+        ApiDescriptor a;
+        a.library = "xgameruntime";
+        a.export_name = "XTaskQueueDuplicateHandle";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 2;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT XTaskQueueDuplicateHandle(XTaskQueueHandle queueHandle, XTaskQueueHandle* duplicatedHandle)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[GDK-TQ-Duplicate]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueueduplicatehandle?view=gdk-2604";
+        a.notes = "same-process duplicate handles share queue state; queued and in-flight callbacks retain the queue after the final public handle closes until drained or process teardown";
+        add(a);
+    }
+
+// — kernel32 (Win32 timing; evidence: MS-QPC pages) —
     {
         ApiDescriptor a;
         a.library = "kernel32";
@@ -436,6 +512,168 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.evidence_url = kQpfUrl;
         a.notes = "PAL monotonic frequency; fixed at boot documented";
         add(a);
+    }
+
+    // — kernel32 (process/thread identity) —
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetCurrentProcessId";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD GetCurrentProcessId()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
+        a.evidence = "[MS-PROCESS-THREAD-ID]";
+        a.evidence_url = kCurrentProcessIdUrl;
+        a.notes = "returns the calling guest process ID; fails when no guest process context exists";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetCurrentThreadId";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD GetCurrentThreadId()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-PROCESS-THREAD-ID]";
+        a.evidence_url = kCurrentThreadIdUrl;
+        a.notes = "returns the calling guest thread ID when execution context supplies one; zero/unavailable context is rejected";
+        add(a);
+    }
+
+    {
+        ApiDescriptor a;
+        a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
+        a.convention = Convention::X64Microsoft; a.param_count = 4;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-WAIT-MULTIPLE]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects";
+        a.notes = "supports wait-any and transactional wait-all for 1-64 unique readable process-owned event, guest mutex, and guest semaphore handles; wait-all rolls back auto-reset event, semaphore, and mutex acquisitions on timeout; abandoned mutex state is preserved; host execution thread is polled and not scheduler-aware";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32"; a.export_name = "VirtualQuery";
+        a.convention = Convention::X64Microsoft; a.param_count = 3;
+        a.ret = ReturnKind::Uint64;
+        a.signature = "SIZE_T VirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer, SIZE_T dwLength)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-QUERY]"; a.evidence_url = kVirtualQueryUrl;
+        a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; reports free gaps within the modeled reservation, retained allocation protection, and tracked MEM_PRIVATE/MEM_IMAGE types; mapped/shared memory and addresses outside the modeled reservation are unsupported";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library = "kernel32"; a.export_name = "VirtualAlloc";
+        a.convention = Convention::X64Microsoft; a.param_count = 4; a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-ALLOC]"; a.evidence_url = kVirtualAllocUrl;
+        a.notes = "automatic and fixed-address MEM_RESERVE and MEM_RESERVE|MEM_COMMIT; page-range MEM_COMMIT within one reservation";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library = "kernel32"; a.export_name = "VirtualFree";
+        a.convention = Convention::X64Microsoft; a.param_count = 3; a.ret = ReturnKind::Bool;
+        a.signature = "BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-FREE]"; a.evidence_url = kVirtualFreeUrl;
+        a.notes = "supports MEM_RELEASE with dwSize zero and page-range MEM_DECOMMIT; release requires the original allocation base";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library = "kernel32"; a.export_name = "VirtualProtect";
+        a.convention = Convention::X64Microsoft; a.param_count = 4; a.ret = ReturnKind::Bool;
+        a.signature = "BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-VIRTUAL-PROTECT]"; a.evidence_url = kVirtualProtectUrl;
+        a.notes = "page-range protection within one committed reservation; returns the first page previous protection; unsupported protection constants fail closed";
+        add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CreateMutexW";
+        a.convention=Convention::X64Microsoft; a.param_count=3; a.ret=ReturnKind::Pointer;
+        a.signature="HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES, BOOL, LPCWSTR)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-MUTEX]"; a.evidence_url=kCreateMutexWUrl;
+        a.notes="unnamed mutexes only; null security attributes/name; ownership is keyed by guest thread id; recursive acquisition and abandoned-owner result modeled"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="ReleaseMutex";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL ReleaseMutex(HANDLE)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-MUTEX]"; a.evidence_url=kReleaseMutexUrl;
+        a.notes="only the owning guest thread may release the mutex"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CreateSemaphoreW";
+        a.convention=Convention::X64Microsoft; a.param_count=4; a.ret=ReturnKind::Pointer;
+        a.signature="HANDLE CreateSemaphoreW(LPSECURITY_ATTRIBUTES, LONG, LONG, LPCWSTR)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-SEMAPHORE]"; a.evidence_url=kCreateSemaphoreWUrl;
+        a.notes="unnamed semaphores only; null security attributes/name; count bounds validated"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="ReleaseSemaphore";
+        a.convention=Convention::X64Microsoft; a.param_count=3; a.ret=ReturnKind::Bool;
+        a.signature="BOOL ReleaseSemaphore(HANDLE, LONG, LPLONG)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-SEMAPHORE]"; a.evidence_url=kReleaseSemaphoreUrl;
+        a.notes="positive release count; optional lpPreviousCount output is written when non-null"; add(a);
+    }
+    // Partial Win32 event synchronization: no names/security descriptors,
+    // duplicate handles, or non-event waitable objects are modeled.
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CreateEventW";
+        a.convention=Convention::X64Microsoft; a.param_count=4; a.ret=ReturnKind::Pointer;
+        a.signature="HANDLE CreateEventW(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCWSTR)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kCreateEventWUrl;
+        a.notes="unnamed events only; security attributes and name must be null; process-scoped opaque runtime token"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="SetEvent";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL SetEvent(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
+        a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kSetEventUrl; a.notes="event handles created by this process only"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="ResetEvent";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL ResetEvent(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
+        a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kResetEventUrl; a.notes="event handles created by this process only"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="WaitForSingleObject";
+        a.convention=Convention::X64Microsoft; a.param_count=2; a.ret=ReturnKind::Uint32;
+        a.signature="DWORD WaitForSingleObject(HANDLE, DWORD)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kWaitForSingleObjectUrl;
+        a.notes="process-scoped event, guest mutex, and guest semaphore handles; supports WAIT_OBJECT_0, WAIT_ABANDONED_0 for mutexes, WAIT_TIMEOUT, cancellation, and finite/infinite waits; blocks host execution thread in short polling intervals"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CloseHandle";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL CloseHandle(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
+        a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kCloseHandleUrl;
+        a.notes="closes event, guest mutex, and guest semaphore handles created by this service only"; add(a);
     }
 
     return d;
@@ -674,7 +912,10 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
                        "evidence base)");
         return b;
     }
-    // Implementation present?
+    // Implementation check and registry-wide binding allocation are
+    // serialized together so separate resolver instances cannot issue the
+    // same synthetic guest address for different imports.
+    std::uint32_t binding_id = 0;
     {
         std::lock_guard lock(reg_.lock_);
         const auto it = reg_.impls_.find(desc_key(d->library, d->export_name));
@@ -685,12 +926,20 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
                      ") but no implementation is registered: " + d->evidence;
             return b;
         }
+        // Both subranges share one registry-wide 65,534-ID budget.
+        // The completion sentinel 0x5100FFFF is deliberately never allocated.
+        if (reg_.next_binding_id_ > 0xFFFEu) {
+            b.status = loader::ImportStatus::Unsupported;
+            b.note = "registry-wide API binding address space exhausted";
+            return b;
+        }
+        binding_id = reg_.next_binding_id_++;
     }
-    // Bind: synthetic dispatch address = implementation ticket.
     b.status = loader::ImportStatus::Resolved;
     b.value = (d->category == registry::ApiCategory::XboxGdk ? 0x51000000ull : 0x51010000ull) +
-              (next_id_++);
-    b.note = "dispatch-table binding (id " + std::to_string(next_id_ - 1) +
+              binding_id;
+    ++bindings_issued_;
+    b.note = "dispatch-table binding (registry id " + std::to_string(binding_id) +
              "); evidence " + d->evidence + " " + d->evidence_url;
     return b;
 }

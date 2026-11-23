@@ -69,9 +69,13 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XThreadSetTimeSensitive | `HRESULT ...(bool)` | partially-implemented |
 | XThreadIsTimeSensitive | `bool XThreadIsTimeSensitive()` | partially-implemented |
 | XTaskQueueCreate | `HRESULT ...(mode, mode, handle*)` | partially-implemented |
-| XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented |
+| XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented (manual FIFO callback dispatch on the calling guest thread) |
 | XTaskQueueCloseHandle | `void ...(queue)` | partially-implemented |
 | XTaskQueueTerminate | `HRESULT ...(queue, bool, void*, cb*)` | partially-implemented |
+| XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | partially-implemented (bounded manual-port queue + guest callback invocation) |
+| XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
+| XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | partially-implemented (same-process shared queue handle; pending callbacks retain queue lifetime) |
+| WaitForMultipleObjects | `DWORD ...(count, HANDLE*, waitAll, timeout)` | partially-implemented (wait-any and transactional wait-all subsets) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 
@@ -270,24 +274,18 @@ mirrored).
 
 ## Known limitations
 
-- 16 APIs covered; the GDK surface is far larger (users, achievements,
+- 35 built-in API descriptors are cataloged, including partially implemented and explicitly unsupported imports; the GDK surface is far larger (users, achievements,
   multiplayer, storage, input, networking, graphics, audio stay
   unsupported/unknown — deliberately, without fabrication).
 - No verified ordinals (nothing ships one).
-- No guest-code execution: the ApiContext interface exists, the
-  marshalling bridge is future work (execution context).
-- XTaskQueue models Manual dispatch only (ThreadPool/Immediate modes
-  create but do not auto-dispatch — reported in the descriptor notes).
+- Guest-code execution is limited to the deterministic interpreter subset and explicitly supported execution paths; this is not a complete Xbox execution environment or game-compatibility claim.
+- XTaskQueue models process-owned Manual-mode queues. `XTaskQueueSubmitCallback` and `XTaskQueueDispatch` support bounded FIFO work/completion queues and invoke one guest callback on the calling guest thread, including cancellation delivery after termination. Delayed callbacks, ThreadPool/Immediate modes, monitors, waiters, and scheduler-owned dispatch remain unsupported.
 - XSystemGetDeviceType always returns the documented Unknown
   fallback (no device spoofing).
 - Delay-load resolution resolves at load time; the runtime does not
   implement lazy first-call hooking (the documented delay-load
   semantics of resolving on first call require an execution context).
 
-## Roadmap
+## Current execution boundary
 
-M8 (recommended): **execution-context foundation** — guest stack/
-register modeling, the ApiContext marshalling bridge (guest args →
-typed slots), TLS callback invocation, and entry-point invocation
-using M6's `ExecDescription` — turning "prepared" images into
-controlled executing ones, still without claiming full game support.
+The M8 execution-context foundation is present: guest CPU state, ABI marshalling, a bounded interpreter, TLS callback execution, and controlled entry-point invocation. M10 expands selected Game OS services but still lacks scheduler-aware waits, complete guest-thread lifecycle integration, automatic/delayed task-queue scheduling, broad system-service coverage, and full Win32 virtual-memory semantics. A successful import resolution or partial guest execution does not establish that a retail Xbox game can boot.

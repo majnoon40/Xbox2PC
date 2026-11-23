@@ -1,8 +1,10 @@
 // thread_model.cpp — RtThread implementation.
 
 #include "xbox2pc/thread_model.hpp"
+#include "xbox2pc/sync_objects.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <thread>
 #include <utility>
@@ -29,7 +31,7 @@ constexpr bool kTransitions[7][7] = {
     /* Created */ {false, true, false, false, false, false, true},
     /* Ready */ {false, false, true, false, true, true, true},
     /* Running */ {false, true, false, true, true, true, true},
-    /* Blocked */ {false, false, true, false, false, true, true},
+    /* Blocked */ {false, false, true, false, true, true, true},
     /* Suspended */ {false, true, false, false, false, true, true},
     /* Terminated */ {false, false, false, false, false, true, false},
     /* Failed */ {false, false, false, false, false, false, true},
@@ -49,6 +51,53 @@ int state_index(ThreadState s) {
 }
 
 }  // namespace
+
+void CooperativeExecutionGate::request_suspend() {
+    std::lock_guard guard(mutex_);
+    if (!cancelled_.load(std::memory_order_acquire)) suspend_requested_ = true;
+}
+
+void CooperativeExecutionGate::resume() {
+    {
+        std::lock_guard guard(mutex_);
+        suspend_requested_ = false;
+        // Once resume is published, callers must not observe the gate as
+        // logically parked while the waiter is merely waking from its CV.
+        parked_.store(false, std::memory_order_release);
+    }
+    changed_.notify_all();
+}
+
+void CooperativeExecutionGate::cancel() {
+    cancelled_.store(true, std::memory_order_release);
+    changed_.notify_all();
+}
+
+bool CooperativeExecutionGate::is_suspend_requested() const {
+    std::lock_guard guard(mutex_);
+    return suspend_requested_;
+}
+
+bool CooperativeExecutionGate::is_parked() const {
+    return parked_.load(std::memory_order_acquire);
+}
+
+bool CooperativeExecutionGate::checkpoint(const std::atomic<bool>& interrupted) {
+    std::unique_lock guard(mutex_);
+    if (!suspend_requested_) {
+        return !cancelled_.load(std::memory_order_acquire) &&
+               !interrupted.load(std::memory_order_acquire);
+    }
+    parked_.store(true, std::memory_order_release);
+    while (suspend_requested_ &&
+           !cancelled_.load(std::memory_order_acquire) &&
+           !interrupted.load(std::memory_order_acquire)) {
+        changed_.wait_for(guard, std::chrono::milliseconds(2));
+    }
+    parked_.store(false, std::memory_order_release);
+    return !cancelled_.load(std::memory_order_acquire) &&
+           !interrupted.load(std::memory_order_acquire);
+}
 
 bool thread_transition_valid(ThreadState from, ThreadState to) {
     return kTransitions[state_index(from)][state_index(to)];
@@ -84,12 +133,15 @@ std::uint64_t RtThread::next_thread_id() {
 
 // ── construction / teardown ───────────────────────────────────────────────
 
-RtThread::RtThread(ThreadMain main, void* arg, std::string name)
+RtThread::RtThread(ThreadMain main, void* arg, std::string name,
+                   std::uint64_t owner_process_id)
     : RuntimeObject(TypeId::Thread),
       thread_id_(next_thread_id()),
+      owner_process_id_(owner_process_id),
       main_(main),
       arg_(arg),
-      name_(std::move(name)) {}
+      name_(std::move(name)),
+      execution_control_(std::make_shared<CooperativeExecutionGate>()) {}
 
 RtThread::~RtThread() = default;
 
@@ -101,6 +153,7 @@ void RtThread::on_destroy() {
     if (!exited_.load(std::memory_order_acquire)) {
         stop_flag_.store(true, std::memory_order_release);
         host_->request_stop();
+        execution_control_->cancel();
     }
     while (!trampoline_done_.load(std::memory_order_acquire)) {
         std::this_thread::yield();
@@ -147,23 +200,36 @@ Result<void> RtThread::start() {
 
 void* RtThread::pal_trampoline(void* self_ptr) {
     auto* self = static_cast<RtThread*>(self_ptr);
-    self->state_.store(ThreadState::Running, std::memory_order_release);
+    // start() publishes Ready before spawning. A concurrent suspend() may
+    // publish Suspended before this trampoline runs; do not overwrite it.
+    ThreadState expected = ThreadState::Ready;
+    (void)self->state_.compare_exchange_strong(
+        expected, ThreadState::Running, std::memory_order_acq_rel,
+        std::memory_order_acquire);
     void* code = nullptr;
     try {
-        code = self->main_(*self, self->arg_);
+        // Honor a suspend requested between start() and trampoline entry.
+        if (!self->suspension_point()) {
+            code = nullptr;
+        } else {
+            code = self->main_(*self, self->arg_);
+        }
     } catch (const std::exception& e) {
         self->fail(std::string("thread exception: ") + e.what());
+        abandon_guest_mutexes_for_thread(self->thread_id());
         self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
         self->exited_.store(true, std::memory_order_release);
         self->trampoline_done_.store(true, std::memory_order_release);
         return reinterpret_cast<void*>(kExceptionExitCode);
     } catch (...) {
         self->fail("thread exception: unknown type");
+        abandon_guest_mutexes_for_thread(self->thread_id());
         self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
         self->exited_.store(true, std::memory_order_release);
         self->trampoline_done_.store(true, std::memory_order_release);
         return reinterpret_cast<void*>(kExceptionExitCode);
     }
+    abandon_guest_mutexes_for_thread(self->thread_id());
     const std::uint64_t ec = reinterpret_cast<std::uint64_t>(code);
     self->exit_code_.store(ec, std::memory_order_release);
     self->exited_.store(true, std::memory_order_release);
@@ -174,31 +240,39 @@ void* RtThread::pal_trampoline(void* self_ptr) {
 }
 
 Result<void> RtThread::suspend() {
-    std::lock_guard lock(transition_lock_);
+    std::lock_guard transition_guard(transition_lock_);
     const ThreadState cur = state_.load(std::memory_order_acquire);
     const ThreadState to = ThreadState::Suspended;
     if (!thread_transition_valid(cur, to)) {
         return Result<void>(RuntimeErrc::InvalidTransition,
                             "suspend() from " + std::string(thread_state_to_name(cur)));
     }
-    // Cooperative: set the flag; the thread observes it at safe points.
-    stop_flag_.store(true, std::memory_order_release);
-    if (host_ != nullptr) host_->request_stop();
+    execution_control_->request_suspend();
     state_.store(to, std::memory_order_release);
     return Result<void>::ok_result();
 }
 
 Result<void> RtThread::resume() {
-    std::lock_guard lock(transition_lock_);
+    std::lock_guard transition_guard(transition_lock_);
     const ThreadState cur = state_.load(std::memory_order_acquire);
     const ThreadState to = ThreadState::Ready;
     if (!thread_transition_valid(cur, to)) {
         return Result<void>(RuntimeErrc::InvalidTransition,
                             "resume() from " + std::string(thread_state_to_name(cur)));
     }
-    stop_flag_.store(false, std::memory_order_release);
+    execution_control_->resume();
     state_.store(to, std::memory_order_release);
     return Result<void>::ok_result();
+}
+
+bool RtThread::suspension_point() {
+    const bool allowed = execution_control_->checkpoint(stop_flag_);
+    if (!allowed) return false;
+    const auto current = state_.load(std::memory_order_acquire);
+    if (current == ThreadState::Suspended || current == ThreadState::Ready) {
+        state_.store(ThreadState::Running, std::memory_order_release);
+    }
+    return true;
 }
 
 Result<void> RtThread::block_note() {
@@ -239,6 +313,9 @@ Result<void> RtThread::terminate(std::uint64_t exit_code) {
         // Terminated -> Terminated is legal (idempotent) per the table.
         state_.store(to, std::memory_order_release);
     }
+    stop_flag_.store(true, std::memory_order_release);
+    execution_control_->cancel();
+    if (host_ != nullptr) host_->request_stop();
     exit_code_.store(exit_code, std::memory_order_release);
     exited_.store(true, std::memory_order_release);
     return Result<void>::ok_result();
@@ -260,6 +337,7 @@ Result<void> RtThread::fail(std::string reason) {
         stop_flag_.store(true, std::memory_order_release);
         host_->request_stop();
     }
+    execution_control_->cancel();
     return Result<void>::ok_result();
 }
 
@@ -364,6 +442,7 @@ std::string RtThread::fail_reason() const {
 void RtThread::request_stop() {
     stop_flag_.store(true, std::memory_order_release);
     if (host_ != nullptr) host_->request_stop();
+    execution_control_->cancel();
     // M4: wake the thread's cancellation-aware wait (registered waker).
     wake_for_cancellation();
 }

@@ -4,6 +4,7 @@
 #include "xbox2pc/execution_context.hpp"
 
 #include <cstring>
+#include <unordered_set>
 
 namespace xbox2pc::rt::exec {
 
@@ -60,6 +61,14 @@ ExecutionContext::ExecutionContext(std::uint64_t process_id,
       mem_(space),
       ctx_name_(std::move(name)) {}
 
+ExecutionContext::ExecutionContext(RtThread& thread, AddressSpace& space,
+                                   api::ApiRegistry& api_reg,
+                                   ExecutionConfig cfg, std::string name)
+    : ExecutionContext(thread.owner_process_id(), thread.thread_id(), space,
+                       api_reg, cfg, std::move(name)) {
+    execution_control_ = thread.execution_control();
+}
+
 ExecutionContext::~ExecutionContext() {
     (void)destroy();
     // M9 fix (audit A3): initialize() acquires the limiter slot; the
@@ -81,6 +90,11 @@ Result<void> ExecutionContext::initialize() {
     if (state_ == ContextState::Destroyed) {
         ContextLimiter::release();   // failed init: give the slot back
         return Result<void>(RuntimeErrc::InvalidState, "context destroyed");
+    }
+    if (process_id_ == 0 || thread_id_ == 0) {
+        ContextLimiter::release();
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "execution context requires nonzero process and thread identities");
     }
     if (state_ != ContextState::Created) {
         ContextLimiter::release();   // failed init: give the slot back
@@ -178,25 +192,62 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     req.completion_va = exec::kCompletionSentinel;
     req.entry_args = args;
     req.entry_spec = spec;
-    // API bindings: the image's IAT values in binding range (M7).
-    // (LoadedImageObject exposes its layout; binding values were
-    // written by the M6 loader from the resolver's ImportBinding list
-    // — the loader recorded them in LoadDiagnostics. The context takes
-    // them from the exec description's import counters + the image's
-    // actual IAT — read them from guest memory now: walk the import
-    // descriptors? For M8's contract the bindings matter only when
-    // guest code calls an import; the engine resolves the landing VA
-    // through the REQUEST's list, which the caller fills from its own
-    // resolver session. Provide the documented hook: IAT binding values
-    // in range are collected by scanning the image's first import IAT.)
+    // Bind each resolved IAT import to its exact documented identity.
+    // The loader diagnostics are authoritative; never infer an export from
+    // a synthetic address or scan arbitrary image memory for address ranges.
     req.api_binding_values.clear();
-    // Deterministic: scan the mapped IAT of each import descriptor's
-    // IAT within the image extent (bounded: imports_resolved*8 bytes at
-    // the documented IAT location is not tracked here — the engine
-    // treats ANY binding-range VA as an API call, so an explicit list
-    // is advisory only; leave it to the caller (tests fill it).
-    (void)tls_index;
+    req.api_bindings.clear();
+    std::unordered_set<std::uint64_t> seen_bindings;
+    seen_bindings.reserve(image.diagnostics().imports.size());
+    for (const auto& imported : image.diagnostics().imports) {
+        if (imported.status != loader::ImportStatus::Resolved ||
+            imported.value == 0) {
+            continue;
+        }
+        // Non-synthetic resolved imports may be direct guest targets;
+        // only the reserved API dispatch ranges require registry identity.
+        if (!is_api_binding(imported.value)) continue;
+        if (!seen_bindings.insert(imported.value).second) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "duplicate synthetic API binding value in loader diagnostics");
+        }
+        if (imported.lookup.dll.empty() ||
+            (imported.lookup.by_ordinal && imported.lookup.ordinal == 0) ||
+            (!imported.lookup.by_ordinal && imported.lookup.symbol.empty())) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "resolved import has incomplete DLL/name-or-ordinal identity");
+        }
+        ApiBindingInfo binding;
+        binding.value = imported.value;
+        binding.library = imported.lookup.dll;
+        binding.export_name = imported.lookup.symbol;
+        binding.by_ordinal = imported.lookup.by_ordinal;
+        binding.ordinal = imported.lookup.ordinal;
+        req.api_binding_values.push_back(binding.value);
+        req.api_bindings.push_back(std::move(binding));
+    }
+    info_.tls_index = tls_index;
     return Ret(req);
+}
+
+std::shared_ptr<ExecutionControl> ExecutionContext::execution_control() const {
+    std::lock_guard lock(lock_);
+    return execution_control_;
+}
+
+Result<void> ExecutionContext::bind_thread_control(
+    std::shared_ptr<ExecutionControl> control) {
+    if (control == nullptr) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "thread execution control must not be null");
+    }
+    std::lock_guard lock(lock_);
+    if (state_ == ContextState::Destroyed || state_ == ContextState::Executing) {
+        return Result<void>(RuntimeErrc::InvalidState,
+                            "cannot bind thread control in the current context state");
+    }
+    execution_control_ = std::move(control);
+    return Result<void>::ok_result();
 }
 
 Result<ExecutionResult> ExecutionContext::invoke(
@@ -223,8 +274,14 @@ Result<ExecutionResult> ExecutionContext::invoke(
                         "request stack not usable in this context's space");
         }
     }
+    auto bound = engine.bind_execution_context(process_id_, thread_id_, space_);
+    if (!bound.ok()) {
+        return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
+    }
     state_ = ContextState::Executing;
-    auto res = engine.run(req, cpu_, interrupted);
+    ExecutionRequest controlled = req;
+    if (execution_control_ != nullptr) controlled.control = execution_control_;
+    auto res = engine.run(controlled, cpu_, interrupted);
     state_ = ContextState::Stopped;
     ++runs_;
     return Ret(res);
@@ -241,7 +298,13 @@ Result<std::uint64_t> ExecutionContext::step(const ExecutionRequest& req,
     if (!engine.supports_single_step()) {
         return Ret(RuntimeErrc::PlatformUnsupported, "engine cannot single-step");
     }
-    return engine.single_step(cpu_, req);
+    auto bound = engine.bind_execution_context(process_id_, thread_id_, space_);
+    if (!bound.ok()) {
+        return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
+    }
+    ExecutionRequest controlled = req;
+    if (execution_control_ != nullptr) controlled.control = execution_control_;
+    return engine.single_step(cpu_, controlled);
 }
 
 Result<void> ExecutionContext::destroy() {
@@ -365,6 +428,13 @@ Result<TlsCallbackResult> execute_tls_callbacks(
     TlsCallbackResult out;
     // Documented callback ABI: RCX=DllHandle, RDX=Reason
     // (DLL_PROCESS_ATTACH=1), R8=Reserved.
+    auto bound = engine.bind_execution_context(ctx.info().process_id,
+                                               ctx.info().thread_id,
+                                               ctx.memory().space());
+    if (!bound.ok()) {
+        return Ret(bound.errc(), "bind TLS callback execution context: " +
+                                     bound.error_string());
+    }
     for (const auto& cb : plan.callbacks) {
         // Prepare the callback frame on the context's CPU state.
         CpuState call = ctx.cpu();
@@ -408,6 +478,9 @@ Result<TlsCallbackResult> execute_tls_callbacks(
         req.stack_top_va = ctx.info().stack_top;
         req.stack_size = ctx.info().stack_size;
         req.completion_va = kCompletionSentinel;
+        // TLS initialization runs on the owning guest thread and must
+        // obey the same suspend/terminate gate as the entry point.
+        req.control = ctx.execution_control();
         std::atomic<bool> stop{false};
         auto res = engine.run(req, call, stop);
         if (res.outcome == Outcome::Faulted) {

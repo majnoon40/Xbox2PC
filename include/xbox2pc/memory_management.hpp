@@ -59,19 +59,24 @@ enum class RegionState : std::uint8_t {
     Committed,  // host storage assigned (RW unless re-protected)
 };
 
+enum class VmRegionType : std::uint8_t { Private, Mapped, Image };
+
 const char* region_state_to_name(RegionState s);
 
 // ── region descriptor ────────────────────────────────────────────────────
 //
-// One descriptor per allocation. xbox_va is the address IN THE SPACE's
-// virtual model; the space translates it to the host subrange.
+// One descriptor per contiguous state/protection segment. Split segments
+// retain allocation_base so the original reservation remains identifiable.
 struct VmRegion {
     std::uint64_t xbox_va = 0;       // virtual address within the space
     std::uint64_t size = 0;         // bytes (page-aligned on allocation)
     RegionState state = RegionState::Reserved;
     MemProtect protection = MemProtect::NoAccess;
+    MemProtect allocation_protection = MemProtect::ReadWrite;
+    VmRegionType region_type = VmRegionType::Private;
     std::string name;               // diagnostics
     std::uint64_t alloc_id = 0;     // MemoryAllocator token (0 = not owned)
+    std::uint64_t allocation_base = 0; // original reservation base across split segments
 };
 
 // ── resource limits ───────────────────────────────────────────────────────
@@ -111,8 +116,16 @@ public:
     Result<std::uint64_t> reserve_region_auto(std::uint64_t size, std::string name);
     // Commit a reserved region (host storage via mprotect RW subrange).
     Result<void> commit_region(std::uint64_t xbox_va);
+    Result<void> commit_range(std::uint64_t xbox_va, std::uint64_t size,
+                              MemProtect protection = MemProtect::ReadWrite);
+    // Decommit one complete region while retaining its virtual reservation.
+    Result<void> decommit_region(std::uint64_t xbox_va);
+    Result<void> decommit_range(std::uint64_t xbox_va, std::uint64_t size);
     // Change protection of a COMMITTED region (validated transitions).
     Result<void> protect_region(std::uint64_t xbox_va, MemProtect p);
+    Result<MemProtect> protect_range(std::uint64_t xbox_va, std::uint64_t size, MemProtect p);
+    Result<void> set_allocation_protection(std::uint64_t xbox_va, MemProtect p);
+    Result<void> set_region_type(std::uint64_t xbox_va, VmRegionType type);
     // Release a region entirely (any state) — decommit + unreserve.
     Result<void> release_region(std::uint64_t xbox_va);
     // Resize (grow in place if the next bytes are free; shrink keeps the

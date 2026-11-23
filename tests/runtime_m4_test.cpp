@@ -122,6 +122,62 @@ TEST(MemoryTest, ReserveCommitProtectRelease) {
     ASSERT_FALSE(gone.ok());
 }
 
+TEST(MemoryTest, PartialRangeCommitProtectDecommitAndRelease) {
+    AddressSpace space(32 * 4096, 0x30000000, "partial-ranges");
+    const auto page = space.page_size();
+    const auto base = 0x30000000ull;
+    ASSERT_TRUE(space.reserve_region(base, 4 * page, "allocation").ok());
+
+    // Commit only the middle two pages.
+    ASSERT_TRUE(space.commit_range(base + page, 2 * page).ok());
+    auto left = space.find_containing(base);
+    auto middle = space.find_containing(base + page);
+    auto right = space.find_containing(base + 3 * page);
+    ASSERT_TRUE(left.ok());
+    ASSERT_TRUE(middle.ok());
+    ASSERT_TRUE(right.ok());
+    EXPECT_EQ(left.value().state, RegionState::Reserved);
+    EXPECT_EQ(middle.value().state, RegionState::Committed);
+    EXPECT_EQ(middle.value().size, 2 * page);
+    EXPECT_EQ(right.value().state, RegionState::Reserved);
+    EXPECT_EQ(space.stats().committed_bytes, 2 * page);
+
+    // Invalid mixed-state ranges are rejected without changing neighbors.
+    EXPECT_FALSE(space.decommit_range(base + page, 3 * page).ok());
+    EXPECT_EQ(space.stats().committed_bytes, 2 * page);
+    EXPECT_FALSE(space.protect_range(base, 2 * page, MemProtect::ReadOnly).ok());
+    EXPECT_EQ(space.stats().committed_bytes, 2 * page);
+
+    // Protection applies to a strict subrange and returns its old value.
+    auto old = space.protect_range(base + page, page, MemProtect::ReadOnly);
+    ASSERT_TRUE(old.ok());
+    EXPECT_EQ(old.value(), MemProtect::ReadWrite);
+    EXPECT_TRUE(space.validate_access(base + page, false, false).ok());
+    EXPECT_FALSE(space.validate_access(base + page, true, false).ok());
+    EXPECT_TRUE(space.validate_access(base + 2 * page, true, false).ok());
+
+    // Decommit only the first committed page; neighbors retain their state.
+    ASSERT_TRUE(space.decommit_range(base + page, page).ok());
+    EXPECT_EQ(space.find_containing(base + page).value().state, RegionState::Reserved);
+    EXPECT_EQ(space.find_containing(base + 2 * page).value().state, RegionState::Committed);
+    EXPECT_EQ(space.stats().committed_bytes, page);
+
+    // Decommit discards anonymous backing; recommit exposes zero-filled pages.
+    auto second_page = space.translate(base + 2 * page);
+    ASSERT_TRUE(second_page.ok());
+    *static_cast<std::uint8_t*>(second_page.value()) = 0x5A;
+    ASSERT_TRUE(space.decommit_range(base + 2 * page, page).ok());
+    ASSERT_TRUE(space.commit_range(base + 2 * page, page).ok());
+    auto recommitted = space.translate(base + 2 * page);
+    ASSERT_TRUE(recommitted.ok());
+    EXPECT_EQ(*static_cast<std::uint8_t*>(recommitted.value()), 0u);
+    EXPECT_EQ(space.stats().committed_bytes, page);
+
+    // The original allocation base still releases every split segment.
+    ASSERT_TRUE(space.release_region(base).ok());
+    EXPECT_TRUE(space.list_regions().empty());
+}
+
 TEST(MemoryTest, OverlapDetectionAndAutoPlacement) {
     AddressSpace space(64 * 4096, 0x10000000, "test");
     const auto page = space.page_size();
@@ -187,6 +243,31 @@ TEST(MemoryTest, LimitEnforcement) {
     auto over2 = space.commit_region(0x10000000 + page);
     ASSERT_FALSE(over2.ok());
     EXPECT_EQ(over2.errc(), RuntimeErrc::OutOfResources);
+}
+
+TEST(MemoryTest, CommittedRegionsStillConsumeReservationQuota) {
+    AddressSpace space(16 * 4096, 0x18000000, "committed-reservation-quota");
+    const auto page = space.page_size();
+    MemoryLimits limits;
+    limits.max_reserved_bytes = page;
+    space.set_limits(limits);
+
+    ASSERT_TRUE(space.reserve_region(0x18000000, page, "first").ok());
+    ASSERT_TRUE(space.commit_region(0x18000000).ok());
+
+    // Commit changes page state, not the size of the reserved VA range.
+    auto second = space.reserve_region(0x18000000 + page, page, "second");
+    ASSERT_FALSE(second.ok());
+    EXPECT_EQ(second.errc(), RuntimeErrc::OutOfResources);
+
+    // Growing a committed region consumes reservation quota as well as
+    // committed-byte quota; it cannot bypass the reservation ceiling.
+    auto grown = space.resize_region(0x18000000, 2 * page);
+    ASSERT_FALSE(grown.ok());
+    EXPECT_EQ(grown.errc(), RuntimeErrc::OutOfResources);
+    const auto region = space.find_region(0x18000000);
+    ASSERT_TRUE(region.ok());
+    EXPECT_EQ(region.value().size, page);
 }
 
 TEST(MemoryTest, RejectsAddressAndSizeArithmeticOverflow) {
@@ -538,6 +619,68 @@ TEST(ThreadExecTest, ExceptionContainment) {
     ASSERT_TRUE(core.shutdown().ok());
 }
 
+TEST(ThreadExecTest, CooperativeSuspendResumeIsNotCancellation) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    std::atomic<std::uint64_t> progress{0};
+    auto th = core.create_thread(
+        [](rt::RtThread& self, void* raw) -> void* {
+            auto* count = static_cast<std::atomic<std::uint64_t>*>(raw);
+            while (self.suspension_point()) {
+                count->fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return nullptr;
+        },
+        &progress, "suspend-resume-worker");
+    ASSERT_TRUE(th.ok());
+    rt::RtThread* thread = nullptr;
+    {
+        auto guard = core.objects().lookup_handle(th.value());
+        ASSERT_TRUE(guard.ok());
+        thread = guard.value().get()->as<rt::RtThread>();
+    }
+    ASSERT_NE(thread, nullptr);
+    ASSERT_TRUE(thread->start().ok());
+
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(progress.load(std::memory_order_relaxed), 0u);
+    ASSERT_TRUE(thread->suspend().ok());
+    const auto parked_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (!thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < parked_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(thread->state(), rt::ThreadState::Suspended);
+    ASSERT_TRUE(thread->execution_control()->is_parked());
+    const auto parked_progress = progress.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    ASSERT_TRUE(thread->resume().ok());
+    const auto resume_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == parked_progress &&
+           std::chrono::steady_clock::now() < resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    thread->request_stop();
+    auto joined = thread->join_ns(2'000'000'000LL);
+    ASSERT_TRUE(joined.ok());
+    EXPECT_EQ(thread->state(), rt::ThreadState::Terminated);
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
 TEST(ThreadExecTest, CooperativeCancellation) {
     rt::RuntimeCore core;
     ASSERT_TRUE(core.initialize().ok());
@@ -734,6 +877,171 @@ TEST(ProcessMgmtTest, FullLifecycleWithCleanup) {
     ASSERT_TRUE(core.shutdown().ok());
 }
 
+TEST(ProcessMgmtTest, ProcessSuspendResumeDoesNotCancelOwnedThreads) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    ProcessManager pm(core.objects());
+    auto process = pm.create_process("suspend-process.exe");
+    ASSERT_TRUE(process.ok());
+    rt::ModuleDescriptor module;
+    ASSERT_TRUE(pm.initialize_process(process.value(), module,
+                                      rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(pm.start_process(process.value()).ok());
+
+    std::atomic<std::uint64_t> progress{0};
+    auto spawned = pm.spawn_thread(
+        process.value(),
+        [](rt::RtThread& self, void* raw) -> void* {
+            auto* count = static_cast<std::atomic<std::uint64_t>*>(raw);
+            while (self.suspension_point()) {
+                count->fetch_add(1, std::memory_order_relaxed);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return nullptr;
+        },
+        &progress, "process-owned-suspend-worker");
+    ASSERT_TRUE(spawned.ok());
+
+    auto process_ref = pm.find_process(process.value());
+    ASSERT_TRUE(process_ref.ok());
+    auto* managed = process_ref.value().get()->as<ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const auto thread_ids = managed->thread_ids();
+    ASSERT_EQ(thread_ids.size(), 1u);
+    auto thread_ref = core.objects().lookup_id(thread_ids.front());
+    ASSERT_TRUE(thread_ref.ok());
+    auto* thread = thread_ref.value().get()->as<RtThread>();
+    ASSERT_NE(thread, nullptr);
+    EXPECT_EQ(thread->owner_process_id(), managed->pid_value());
+
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(progress.load(std::memory_order_relaxed), 0u);
+
+    ASSERT_TRUE(pm.suspend_process(process.value()).ok());
+    const auto parked_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (!thread->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < parked_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(thread->execution_control()->is_parked());
+    const auto parked_progress = progress.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    ASSERT_TRUE(pm.resume_process(process.value()).ok());
+    const auto resume_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (progress.load(std::memory_order_relaxed) == parked_progress &&
+           std::chrono::steady_clock::now() < resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress.load(std::memory_order_relaxed), parked_progress);
+    EXPECT_FALSE(thread->stop_requested());
+
+    ASSERT_TRUE(pm.terminate_process(process.value(), 0).ok());
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
+TEST(ProcessMgmtTest, ProcessResumePreservesPreexistingManualSuspension) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    ProcessManager pm(core.objects());
+    auto process = pm.create_process("preserve-manual-suspend.exe");
+    ASSERT_TRUE(process.ok());
+    rt::ModuleDescriptor module;
+    ASSERT_TRUE(pm.initialize_process(process.value(), module,
+                                      rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(pm.start_process(process.value()).ok());
+
+    std::atomic<std::uint64_t> progress_a{0};
+    std::atomic<std::uint64_t> progress_b{0};
+    const auto worker = [](rt::RtThread& self, void* raw) -> void* {
+        auto* count = static_cast<std::atomic<std::uint64_t>*>(raw);
+        while (self.suspension_point()) {
+            count->fetch_add(1, std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return nullptr;
+    };
+    ASSERT_TRUE(pm.spawn_thread(process.value(), worker, &progress_a, "manual-paused").ok());
+    ASSERT_TRUE(pm.spawn_thread(process.value(), worker, &progress_b, "process-paused").ok());
+
+    auto process_ref = pm.find_process(process.value());
+    ASSERT_TRUE(process_ref.ok());
+    auto* managed = process_ref.value().get()->as<ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const auto ids = managed->thread_ids();
+    ASSERT_EQ(ids.size(), 2u);
+    auto first_ref = core.objects().lookup_id(ids[0]);
+    auto second_ref = core.objects().lookup_id(ids[1]);
+    ASSERT_TRUE(first_ref.ok());
+    ASSERT_TRUE(second_ref.ok());
+    auto* first = first_ref.value().get()->as<RtThread>();
+    auto* second = second_ref.value().get()->as<RtThread>();
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while ((progress_a.load(std::memory_order_relaxed) == 0 ||
+            progress_b.load(std::memory_order_relaxed) == 0) &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(progress_a.load(std::memory_order_relaxed), 0u);
+    ASSERT_GT(progress_b.load(std::memory_order_relaxed), 0u);
+
+    ASSERT_TRUE(first->suspend().ok());
+    const auto first_park_deadline = std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(2);
+    while (!first->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < first_park_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(first->execution_control()->is_parked());
+
+    ASSERT_TRUE(pm.suspend_process(process.value()).ok());
+    const auto second_park_deadline = std::chrono::steady_clock::now() +
+                                      std::chrono::seconds(2);
+    while (!second->execution_control()->is_parked() &&
+           std::chrono::steady_clock::now() < second_park_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(second->execution_control()->is_parked());
+    const auto first_paused_progress = progress_a.load(std::memory_order_relaxed);
+    const auto second_paused_progress = progress_b.load(std::memory_order_relaxed);
+    ASSERT_TRUE(pm.resume_process(process.value()).ok());
+    EXPECT_TRUE(first->execution_control()->is_parked());
+    EXPECT_FALSE(second->execution_control()->is_parked());
+
+    const auto second_resume_deadline = std::chrono::steady_clock::now() +
+                                        std::chrono::seconds(2);
+    while (progress_b.load(std::memory_order_relaxed) == second_paused_progress &&
+           std::chrono::steady_clock::now() < second_resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress_b.load(std::memory_order_relaxed), second_paused_progress);
+    EXPECT_EQ(progress_a.load(std::memory_order_relaxed), first_paused_progress);
+
+    ASSERT_TRUE(first->resume().ok());
+    const auto first_resume_deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::seconds(2);
+    while (progress_a.load(std::memory_order_relaxed) == first_paused_progress &&
+           std::chrono::steady_clock::now() < first_resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress_a.load(std::memory_order_relaxed), first_paused_progress);
+    ASSERT_TRUE(pm.terminate_process(process.value(), 0).ok());
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
 TEST(ProcessMgmtTest, MultipleProcessesIsolation) {
     rt::RuntimeCore core;
     ASSERT_TRUE(core.initialize().ok());
@@ -820,21 +1128,36 @@ TEST(ProcessMgmtTest, ActiveThreadsAtTermination) {
     ASSERT_TRUE(pm.initialize_process(ph.value(), mod, rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(pm.start_process(ph.value()).ok());
 
+    std::atomic<int> started{0};
     std::atomic<int> finished{0};
+    struct WorkerCounters {
+        std::atomic<int>* started;
+        std::atomic<int>* finished;
+    } counters{&started, &finished};
     for (int i = 0; i < 4; ++i) {
         auto th = pm.spawn_thread(
             ph.value(),
             [](rt::RtThread& self, void* arg) -> void* {
-                auto* fin = static_cast<std::atomic<int>*>(arg);
+                auto* counters = static_cast<WorkerCounters*>(arg);
+                counters->started->fetch_add(1, std::memory_order_release);
                 while (!self.stop_requested()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                fin->fetch_add(1);
+                counters->finished->fetch_add(1, std::memory_order_release);
                 return nullptr;
             },
-            &finished, "worker-" + std::to_string(i));
+            &counters, "worker-" + std::to_string(i));
         ASSERT_TRUE(th.ok());
     }
+    // Ensure every worker entered its body before terminating; otherwise a
+    // thread cancelled before trampoline entry is correctly never run.
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (started.load(std::memory_order_acquire) != 4 &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(started.load(std::memory_order_acquire), 4);
     // Terminate with ACTIVE threads: they observe the cooperative stop and
     // finish; cleanup completes without killing them.
     ASSERT_TRUE(pm.terminate_process(ph.value(), 0u).ok());
@@ -952,6 +1275,137 @@ TEST(IntegrationM4Test, ParsedImageThroughProcessManager) {
 
     ASSERT_TRUE(pm.terminate_process(ph.value(), 0u).ok());
     ASSERT_TRUE(core.shutdown().ok());
+}
+
+
+TEST(GuestSyncTest, MutexTracksGuestOwnershipAndRecursion) {
+    rt::RtGuestMutex m;
+    auto first=m.acquire(101,0); ASSERT_TRUE(first.ok()); EXPECT_FALSE(first.value());
+    auto recursive=m.acquire(101,0); ASSERT_TRUE(recursive.ok()); EXPECT_FALSE(recursive.value());
+    EXPECT_EQ(m.release(202).errc(),RuntimeErrc::LockNotOwned);
+    ASSERT_TRUE(m.release(101).ok()); EXPECT_EQ(m.acquire(202,0).errc(),RuntimeErrc::Timeout);
+    ASSERT_TRUE(m.release(101).ok()); auto second=m.acquire(202,0); ASSERT_TRUE(second.ok());
+    EXPECT_FALSE(second.value()); ASSERT_TRUE(m.release(202).ok());
+}
+TEST(GuestSyncTest, MutexReportsAbandonedOwnership) {
+    rt::RtGuestMutex m; ASSERT_TRUE(m.acquire(11,0).ok()); ASSERT_TRUE(m.abandon_owner(11).ok());
+    auto recovered=m.acquire(22,0); ASSERT_TRUE(recovered.ok()); EXPECT_TRUE(recovered.value());
+    EXPECT_EQ(m.abandon_owner(11).errc(),RuntimeErrc::LockNotOwned); ASSERT_TRUE(m.release(22).ok());
+}
+TEST(GuestSyncTest, MutexTimeoutCancellationAndClose) {
+    rt::RtGuestMutex m; ASSERT_TRUE(m.acquire(1,0).ok());
+    EXPECT_EQ(m.acquire(2,1'000'000).errc(),RuntimeErrc::Timeout);
+    EXPECT_EQ(m.acquire(2,20'000'000,[]{return true;}).errc(),RuntimeErrc::ThreadTerminated);
+    m.close(); EXPECT_EQ(m.acquire(2,-1).errc(),RuntimeErrc::ObjectDestroyed);
+}
+TEST(GuestSyncTest, SemaphoreCountBoundsAndPreviousCount) {
+    rt::RtGuestSemaphore s(1,3); ASSERT_TRUE(s.acquire(0).ok()); EXPECT_EQ(s.value(),0);
+    EXPECT_EQ(s.try_acquire().errc(),RuntimeErrc::Timeout);
+    auto r=s.release(2); ASSERT_TRUE(r.ok()); EXPECT_EQ(r.value(),0); EXPECT_EQ(s.value(),2);
+    EXPECT_EQ(s.release(2).errc(),RuntimeErrc::InvalidState);
+    EXPECT_EQ(s.release(0).errc(),RuntimeErrc::InvalidArgument);
+    ASSERT_TRUE(s.acquire(0).ok()); EXPECT_EQ(s.value(),1);
+}
+TEST(GuestSyncTest, SemaphoreCancellationAndClose) {
+    rt::RtGuestSemaphore s(0,2);
+    EXPECT_EQ(s.acquire(20'000'000,[]{return true;}).errc(),RuntimeErrc::ThreadTerminated);
+    s.close(); EXPECT_EQ(s.acquire(-1).errc(),RuntimeErrc::ObjectDestroyed);
+}
+TEST(GuestSyncTest, SemaphoreRejectsInvalidConstruction) {
+    rt::RtGuestSemaphore a(0,0), b(3,2);
+    EXPECT_EQ(a.acquire(0).errc(),RuntimeErrc::InvalidArgument);
+    EXPECT_EQ(b.release().errc(),RuntimeErrc::InvalidArgument);
+}
+
+
+TEST(GuestSyncTest, MutexWaiterIsWokenByReleaseAndCancellation) {
+    rt::RtGuestMutex mutex;
+    ASSERT_TRUE(mutex.acquire(1, 0).ok());
+    std::atomic<bool> started{false};
+    std::atomic<bool> cancel{false};
+    std::atomic<int> result{static_cast<int>(RuntimeErrc::Ok)};
+    std::thread waiter([&] {
+        started.store(true, std::memory_order_release);
+        auto r = mutex.acquire(2, -1, [&] { return cancel.load(std::memory_order_acquire); });
+        result.store(static_cast<int>(r.errc()), std::memory_order_release);
+        if (r.ok()) (void)mutex.release(2);
+    });
+    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cancel.store(true, std::memory_order_release);
+    waiter.join();
+    EXPECT_EQ(result.load(std::memory_order_acquire),
+              static_cast<int>(RuntimeErrc::ThreadTerminated));
+    ASSERT_TRUE(mutex.release(1).ok());
+}
+
+TEST(GuestSyncTest, SemaphoreWaiterIsWokenByReleaseAndCancellation) {
+    rt::RtGuestSemaphore semaphore(0, 1);
+    std::atomic<bool> started{false};
+    std::atomic<bool> cancel{false};
+    std::atomic<int> result{static_cast<int>(RuntimeErrc::Ok)};
+    std::thread waiter([&] {
+        started.store(true, std::memory_order_release);
+        auto r = semaphore.acquire(-1, [&] { return cancel.load(std::memory_order_acquire); });
+        result.store(static_cast<int>(r.errc()), std::memory_order_release);
+    });
+    while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    cancel.store(true, std::memory_order_release);
+    waiter.join();
+    EXPECT_EQ(result.load(std::memory_order_acquire),
+              static_cast<int>(RuntimeErrc::ThreadTerminated));
+}
+
+TEST(GuestSyncTest, MutexReleaseWakesBlockedGuestThread) {
+    rt::RtGuestMutex mutex;
+    ASSERT_TRUE(mutex.acquire(10, 0).ok());
+    std::atomic<bool> acquired{false};
+    std::thread waiter([&] {
+        auto r = mutex.acquire(20, -1);
+        acquired.store(r.ok(), std::memory_order_release);
+        if (r.ok()) (void)mutex.release(20);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_FALSE(acquired.load(std::memory_order_acquire));
+    ASSERT_TRUE(mutex.release(10).ok());
+    waiter.join();
+    EXPECT_TRUE(acquired.load(std::memory_order_acquire));
+}
+
+TEST(GuestSyncTest, SemaphoreReleaseWakesBlockedGuestThread) {
+    rt::RtGuestSemaphore semaphore(0, 1);
+    std::atomic<bool> acquired{false};
+    std::thread waiter([&] {
+        auto r = semaphore.acquire(-1);
+        acquired.store(r.ok(), std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_FALSE(acquired.load(std::memory_order_acquire));
+    ASSERT_TRUE(semaphore.release().ok());
+    waiter.join();
+    EXPECT_TRUE(acquired.load(std::memory_order_acquire));
+}
+
+
+namespace {
+void* acquire_guest_mutex_then_exit(RtThread& self, void* raw) {
+    auto* mutex = static_cast<rt::RtGuestMutex*>(raw);
+    const auto acquired = mutex->acquire(self.thread_id(), 0);
+    return acquired.ok() ? nullptr : reinterpret_cast<void*>(1);
+}
+}  // namespace
+
+TEST(GuestSyncTest, GuestThreadExitAutomaticallyAbandonsOwnedMutexes) {
+    rt::RtGuestMutex mutex;
+    RtThread owner(acquire_guest_mutex_then_exit, &mutex, "guest-mutex-owner");
+    ASSERT_TRUE(owner.start().ok());
+    auto joined = owner.join_ns(-1);
+    ASSERT_TRUE(joined.ok());
+    auto next_owner = mutex.acquire(999, 0);
+    ASSERT_TRUE(next_owner.ok());
+    EXPECT_TRUE(next_owner.value());
+    ASSERT_TRUE(mutex.release(999).ok());
 }
 
 int main(int argc, char** argv) {

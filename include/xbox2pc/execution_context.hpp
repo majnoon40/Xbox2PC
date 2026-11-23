@@ -83,6 +83,7 @@ public:
     struct Info {
         std::uint64_t process_id = 0;
         std::uint64_t thread_id = 0;
+        std::uint32_t tls_index = 0;
         std::uint64_t stack_top = 0;
         std::uint64_t stack_size = 0;
         std::uint64_t entry_va = 0;
@@ -92,6 +93,11 @@ public:
     ExecutionContext(std::uint64_t process_id, std::uint64_t thread_id,
                      AddressSpace& space, api::ApiRegistry& api_reg,
                      ExecutionConfig cfg, std::string name);
+    // Managed-thread constructor: derives both guest identities and binds
+    // the thread's cooperative gate, preventing caller-supplied TID drift.
+    ExecutionContext(RtThread& thread, AddressSpace& space,
+                     api::ApiRegistry& api_reg, ExecutionConfig cfg,
+                     std::string name);
     ~ExecutionContext() override;
 
     // ── lifecycle ──
@@ -114,6 +120,11 @@ public:
                                    IExecutionEngine& engine,
                                    const std::atomic<bool>& interrupted);
 
+    // Attach the owning managed thread's shared cooperative gate. When a
+    // request has no explicit control, invoke() supplies this gate to the
+    // backend automatically.
+    Result<void> bind_thread_control(std::shared_ptr<ExecutionControl> control);
+
     // Single-step (engine supports it): one instruction.
     Result<std::uint64_t> step(const ExecutionRequest& req,
                                IExecutionEngine& engine);
@@ -129,6 +140,7 @@ public:
     cpu::CpuState& cpu_mut() { return cpu_; }
     const ExecutionConfig& config() const { return cfg_; }
     guest::GuestMemory& memory() { return mem_; }
+    std::shared_ptr<ExecutionControl> execution_control() const;
     std::uint32_t run_count() const { return runs_; }
 
 private:
@@ -147,6 +159,7 @@ private:
     // M9: true once initialize() acquired a ContextLimiter slot (the
     // destructor releases only what was acquired — no counter underflow).
     bool counted_ = false;
+    std::shared_ptr<ExecutionControl> execution_control_;
     mutable std::mutex lock_;
 };
 

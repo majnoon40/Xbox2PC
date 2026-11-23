@@ -148,6 +148,10 @@ public:
     // RW; a Windows backend would VirtualAlloc MEM_COMMIT over the range).
     virtual Result<void> commit_subrange(std::uint64_t offset,
                                          std::uint64_t size) = 0;
+    // Discard backing pages and return a committed subrange to inaccessible
+    // reserved state. The mapping itself remains reserved.
+    virtual Result<void> decommit_subrange(std::uint64_t offset,
+                                           std::uint64_t size) = 0;
 };
 
 // reserve = reserve address space without committing; commit = accessible.

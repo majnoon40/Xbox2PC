@@ -3,6 +3,8 @@
 #include "xbox2pc/sync_objects.hpp"
 
 #include <chrono>
+#include <algorithm>
+#include <climits>
 #include <thread>
 #include <utility>
 
@@ -98,6 +100,125 @@ void RtSemaphore::on_destroy() {
     // Wake blocked waiters so destroy() cannot hang on PAL internals.
     pal_->release(static_cast<std::uint32_t>(max_ > 0 ? max_ : 1));
 }
+
+
+namespace {
+pal::MonotonicNs guest_wait_deadline(pal::MonotonicNs timeout_ns) {
+    if (timeout_ns < 0) return INT64_MAX;
+    const auto now = pal::now_ns();
+    return timeout_ns > INT64_MAX - now ? INT64_MAX : now + timeout_ns;
+}
+bool guest_wait_cancelled(const std::function<bool()>& cancelled) {
+    return cancelled && cancelled();
+}
+}  // namespace
+
+namespace {
+std::mutex g_guest_mutex_registry_lock;
+std::vector<RtGuestMutex*> g_guest_mutex_registry;
+}  // namespace
+
+RtGuestMutex::RtGuestMutex() : RuntimeObject(TypeId::Mutex) {
+    std::lock_guard guard(g_guest_mutex_registry_lock);
+    g_guest_mutex_registry.push_back(this);
+}
+
+RtGuestMutex::~RtGuestMutex() {
+    std::lock_guard guard(g_guest_mutex_registry_lock);
+    const auto it = std::find(g_guest_mutex_registry.begin(),
+                              g_guest_mutex_registry.end(), this);
+    if (it != g_guest_mutex_registry.end()) g_guest_mutex_registry.erase(it);
+}
+
+void abandon_guest_mutexes_for_thread(std::uint64_t guest_thread_id) {
+    if (guest_thread_id == 0) return;
+    std::lock_guard guard(g_guest_mutex_registry_lock);
+    for (auto* mutex : g_guest_mutex_registry) {
+        if (mutex != nullptr) (void)mutex->abandon_owner(guest_thread_id);
+    }
+}
+
+Result<bool> RtGuestMutex::acquire(std::uint64_t tid, pal::MonotonicNs timeout_ns,
+                                   const std::function<bool()>& cancelled) {
+    if (tid == 0) return Result<bool>(RuntimeErrc::InvalidArgument, "guest mutex requires nonzero thread id");
+    const auto deadline = guest_wait_deadline(timeout_ns);
+    std::unique_lock guard(lock_);
+    for (;;) {
+        if (closed_) return Result<bool>(RuntimeErrc::ObjectDestroyed, "guest mutex is closed");
+        if (guest_wait_cancelled(cancelled)) return Result<bool>(RuntimeErrc::ThreadTerminated, "guest mutex wait cancelled");
+        if (owner_thread_id_ == tid) {
+            if (recursion_ == UINT32_MAX) return Result<bool>(RuntimeErrc::OutOfResources, "guest mutex recursion count exhausted");
+            ++recursion_;
+            return Result<bool>(false);
+        }
+        if (owner_thread_id_ == 0) {
+            owner_thread_id_ = tid;
+            recursion_ = 1;
+            const bool was_abandoned = abandoned_;
+            abandoned_ = false;
+            return Result<bool>(was_abandoned);
+        }
+        const auto now = pal::now_ns();
+        if (timeout_ns == 0 || now >= deadline) return Result<bool>(RuntimeErrc::Timeout, "guest mutex wait deadline");
+        const auto remaining = deadline == INT64_MAX ? pal::MonotonicNs(2'000'000)
+            : std::min<pal::MonotonicNs>(2'000'000, deadline - now);
+        changed_.wait_for(guard, std::chrono::nanoseconds(remaining));
+    }
+}
+Result<void> RtGuestMutex::release(std::uint64_t tid) {
+    if (tid == 0) return Result<void>(RuntimeErrc::InvalidArgument, "guest mutex release requires nonzero thread id");
+    std::lock_guard guard(lock_);
+    if (closed_) return Result<void>(RuntimeErrc::ObjectDestroyed, "guest mutex is closed");
+    if (owner_thread_id_ != tid || recursion_ == 0) return Result<void>(RuntimeErrc::LockNotOwned, "guest thread does not own mutex");
+    if (--recursion_ == 0) { owner_thread_id_ = 0; changed_.notify_all(); }
+    return Result<void>::ok_result();
+}
+Result<void> RtGuestMutex::abandon_owner(std::uint64_t tid) {
+    if (tid == 0) return Result<void>(RuntimeErrc::InvalidArgument, "abandon requires nonzero thread id");
+    std::lock_guard guard(lock_);
+    if (owner_thread_id_ != tid) return Result<void>(RuntimeErrc::LockNotOwned, "guest thread is not mutex owner");
+    owner_thread_id_ = 0; recursion_ = 0; abandoned_ = true; changed_.notify_all();
+    return Result<void>::ok_result();
+}
+void RtGuestMutex::close() {
+    std::lock_guard guard(lock_);
+    closed_ = true; owner_thread_id_ = 0; recursion_ = 0; changed_.notify_all();
+}
+bool RtGuestMutex::is_closed() const { std::lock_guard guard(lock_); return closed_; }
+
+RtGuestSemaphore::RtGuestSemaphore(std::int64_t initial, std::int64_t maximum)
+    : RuntimeObject(TypeId::Semaphore), count_(initial), maximum_count_(maximum),
+      valid_initialization_(maximum > 0 && initial >= 0 && initial <= maximum) {}
+Result<void> RtGuestSemaphore::acquire(pal::MonotonicNs timeout_ns,
+                                       const std::function<bool()>& cancelled) {
+    if (!valid_initialization_) return Result<void>(RuntimeErrc::InvalidArgument, "requires 0 <= initial <= maximum and maximum > 0");
+    const auto deadline = guest_wait_deadline(timeout_ns);
+    std::unique_lock guard(lock_);
+    for (;;) {
+        if (closed_) return Result<void>(RuntimeErrc::ObjectDestroyed, "guest semaphore is closed");
+        if (guest_wait_cancelled(cancelled)) return Result<void>(RuntimeErrc::ThreadTerminated, "guest semaphore wait cancelled");
+        if (count_ > 0) { --count_; return Result<void>::ok_result(); }
+        const auto now = pal::now_ns();
+        if (timeout_ns == 0 || now >= deadline) return Result<void>(RuntimeErrc::Timeout, "guest semaphore wait deadline");
+        const auto remaining = deadline == INT64_MAX ? pal::MonotonicNs(2'000'000)
+            : std::min<pal::MonotonicNs>(2'000'000, deadline - now);
+        changed_.wait_for(guard, std::chrono::nanoseconds(remaining));
+    }
+}
+Result<void> RtGuestSemaphore::try_acquire() { return acquire(0); }
+Result<std::int64_t> RtGuestSemaphore::release(std::uint32_t count) {
+    if (!valid_initialization_) return Result<std::int64_t>(RuntimeErrc::InvalidArgument, "invalid semaphore initialization");
+    if (count == 0) return Result<std::int64_t>(RuntimeErrc::InvalidArgument, "release count must be nonzero");
+    std::lock_guard guard(lock_);
+    if (closed_) return Result<std::int64_t>(RuntimeErrc::ObjectDestroyed, "guest semaphore is closed");
+    if (static_cast<std::int64_t>(count) > maximum_count_ - count_)
+        return Result<std::int64_t>(RuntimeErrc::InvalidState, "release would exceed semaphore maximum");
+    const auto previous = count_; count_ += static_cast<std::int64_t>(count); changed_.notify_all();
+    return Result<std::int64_t>(previous);
+}
+std::int64_t RtGuestSemaphore::value() const { std::lock_guard guard(lock_); return count_; }
+void RtGuestSemaphore::close() { std::lock_guard guard(lock_); closed_ = true; changed_.notify_all(); }
+bool RtGuestSemaphore::is_closed() const { std::lock_guard guard(lock_); return closed_; }
 
 // ── RtCondvar ──────────────────────────────────────────────────────────────
 

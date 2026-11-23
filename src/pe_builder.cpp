@@ -154,12 +154,13 @@ std::vector<std::uint8_t> PeBuilder::build() const {
     // buffer length, so payload bytes extend the section automatically.
     for (const auto& [rva, blob] : spec.text_payloads) {
         if (rva < text_rva || blob.empty()) continue;
-        const std::uint64_t need_end =
-            static_cast<std::uint64_t>(rva) + blob.size();
+        const std::uint64_t text_offset =
+            static_cast<std::uint64_t>(rva - text_rva);
+        const std::uint64_t need_end = text_offset + blob.size();
         if (need_end > text.size()) {
             text.resize(static_cast<std::size_t>(need_end));
         }
-        text.put_bytes(static_cast<std::uint64_t>(rva - text_rva), blob);
+        text.put_bytes(text_offset, blob);
     }
 
     // Import thunk machinery, then descriptors.

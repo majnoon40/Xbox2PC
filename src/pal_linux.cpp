@@ -639,6 +639,20 @@ public:
         }
         return Result<void>::ok_result();
     }
+    Result<void> decommit_subrange(std::uint64_t offset,
+                                   std::uint64_t size) override {
+        if (base_ == nullptr)
+            return Result<void>(RuntimeErrc::InvalidState, "region unmapped");
+        if (offset >= size_ || size == 0 || size > size_ - offset)
+            return Result<void>(RuntimeErrc::InvalidArgument, "subrange out of bounds");
+        auto* addr = static_cast<std::uint8_t*>(base_) + offset;
+        if (mprotect(addr, static_cast<std::size_t>(size), PROT_NONE) != 0)
+            return errno_result("mprotect(decommit)");
+        if (madvise(addr, static_cast<std::size_t>(size), MADV_DONTNEED) != 0)
+            return errno_result("madvise(MADV_DONTNEED)");
+        return Result<void>::ok_result();
+    }
+
 
 private:
     void* base_ = nullptr;

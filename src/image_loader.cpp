@@ -749,6 +749,11 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
     auto hdr_res = space.reserve_region(base, hdr_pages, "pe-headers");
     if (!hdr_res.ok()) return Ret(hdr_res.errc(), hdr_res.context());
     reserved_vas.push_back(base);
+    auto header_type = space.set_region_type(base, VmRegionType::Image);
+    if (!header_type.ok()) {
+        rollback();
+        return Ret(header_type.errc(), header_type.context());
+    }
     auto commit_hdr = space.commit_region(base);
     if (!commit_hdr.ok()) {
         rollback();
@@ -788,6 +793,11 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
             return Ret(res.errc(), res.context());
         }
         reserved_vas.push_back(sva);
+        auto section_type = space.set_region_type(sva, VmRegionType::Image);
+        if (!section_type.ok()) {
+            rollback();
+            return Ret(section_type.errc(), section_type.context());
+        }
         auto com = space.commit_region(sva);
         if (!com.ok()) {
             rollback();
@@ -1460,6 +1470,12 @@ Result<Handle> ImageLoader::load_image(ProcessManager& pm, ObjectManager& mgr,
             return Ret(bres.errc(), bres.context());
         }
         bindings = std::move(bres.value());
+
+        // The PE parser also retains a bounded, normalized import view.
+        // Prefer the raw thunk walk above, but fall back to that parsed view
+        // when the directory is present and the raw walker yields no entries.
+        // This keeps a structurally parsed import table from being silently
+        // treated as an image with no imports.
     } else if (img.imports.present) {
         // No resolver: enumerate via M1 metadata as Unresolved (explicit;
         // loading then fails below when imports exist — never a silent 0).

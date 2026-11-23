@@ -23,6 +23,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -107,6 +109,53 @@ private:
 
     std::unique_ptr<pal::PalSemaphore> pal_;
     const std::int64_t max_;
+};
+
+
+class RtGuestMutex : public RuntimeObject {
+public:
+    XBOX2PC_RUNTIME_OBJECT_TYPE(RtGuestMutex, Mutex)
+    RtGuestMutex();
+    ~RtGuestMutex() override;
+    Result<bool> acquire(std::uint64_t guest_thread_id, pal::MonotonicNs timeout_ns,
+                         const std::function<bool()>& cancelled = {});
+    Result<void> release(std::uint64_t guest_thread_id);
+    Result<void> abandon_owner(std::uint64_t guest_thread_id);
+    void close();
+    bool is_closed() const;
+private:
+    void on_destroy() override { close(); }
+    mutable std::mutex lock_;
+    std::condition_variable changed_;
+    std::uint64_t owner_thread_id_ = 0;
+    std::uint32_t recursion_ = 0;
+    bool abandoned_ = false;
+    bool closed_ = false;
+};
+
+// Called by RtThread's exit trampoline to release ownership abandoned by a guest thread.
+void abandon_guest_mutexes_for_thread(std::uint64_t guest_thread_id);
+
+class RtGuestSemaphore : public RuntimeObject {
+public:
+    XBOX2PC_RUNTIME_OBJECT_TYPE(RtGuestSemaphore, Semaphore)
+    RtGuestSemaphore(std::int64_t initial_count, std::int64_t maximum_count);
+    Result<void> acquire(pal::MonotonicNs timeout_ns,
+                         const std::function<bool()>& cancelled = {});
+    Result<void> try_acquire();
+    Result<std::int64_t> release(std::uint32_t count = 1);
+    std::int64_t value() const;
+    std::int64_t max() const { return maximum_count_; }
+    void close();
+    bool is_closed() const;
+private:
+    void on_destroy() override { close(); }
+    mutable std::mutex lock_;
+    std::condition_variable changed_;
+    std::int64_t count_ = 0;
+    const std::int64_t maximum_count_;
+    const bool valid_initialization_;
+    bool closed_ = false;
 };
 
 // ── condition variable ────────────────────────────────────────────────────
