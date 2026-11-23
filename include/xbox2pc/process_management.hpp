@@ -179,7 +179,6 @@ public:
     const ResourceLimits& limits() const { return limits_; }
 
     std::size_t process_count() const;
-    ObjectManager& object_manager() { return objects_; }
     // Listing (CLI process-info).
     struct ProcessInfo {
         std::uint64_t pid;

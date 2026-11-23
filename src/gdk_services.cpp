@@ -653,23 +653,11 @@ Result<void> GameRuntimeService::on_shutdown() {
         process_exit_observer_id_ = 0;
     }
     const auto revoked = api_reg_.revoke_owner(id());
-    std::vector<std::pair<std::uint64_t, EventHandle>> event_handles;
     {
         std::lock_guard lock(state_lock_);
         procs_.clear();
         ts_bits_.clear();
-        for (const auto& [key, entry] : events_) event_handles.emplace_back(key.first, entry);
         events_.clear();
-        // Retired event objects remain manager-owned until ObjectManager
-        // shutdown or successful process teardown; this avoids racing active waits.
-        retired_events_.clear();
-    }
-    for (const auto& [pid, entry] : event_handles) {
-        auto process = process_manager_.find_process_by_pid(pid);
-        if (process.ok()) {
-            auto* owner = process.value().get()->as<ManagedProcess>();
-            if (owner != nullptr) (void)owner->handle_table().close(entry.handle);
-        }
     }
     owned_.clear();
     if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
@@ -804,133 +792,73 @@ Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
         owner->state() == ProcessState::Terminated || owner->state() == ProcessState::Failed)
         return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "event owner process is not active");
 
-    auto registered = process_manager_.object_manager().register_object(
-        std::make_unique<RtEvent>(!manual_reset, initially_set));
-    if (!registered.ok())
-        return Result<std::uint64_t>(registered.errc(), registered.context());
-    const std::uint64_t object_id = registered.value();
-    auto object = process_manager_.object_manager().lookup_id(object_id);
-    if (!object.ok()) {
-        (void)process_manager_.object_manager().destroy(object_id);
-        return Result<std::uint64_t>(object.errc(), object.context());
+    std::uint64_t handle = next_event_handle_.load(std::memory_order_relaxed);
+    for (;;) {
+        if (handle == 0 || handle == UINT64_MAX)
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "event handle space exhausted");
+        if (next_event_handle_.compare_exchange_weak(handle, handle + 1,
+                std::memory_order_relaxed, std::memory_order_relaxed)) break;
     }
-    auto handle = owner->handle_table().create(*object.value().get());
-    object.value().release();
-    if (!handle.ok()) {
-        (void)process_manager_.object_manager().destroy(object_id);
-        return Result<std::uint64_t>(handle.errc(), handle.context());
-    }
+    auto event = std::make_shared<RtEvent>(!manual_reset, initially_set);
     {
         std::lock_guard lock(state_lock_);
-        events_.emplace(std::make_pair(pid, handle.value().raw()),
-                        EventHandle{handle.value(), object_id});
+        events_.emplace(std::make_pair(pid, handle), std::move(event));
     }
+    // Close the race where process-exit cleanup ran between the initial
+    // lookup and insertion: either this check rejects and erases, or the
+    // later process-exit observer erases the inserted handle.
     if (owner->state() == ProcessState::Terminating ||
         owner->state() == ProcessState::Terminated || owner->state() == ProcessState::Failed) {
-        {
-            std::lock_guard lock(state_lock_);
-            events_.erase({pid, handle.value().raw()});
-        }
-        (void)owner->handle_table().close(handle.value());
-        (void)process_manager_.object_manager().destroy(object_id);
-        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
-                                     "event owner process exited during creation");
+        std::lock_guard lock(state_lock_);
+        events_.erase({pid, handle});
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "event owner process exited during creation");
     }
-    return Result<std::uint64_t>(handle.value().raw());
+    return Result<std::uint64_t>(handle);
 }
 Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t handle) {
-    std::uint64_t object_id = 0;
-    {
-        std::lock_guard lock(state_lock_);
-        const auto it = events_.find({pid, handle});
-        if (it == events_.end()) return Result<void>(RuntimeErrc::InvalidHandle, "event handle not owned by process");
-        object_id = it->second.object_id;
-    }
-    auto object = process_manager_.object_manager().lookup_id(object_id);
-    if (!object.ok()) return Result<void>(object.errc(), object.context());
-    auto* event = object.value().get()->as<RtEvent>();
-    if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "event handle target is not an event");
+    std::shared_ptr<RtEvent> event;
+    { std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+      if(it==events_.end())return Result<void>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+      event=it->second; }
     return event->set();
 }
 Result<void> GameRuntimeService::reset_event(std::uint64_t pid, std::uint64_t handle) {
-    std::uint64_t object_id = 0;
-    {
-        std::lock_guard lock(state_lock_);
-        const auto it = events_.find({pid, handle});
-        if (it == events_.end()) return Result<void>(RuntimeErrc::InvalidHandle, "event handle not owned by process");
-        object_id = it->second.object_id;
-    }
-    auto object = process_manager_.object_manager().lookup_id(object_id);
-    if (!object.ok()) return Result<void>(object.errc(), object.context());
-    auto* event = object.value().get()->as<RtEvent>();
-    if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "event handle target is not an event");
+    std::shared_ptr<RtEvent> event;
+    { std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+      if(it==events_.end())return Result<void>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+      event=it->second; }
     return event->reset();
 }
 Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
                                                       std::uint64_t handle,
                                                       std::uint32_t timeout_ms) {
-    std::uint64_t object_id = 0;
-    {
-        std::lock_guard lock(state_lock_);
-        const auto it = events_.find({pid, handle});
-        if (it == events_.end()) return Result<std::uint32_t>(RuntimeErrc::InvalidHandle, "event handle not owned by process");
-        object_id = it->second.object_id;
-    }
-    auto object = process_manager_.object_manager().lookup_id(object_id);
-    if (!object.ok()) return Result<std::uint32_t>(object.errc(), object.context());
-    auto* event = object.value().get()->as<RtEvent>();
-    if (event == nullptr) return Result<std::uint32_t>(RuntimeErrc::ObjectTypeMismatch, "event handle target is not an event");
+    std::shared_ptr<RtEvent> event;
+    { std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+      if(it==events_.end())return Result<std::uint32_t>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+      event=it->second; }
     auto waited = timeout_ms == 0xFFFFFFFFu ? event->wait_infinite()
                                             : event->wait_ms(static_cast<std::int64_t>(timeout_ms));
-    if (waited.ok()) return Result<std::uint32_t>(0u);
-    if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
-    return Result<std::uint32_t>(waited.errc(), waited.context());
+    if(waited.ok())return Result<std::uint32_t>(0u);
+    if(waited.errc()==RuntimeErrc::Timeout)return Result<std::uint32_t>(0x102u);
+    return Result<std::uint32_t>(waited.errc(),waited.context());
 }
 Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t handle) {
-    EventHandle entry;
-    {
-        std::lock_guard lock(state_lock_);
-        const auto it = events_.find({pid, handle});
-        if (it == events_.end()) return Result<void>(RuntimeErrc::InvalidHandle, "event handle not owned by process");
-        entry = it->second;
-        events_.erase(it);
-        // Do not destroy the object here: another thread may already be
-        // waiting on it. Process teardown drains guest threads before the
-        // observer destroys retired objects.
-        retired_events_[pid].push_back(entry.object_id);
-    }
-    auto process = process_manager_.find_process_by_pid(pid);
-    if (process.ok()) {
-        auto* owner = process.value().get()->as<ManagedProcess>();
-        if (owner != nullptr) (void)owner->handle_table().close(entry.handle);
-    }
-    return Result<void>::ok_result();
+    std::lock_guard lock(state_lock_); auto it=events_.find({pid,handle});
+    if(it==events_.end())return Result<void>(RuntimeErrc::InvalidHandle,"event handle not owned by process");
+    events_.erase(it); return Result<void>::ok_result();
 }
+
 void GameRuntimeService::release_process(std::uint64_t process_id) {
-    std::vector<std::uint64_t> event_objects;
-    {
-        std::lock_guard lock(state_lock_);
-        procs_.erase(process_id);
-        for (auto it = ts_bits_.begin(); it != ts_bits_.end();) {
-            if (it->first.first == process_id) it = ts_bits_.erase(it);
-            else ++it;
-        }
-        for (auto it = events_.begin(); it != events_.end();) {
-            if (it->first.first == process_id) {
-                event_objects.push_back(it->second.object_id);
-                it = events_.erase(it);
-            } else ++it;
-        }
-        const auto retired = retired_events_.find(process_id);
-        if (retired != retired_events_.end()) {
-            event_objects.insert(event_objects.end(), retired->second.begin(), retired->second.end());
-            retired_events_.erase(retired);
-        }
+    std::lock_guard lock(state_lock_);
+    procs_.erase(process_id);
+    for (auto it = ts_bits_.begin(); it != ts_bits_.end();) {
+        if (it->first.first == process_id) it = ts_bits_.erase(it);
+        else ++it;
     }
-    // ProcessManager has already drained guest threads and closed this
-    // process's handle table before invoking this observer.
-    for (const auto object_id : event_objects)
-        (void)process_manager_.object_manager().destroy(object_id);
+    for (auto it = events_.begin(); it != events_.end();) {
+        if (it->first.first == process_id) it = events_.erase(it);
+        else ++it;
+    }
 }
 
 // ── TaskQueueService ─────────────────────────────────────────────────────

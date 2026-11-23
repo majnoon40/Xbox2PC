@@ -10,9 +10,9 @@
    payloads through guest memory,
 5. return control at the guest return address.
 
-`plan_for_descriptor` builds marshalling plans only for explicitly listed,
-evidence-backed signatures. The M10 list includes the M7 GDK calls plus
-process/thread identity, VirtualQuery, and the currently supported Win32
-event calls. Any other API is a typed `NotFound`; layouts are never guessed. No host function pointers are exposed to guest code; nested
+`plan_for_descriptor` builds marshalling plans ONLY from the 16
+documented M7 signatures (register/stack/out-buffer layout per
+signature); any other API is a typed `NotFound` — layouts are never
+guessed. No host function pointers are exposed to guest code; nested
 dispatch depth is capped. Tests cover integer/pointer/out-buffer/
 error/invalid-pointer/depth paths.

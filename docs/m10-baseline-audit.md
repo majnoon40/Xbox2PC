@@ -154,22 +154,18 @@ remain unavailable, and addresses outside the modeled reservation still
 return zero; this is a bounded partial Win32 implementation.
 
 
-## M10.7 — Win32 event synchronization vertical slice
+## M10.6 — Win32 event synchronization vertical slice
 
 Added evidence-backed descriptors and implementations for CreateEventW,
 SetEvent, ResetEvent, WaitForSingleObject, and CloseHandle. The implementation
-registers RtEvent objects with ObjectManager and issues per-process HandleTable
-entries. It covers manual/auto reset, initial signal state, finite/infinite
-waits, stale-handle rejection, and process-exit cleanup. Closing a handle removes it
-from the process table immediately; the underlying object is retired until
-process teardown so an already-running wait is not synchronously destroyed.
+uses the existing RtEvent primitive and covers manual/auto reset, initial
+signal state, finite/infinite waits, process-scoped opaque tokens, stale
+handle rejection, and process-exit cleanup.
 
 This remains partial compatibility: only unnamed events with null security
-attributes are accepted; named events, duplicate-handle APIs,
+attributes are accepted; named events, duplicate/cross-process handles,
 other waitable object types, last-error behavior, and scheduler-aware guest
 blocking are not implemented. Waits block the calling host execution thread.
-Closed event objects are reclaimed at successful process teardown (or final
-ObjectManager shutdown), not synchronously by CloseHandle.
 All five descriptors remain PartiallyImplemented.
 
 Evidence:

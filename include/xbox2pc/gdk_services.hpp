@@ -15,6 +15,7 @@
 // (host clock), pe_parser (delay-load decode helper types). It creates
 // no managers of its own.
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -134,10 +135,8 @@ private:
     mutable std::mutex state_lock_;
     std::map<std::uint64_t, ProcState> procs_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
-    struct EventHandle { Handle handle; std::uint64_t object_id = 0; };
-    std::map<std::pair<std::uint64_t, std::uint64_t>, EventHandle> events_;
-    // Closed handles are retired until process exit so an in-flight wait can finish safely.
-    std::map<std::uint64_t, std::vector<std::uint64_t>> retired_events_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<RtEvent>> events_;
+    std::atomic<std::uint64_t> next_event_handle_{1};
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 

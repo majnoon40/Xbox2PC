@@ -520,6 +520,7 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     ASSERT_TRUE(close_auto.ok); EXPECT_EQ(close_auto.return_value,1u);
 
     c.process_id=pid.value();
+    c.arg_count=1; c.args[0]=h;  // Close the original manual-reset event, not the auto-reset event already closed above.
     auto closed=w.reg.dispatch("kernel32","CloseHandle",c);
     ASSERT_TRUE(closed.ok); EXPECT_EQ(closed.return_value,1u);
     EXPECT_EQ(p->handle_table().live_count(),handles_before);
