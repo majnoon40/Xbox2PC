@@ -220,12 +220,10 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
     // First-fit scan using offsets from xbox_base_; all bounds checks are
     // subtraction-based so hostile sizes cannot wrap address arithmetic.
     std::uint64_t candidate_off = 0;
-    bool found = false;
     for (const auto& [va, r] : impl_->regions) {
         const std::uint64_t region_off = va - xbox_base_;
         if (region_off >= candidate_off &&
             aligned <= region_off - candidate_off) {
-            found = true;
             break;
         }
         const std::uint64_t region_end = region_off + r.size;
@@ -246,7 +244,8 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
         for (const auto& [va, r] : impl_->regions) {
             if (r.state == RegionState::Reserved) current_reserved += r.size;
         }
-        if (current_reserved + aligned > limits_.max_reserved_bytes) {
+        if (current_reserved > limits_.max_reserved_bytes ||
+            aligned > limits_.max_reserved_bytes - current_reserved) {
             return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                          "reservation limit exceeded");
         }
@@ -631,36 +630,59 @@ Result<std::uint64_t> MemoryAllocator::allocate(std::uint64_t size,
         : (alignment - (base_addr % alignment)) % alignment;
     // Smallest offset x >= `from` with (base + x) % alignment == 0,
     // i.e. x ≡ base_skew (mod alignment).
-    const auto align_abs = [&](std::uint64_t from) -> std::uint64_t {
-        if (alignment <= 1) return from;
+    const auto align_abs = [&](std::uint64_t from,
+                               std::uint64_t& aligned) -> bool {
+        if (alignment <= 1) {
+            aligned = from;
+            return true;
+        }
         const std::uint64_t rel = from % alignment;
-        if (rel == base_skew) return from;
-        return from + (base_skew + alignment - rel) % alignment;
+        const std::uint64_t delta =
+            rel == base_skew ? 0 : (base_skew + alignment - rel) % alignment;
+        if (from > (~0ull) - delta) return false;
+        aligned = from + delta;
+        return true;
     };
+    if (impl_->buffer == nullptr || size > impl_->capacity) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "allocation exceeds or lacks backing storage");
+    }
     std::uint64_t chosen = impl_->capacity;  // sentinel: not found
     // Tail fast path (the common append case): try after the LAST block
-    // first — O(log n) via rbegin, no gap scan at all. Only when the tail
-    // does not fit do we fall back to the full first-fit gap scan.
+    // first — O(log n) via rbegin, no gap scan at all.
     if (!impl_->layout.empty()) {
         const auto& last = *impl_->layout.rbegin();
         const std::uint64_t last_len = impl_->live.at(last.second).aligned_size;
-        const std::uint64_t tail = align_abs(last.first + last_len);
-        if (tail + size <= impl_->capacity) {
-            chosen = tail;
+        if (last.first <= impl_->capacity &&
+            last_len <= impl_->capacity - last.first) {
+            const std::uint64_t last_end = last.first + last_len;
+            std::uint64_t tail = 0;
+            if (align_abs(last_end, tail) && tail <= impl_->capacity &&
+                size <= impl_->capacity - tail) {
+                chosen = tail;
+            }
         }
     } else {
-        const std::uint64_t head = align_abs(0);
-        if (head + size <= impl_->capacity) chosen = head;
+        std::uint64_t head = 0;
+        if (align_abs(0, head) && head <= impl_->capacity &&
+            size <= impl_->capacity - head) {
+            chosen = head;
+        }
     }
     if (chosen == impl_->capacity) {
         // Full first-fit gap scan (fragmented case).
         std::uint64_t prev_end = 0;
         for (const auto& [off, id] : impl_->layout) {
             const std::uint64_t len = impl_->live.at(id).aligned_size;
-            const std::uint64_t aligned_start = align_abs(prev_end);
-            if (aligned_start + size <= off) {
-                chosen = aligned_start;   // fits in the gap before this block
+            std::uint64_t aligned_start = 0;
+            if (align_abs(prev_end, aligned_start) &&
+                aligned_start <= off && size <= off - aligned_start) {
+                chosen = aligned_start;
                 break;
+            }
+            if (off > impl_->capacity || len > impl_->capacity - off) {
+                return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                             "allocator layout invariant violated");
             }
             prev_end = off + len;
         }
@@ -671,9 +693,15 @@ Result<std::uint64_t> MemoryAllocator::allocate(std::uint64_t size,
                                          " bytes @ alignment " + std::to_string(alignment));
     }
     const std::uint64_t aligned_size = size;   // padding already in `chosen`
-    if (impl_->max_bytes != 0 && impl_->used + aligned_size > impl_->max_bytes) {
+    if (impl_->max_bytes != 0 &&
+        (impl_->used > impl_->max_bytes ||
+         aligned_size > impl_->max_bytes - impl_->used)) {
         return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
                                      "allocator byte limit exceeded");
+    }
+    if (impl_->next_id == 0) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "allocation ID space exhausted");
     }
     const std::uint64_t id = impl_->next_id++;
     AllocationInfo info;
