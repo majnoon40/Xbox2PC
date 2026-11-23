@@ -34,3 +34,14 @@ The M10 `WaitForMultipleObjects` subset uses an explicit pointer-array plan: the
 The loader's `LoadDiagnostics::imports` records each resolved import's synthetic IAT value and original DLL/name-or-ordinal lookup. `ExecutionContext::prepare_entry` copies only resolved bindings into `ExecutionRequest::api_bindings`; the execution engine matches the exact landing value, looks up the verified descriptor, builds the whitelisted `MarshalPlan`, validates the guest return address, marshals through `GuestMemory`, and resumes at the saved guest return address. Binding-range values without a matching resolved import identity fail closed. GDK and Win32 bindings use separate bounded synthetic subranges; the completion sentinel is reserved and binding allocation stops before it can collide.
 
 The engine integration is covered by a synthetic guest test that calls `XGameRuntimeInitialize` through a resolved binding and returns to guest code. This validates the API-call bridge path only; it does not imply broad Xbox API or retail-game compatibility.
+
+
+## Delayed task-queue callback ABI boundary
+
+`XTaskQueueSubmitDelayedCallback` has an explicit five-argument x64
+marshalling plan (queue handle, port, delay in milliseconds, guest context,
+guest callback address). This permits deterministic ABI decoding and import
+inspection only. The API implementation remains unsupported: no timer,
+queue-owned callback lifetime, cancellation delivery, or guest callback
+invocation is provided. The descriptor must not be interpreted as evidence
+that delayed callbacks execute.
