@@ -436,7 +436,7 @@ Result<Handle> ProcessManager::spawn_thread(Handle process,
         ~PendingRelease() { release(); }
     } pending_release{release_pending};
 
-    auto thread = std::make_unique<RtThread>(main, arg, name);
+    auto thread = std::make_unique<RtThread>(main, arg, name, proc->pid_value());
     auto reg = objects_.register_object(std::move(thread));
     if (!reg.ok()) {
         return Result<Handle>(reg.errc(), reg.context());
