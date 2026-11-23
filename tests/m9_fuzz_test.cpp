@@ -69,7 +69,9 @@ TEST(M9FuzzTest, MutatedSyntheticPeValidationAndStaticAnalysis) {
                 mutated.data(), mutated.size(), "m9-fuzz.exe");
             EXPECT_EQ(validation.parsed, true);
             EXPECT_EQ(analysis.parsed, true);
-            EXPECT_EQ(image.sections.size(), image.sections.size());
+            EXPECT_LE(image.sections.size(), xbox2pc::pe::kMaxSections);
+            EXPECT_EQ(validation.file_size, mutated.size());
+            EXPECT_EQ(analysis.source, "m9-fuzz.exe");
         } catch (const xbox2pc::pe::ParseError&) {
             // A malformed mutation is an expected typed rejection.
         } catch (const std::exception& error) {
