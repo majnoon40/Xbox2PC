@@ -1165,6 +1165,25 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
 }
 
+TEST(GdkServiceTest, FinalCloseWithoutDispatchReleasesPendingCallbacks) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-close-pending.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    const auto queue = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Work,
+        0xCAFE, 0x140001000).ok());
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+
+    ASSERT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+}
+
 TEST(GdkServiceTest, TaskQueueCallbacksRemainFifoAndPortIsolated) {
     ApiWorld w;
     (void)w.new_process("task-queue-port-order.exe");
