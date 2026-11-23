@@ -326,7 +326,18 @@ Result<std::uint64_t> ObjectManager::register_object(std::unique_ptr<RuntimeObje
         return Result<std::uint64_t>(RuntimeErrc::ObjectDestroyed,
                                       "cannot register a destroyed object");
     }
-    const std::uint64_t id = next_id_.fetch_add(1, std::memory_order_acq_rel);
+    std::uint64_t id = next_id_.load(std::memory_order_acquire);
+    for (;;) {
+        if (id == 0 || id == ~0ull) {
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                         "object ID space exhausted");
+        }
+        if (next_id_.compare_exchange_weak(id, id + 1,
+                                           std::memory_order_acq_rel,
+                                           std::memory_order_acquire)) {
+            break;
+        }
+    }
     obj->manager_assign_id(id);
     obj->pin();  // manager's own ownership pin
     obj->manager_mark_registered();
@@ -450,9 +461,21 @@ Result<void> ObjectManager::destroy(std::uint64_t id) {
         return Result<void>(RuntimeErrc::ObjectDestroyed,
                             "object removed concurrently during destroy");
     }
+    // Teardown hooks may wait for host threads or call other runtime
+    // services. Do not hold the registry lock while they run; the object is
+    // already Destroying, so lookups will reject it.
+    lock.unlock();
     obj->on_destroy();
     obj->manager_mark_destroyed();
-    objects_.erase(it);
+    lock.lock();
+    const auto final_it = objects_.find(id);
+    if (final_it == objects_.end() || final_it->second.get() != obj) {
+        return Result<void>(RuntimeErrc::ObjectDestroyed,
+                            "object removed concurrently during teardown");
+    }
+    // The original iterator may have been invalidated by an insertion and
+    // unordered_map rehash while the lock was released above.
+    objects_.erase(final_it);
     return Result<void>::ok_result();
 }
 
