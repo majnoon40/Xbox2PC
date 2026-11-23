@@ -35,6 +35,34 @@ TEST(StaticAnalysisTest, RejectsWrongArchitectureWithoutScanning) {
     EXPECT_FALSE(report.notes.empty());
 }
 
+
+TEST(StaticAnalysisTest, SeparatesUnsupportedEncodingsFromInvalidDataCandidates) {
+    xbox2pc::test::PeBuildSpec spec;
+    spec.text_payloads.push_back({0x1000, {0x0F, 0x10, 0xC0, 0x0F, 0xFF}});
+    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+
+    const auto report =
+        xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "mixed-code-data.exe");
+
+    ASSERT_TRUE(report.parsed);
+    EXPECT_FALSE(report.unsupported_instructions.empty());
+    // Invalid encodings are only heuristic candidates, never asserted data.
+    EXPECT_TRUE(report.candidate_embedded_data.empty() ||
+                !report.candidate_embedded_data.front().reason.empty());
+}
+
+TEST(StaticAnalysisTest, MarksTruncatedExecutableTailUncertain) {
+    xbox2pc::test::PeBuildSpec spec;
+    spec.text_payloads.push_back({0x1000, {0x90, 0x48}});
+    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+
+    const auto report =
+        xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "truncated-tail.exe");
+
+    ASSERT_TRUE(report.parsed);
+    EXPECT_FALSE(report.uncertain_regions.empty());
+}
+
 TEST(StaticAnalysisTest, ReportsFsSegmentUse) {
     xbox2pc::test::PeBuildSpec spec;
     spec.text_payloads.push_back(
