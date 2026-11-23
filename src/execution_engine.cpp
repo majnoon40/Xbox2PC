@@ -654,6 +654,11 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(int_arg());
         plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XTaskQueueDuplicateHandle") {
+        plan.call.args.push_back(int_arg()); // queueHandle
+        plan.call.args.push_back(ptr_out(8)); // duplicatedHandle
+        plan.out_buffer_args.push_back(1);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "WaitForMultipleObjects") {
         plan.call.args.push_back(int_arg()); // nCount
         plan.call.args.push_back(ptr_in(0)); // lpHandles
