@@ -39,7 +39,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 - Added process-scoped handle-backed `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`, and `ReleaseSemaphore` support. `WaitForSingleObject` now accepts events, mutexes, and semaphores; mutex waits return `WAIT_ABANDONED_0` when ownership was abandoned.
 - Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. These waits still block the host execution thread in short bounded intervals; they are not scheduler-aware park/resume.
 - The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer and the descriptor metadata now reflects that behavior. Named objects, security descriptors, duplicate handles, and guest-facing wait-multiple APIs remain unsupported.
-- An internal guest wait-any primitive now polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). It is tested at the service layer but is not yet exposed as the Win32 `WaitForMultipleObjects` API; wait-all semantics remain unimplemented.
+- `CloseHandle` closes service-created event, guest mutex, and guest semaphore handles. An internal guest wait-any primitive polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). Tests cover manual/auto-reset events, semaphore consumption, timeout, duplicate/oversized handle rejection, and abandoned-mutex results. It is not yet exposed as the Win32 `WaitForMultipleObjects` API; wait-all semantics remain unimplemented.
 
 ## Remaining implementation order
 
@@ -51,7 +51,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 
 ## Validation boundary
 
-The existing M10 event tests validate the supported event subset. They do not validate mutex/semaphore Win32 behavior, scheduler-aware guest blocking, or full wait-any/all semantics. Those remain M10 work; no unsupported behavior should be marked implemented in the compatibility report.
+The M10 tests cover the implemented event, mutex, and semaphore slices, including service-level wait-any consumption and abandoned-mutex results. They do not establish scheduler-aware guest blocking, guest-facing wait-multiple APIs, or full wait-all semantics. Those remain M10 work; no unsupported behavior should be marked implemented in the compatibility report.
 
 
 ## M10 virtual-memory API slice
