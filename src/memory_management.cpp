@@ -373,9 +373,32 @@ Result<void> AddressSpace::decommit_range(std::uint64_t xbox_va,
     }
     if (impl_->host == nullptr)
         return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
+    struct PreviousProtection {
+        std::uint64_t start;
+        std::uint64_t size;
+        MemProtect protection;
+    };
+    std::vector<PreviousProtection> previous;
+    for (auto segment = impl_->regions.upper_bound(xbox_va);
+         segment != impl_->regions.begin();) {
+        --segment;
+        if (segment->first + segment->second.size <= xbox_va) break;
+        for (; segment != impl_->regions.end() && segment->first < end; ++segment) {
+            const auto begin = std::max(xbox_va, segment->first);
+            const auto finish = std::min(end, segment->first + segment->second.size);
+            if (begin < finish)
+                previous.push_back({begin, finish - begin, segment->second.protection});
+        }
+        break;
+    }
     const auto host_ok = impl_->host->decommit_subrange(
         xbox_va - xbox_base_, size);
-    if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
+    if (!host_ok.ok()) {
+        for (const auto& old : previous)
+            (void)apply_subrange_protect(*impl_->host, old.start - xbox_base_,
+                                         old.size, old.protection);
+        return Result<void>(host_ok.errc(), host_ok.context());
+    }
     if (!split_region_at(impl_->regions, xbox_va) ||
         !split_region_at(impl_->regions, end))
         return Result<void>(RuntimeErrc::InvalidState, "failed to split decommitted range metadata");
