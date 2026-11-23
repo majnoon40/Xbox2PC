@@ -537,6 +537,11 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
 TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
     ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor event_module;
+    event_module.module_name = "event-exit-test.exe";
+    event_module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, event_module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     const auto objects_before=w.core.objects().object_count();
     auto h=w.grt->create_event(pid.value(),false,true); ASSERT_TRUE(h.ok());
