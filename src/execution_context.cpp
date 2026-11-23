@@ -178,23 +178,29 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     req.completion_va = exec::kCompletionSentinel;
     req.entry_args = args;
     req.entry_spec = spec;
-    // API bindings: the image's IAT values in binding range (M7).
-    // (LoadedImageObject exposes its layout; binding values were
-    // written by the M6 loader from the resolver's ImportBinding list
-    // — the loader recorded them in LoadDiagnostics. The context takes
-    // them from the exec description's import counters + the image's
-    // actual IAT — read them from guest memory now: walk the import
-    // descriptors? For M8's contract the bindings matter only when
-    // guest code calls an import; the engine resolves the landing VA
-    // through the REQUEST's list, which the caller fills from its own
-    // resolver session. Provide the documented hook: IAT binding values
-    // in range are collected by scanning the image's first import IAT.)
+    // Bind each resolved IAT import to its exact documented identity.
+    // The loader diagnostics are authoritative; never infer an export from
+    // a synthetic address or scan arbitrary image memory for address ranges.
     req.api_binding_values.clear();
-    // Deterministic: scan the mapped IAT of each import descriptor's
-    // IAT within the image extent (bounded: imports_resolved*8 bytes at
-    // the documented IAT location is not tracked here — the engine
-    // treats ANY binding-range VA as an API call, so an explicit list
-    // is advisory only; leave it to the caller (tests fill it).
+    req.api_bindings.clear();
+    for (const auto& imported : image.diagnostics().imports) {
+        if (imported.status != loader::ImportStatus::Resolved ||
+            imported.value == 0) {
+            continue;
+        }
+        if (!exec::is_api_binding(imported.value)) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "resolved import value is outside the API binding range");
+        }
+        ApiBindingInfo binding;
+        binding.value = imported.value;
+        binding.library = imported.lookup.dll;
+        binding.export_name = imported.lookup.symbol;
+        binding.by_ordinal = imported.lookup.by_ordinal;
+        binding.ordinal = imported.lookup.ordinal;
+        req.api_binding_values.push_back(binding.value);
+        req.api_bindings.push_back(std::move(binding));
+    }
     (void)tls_index;
     return Ret(req);
 }
