@@ -224,7 +224,7 @@ target_compile_features(xbox2pc_rt_x64_decoder PUBLIC cxx_std_20)
 add_library(xbox2pc_rt_static_analysis STATIC static_analysis.cpp)
 target_include_directories(xbox2pc_rt_static_analysis PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_static_analysis PUBLIC
-    xbox2pc_pe_parser xbox2pc_rt_x64_decoder)
+    xbox2pc_pe_parser xbox2pc_rt_x64_decoder xbox2pc_rt_x86_interpreter)
 target_compile_features(xbox2pc_rt_static_analysis PUBLIC cxx_std_20)
 
 # ── M9: instruction semantics engine (arithmetic/logic first) ───────────────
