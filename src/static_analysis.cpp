@@ -10,6 +10,7 @@
 #include "xbox2pc/diagnostics.hpp"
 #include "xbox2pc/pe_parser.hpp"
 #include "xbox2pc/x64_decoder.hpp"
+#include "xbox2pc/x86_interpreter.hpp"
 
 namespace xbox2pc::analysis {
 namespace {
@@ -128,6 +129,14 @@ AnalysisReport analyze_pe(const std::uint8_t* data, std::size_t size,
                 record.length = decoded.ins.length;
                 record.bytes_hex = hex_bytes(instruction_bytes, decoded.ins.length);
                 record.text = xbox2pc::rt::x64::format_instruction(decoded.ins);
+                record.interpreter_supported =
+                    xbox2pc::rt::x86::Interpreter::supports(decoded.ins.mnem);
+                if (!record.interpreter_supported) {
+                    append_region(report.unsupported_execution, section.name, rva,
+                                  absolute_file_offset, decoded.ins.length,
+                                  "decoder-recognized instruction is outside the current interpreter support matrix: " +
+                                      record.text);
+                }
                 report.confirmed_instructions.push_back(std::move(record));
                 ++instruction_count;
 
