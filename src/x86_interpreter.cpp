@@ -417,21 +417,46 @@ bool Interpreter::supports(Mnemonic m) {
 x64::DecodeResult Interpreter::decode_at_rip(StepFault* fault_out) const {
     std::uint8_t buf[x64::kMaxInstructionBytes] = {};
     const std::uint64_t rip = cpu_.rip;
-    // Exec permission is checked on the FIRST byte (the engine loop does
-    // the same check before calling); fetch then proceeds byte-wise so a
-    // page boundary at the end of an instruction surfaces as Truncated.
+    // Decode incrementally: fetch only bytes the decoder actually needs.
+    // Every byte of an instruction must be executable, but bytes after the
+    // decoded instruction must not be fetched (they may be in an NX page).
     for (std::size_t n = 0; n < x64::kMaxInstructionBytes; ++n) {
-        auto b = mem_.read_u8(rip + n);
-        if (!b.ok()) {
-            if (n == 0 && fault_out != nullptr) {
+        if (rip > (~0ull) - n) {
+            if (fault_out != nullptr) {
                 fault_out->fault = GuestFault::InvalidAccess;
                 fault_out->fault_rip = rip;
                 fault_out->fault_address = rip;
-                fault_out->detail = "instruction fetch";
+                fault_out->detail = "instruction fetch address overflow";
             }
-            return x64::decode(buf, n, rip);   // n bytes available
+            return x64::decode(buf, n, rip);
+        }
+        const std::uint64_t address = rip + n;
+        const auto exec = mem_.validate_exec(address);
+        if (!exec.ok()) {
+            if (fault_out != nullptr) {
+                fault_out->fault =
+                    exec.err == guest::GuestMemErrc::PermissionDenied
+                        ? GuestFault::PermissionExec
+                        : GuestFault::InvalidAccess;
+                fault_out->fault_rip = rip;
+                fault_out->fault_address = address;
+                fault_out->detail = "instruction fetch byte is not executable";
+            }
+            return x64::decode(buf, n, rip);
+        }
+        auto b = mem_.read_u8(address);
+        if (!b.ok()) {
+            if (fault_out != nullptr) {
+                fault_out->fault = GuestFault::InvalidAccess;
+                fault_out->fault_rip = rip;
+                fault_out->fault_address = address;
+                fault_out->detail = "instruction fetch read failed";
+            }
+            return x64::decode(buf, n, rip);
         }
         buf[n] = b.value();
+        const auto decoded = x64::decode(buf, n + 1, rip);
+        if (decoded.status != x64::DecodeStatus::Truncated) return decoded;
     }
     return x64::decode(buf, x64::kMaxInstructionBytes, rip);
 }
@@ -449,6 +474,11 @@ StepResult Interpreter::step_at_rip() {
     StepFault fetch_fault;
     const x64::DecodeResult r = decode_at_rip(&fetch_fault);
     if (r.status != x64::DecodeStatus::Ok) {
+        // A required instruction byte can fault independently of the
+        // decoder's Truncated status (e.g. an NX page boundary).
+        if (!fetch_fault.detail.empty()) {
+            return StepResult::failed(fetch_fault);
+        }
         // Map the reject to a typed fault; RIP never advances.
         GuestFault f = GuestFault::UnsupportedInstruction;
         const char* why = "instruction rejected by the decoder";
