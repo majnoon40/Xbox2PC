@@ -91,9 +91,9 @@ relocate, or execute anything (explicit exclusion).
   call. It requests a resumable gate on each live owned thread and records
   exactly which threads it paused; `resume_process` releases only those
   gates, preserving threads that were already manually suspended.
-- The execution owner can attach `RtThread::execution_control()` to an
-  `ExecutionRequest`; the deterministic backend then parks at instruction
-  boundaries. Guest synchronization waits also check the same gate between
+- The execution owner can bind `RtThread::execution_control()` to an
+  `ExecutionContext`; `invoke()` propagates it to requests and the deterministic
+  backend parks at instruction boundaries. Guest synchronization waits also check the same gate between
   bounded wait slices. This is cooperative safe-point parking, not
   asynchronous preemption or a guest scheduler.
 
