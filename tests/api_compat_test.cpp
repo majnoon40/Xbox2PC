@@ -1017,9 +1017,11 @@ TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     EXPECT_FALSE(done.load(std::memory_order_acquire));
 
-    ASSERT_TRUE(w.tq->close_queue(owner_pid, created.value()).ok());
+    const auto close_original = w.tq->close_queue(owner_pid, created.value());
+    EXPECT_TRUE(close_original.ok());
     EXPECT_FALSE(done.load(std::memory_order_acquire));
-    ASSERT_TRUE(w.tq->close_queue(owner_pid, duplicate.value()).ok());
+    const auto close_duplicate = w.tq->close_queue(owner_pid, duplicate.value());
+    EXPECT_TRUE(close_duplicate.ok());
     waiter.join();
     EXPECT_TRUE(done.load(std::memory_order_acquire));
     EXPECT_TRUE(ok.load(std::memory_order_acquire));
