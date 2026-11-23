@@ -221,13 +221,15 @@ ExecutionResult DeterministicBackend::run(
                 if (opcode_b.value() == 0xC2) {
                     auto imm_lo = mem.read_u8(io_cpu.rip + 1);
                     auto imm_hi = mem.read_u8(io_cpu.rip + 2);
-                    if (imm_lo.ok() && imm_hi.ok()) {
+                    if (!imm_lo.ok() || !imm_hi.ok()) {
+                        extra = ~0ull;  // incomplete RET imm16 must not complete
+                    } else {
                         extra = static_cast<std::uint64_t>(imm_lo.value()) |
                                 (static_cast<std::uint64_t>(imm_hi.value()) << 8);
                     }
                 }
                 if (target.ok() && target.value() == req.completion_va &&
-                    sp0 <= (~0ull) - (8 + extra)) {
+                    extra <= 0xFFFFull && sp0 <= (~0ull) - (8 + extra)) {
                     io_cpu.set_reg(Gpr::Sp, sp0 + 8 + extra);
                     res.outcome = Outcome::Returned;
                     res.return_value =
