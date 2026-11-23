@@ -961,6 +961,43 @@ TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
     EXPECT_EQ(cpu_state.rip, code_va + 0x100); // RET sentinel pre-check stops at the return instruction
 }
 
+TEST(EngineTest, RejectsUnmappedSyntheticApiBinding) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("unmapped-api.exe");
+    const auto pid = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid.ok());
+    ModuleDescriptor module;
+    module.module_name = "unmapped-api.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &stack_va);
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid.value(), 0x93, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = 0x51000001ull;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, stack_va + 0x100);
+    cpu_state.rip = request.entry_va;
+    std::atomic<bool> interrupted{false};
+
+    const auto result = backend.run(request, cpu_state, interrupted);
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::InvalidState);
+    EXPECT_EQ(result.api_calls, 0u);
+}
+
 TEST(EngineTest, ExecutesSubsetProgram) {
     ExecWorld w;
     // RAX = 42; RCX = 100; RCX += 8; RAX = RCX; RET -> 108.
