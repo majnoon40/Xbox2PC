@@ -500,6 +500,18 @@ std::vector<ApiDescriptor> builtin_descriptors() {
 
     {
         ApiDescriptor a;
+        a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
+        a.convention = Convention::X64Microsoft; a.param_count = 4;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE* lpHandles, BOOL bWaitAll, DWORD dwMilliseconds)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-WAIT-MULTIPLE]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects";
+        a.notes = "supports wait-any for 1-64 readable process-owned event, guest mutex, and guest semaphore handles; wait-all is unsupported; host execution thread is polled and not scheduler-aware";
+        add(a);
+    }
+
         a.library = "kernel32"; a.export_name = "VirtualQuery";
         a.convention = Convention::X64Microsoft; a.param_count = 3;
         a.ret = ReturnKind::Uint64;
