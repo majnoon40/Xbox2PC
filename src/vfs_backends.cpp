@@ -24,8 +24,10 @@ HostDirBackend::HostDirBackend(std::string host_root, bool read_only)
     : root_(std::move(host_root)), read_only_(read_only), reject_symlinks_(true) {
     // Root must exist and be a directory (validated through the PAL; the
     // ctor result surfaces through every operation when invalid).
+    auto root_link = pal::host_path_is_symlink(root_);
     auto st = pal::stat_host_path(root_);
-    root_valid_ = st.ok() && st.value().is_directory;
+    root_valid_ = root_link.ok() && !root_link.value() &&
+                  st.ok() && st.value().is_directory;
     if (!root_valid_) {
         root_error_ = st.ok() ? "host root is not a directory"
                               : st.error_string();
@@ -62,12 +64,37 @@ Result<void> HostDirBackend::reject_if_symlink(const std::string& host_path,
     return Result<void>::ok_result();
 }
 
+Result<void> HostDirBackend::reject_symlink_components(
+    const VfsPath& rel, const std::string& what) const {
+    // Check every path prefix, not just the final component. A symlinked
+    // intermediate directory can otherwise redirect the whole operation
+    // outside root_ even when the leaf itself is not a symlink.
+    auto root_link = pal::host_path_is_symlink(root_);
+    if (!root_link.ok()) return Result<void>(root_link.errc(), root_link.context());
+    if (root_link.value()) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            what + ": backend root is a symlink");
+    }
+    std::string prefix = root_;
+    for (const auto& component : rel.components()) {
+        prefix.push_back('/');
+        prefix.append(component);
+        auto checked = reject_if_symlink(prefix, what);
+        if (!checked.ok()) return checked;
+    }
+    return Result<void>::ok_result();
+}
+
 Result<VfsStat> HostDirBackend::stat(const VfsPath& rel) {
     if (!root_valid_) {
         return Result<VfsStat>(RuntimeErrc::NotInitialized,
                                "backend root invalid: " + root_error_);
     }
     std::lock_guard lock(io_lock_);
+    auto safe = reject_symlink_components(rel, "stat");
+    if (!safe.ok()) return Result<VfsStat>(safe.errc(), safe.context());
+    auto safe = reject_symlink_components(rel, "delete_file");
+    if (!safe.ok()) return safe;
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
@@ -91,11 +118,11 @@ Result<std::unique_ptr<IVfsFileHandle>> HostDirBackend::open(const VfsPath& rel,
             RuntimeErrc::LockNotOwned, "backend is read-only");
     }
     std::lock_guard lock(io_lock_);
-    const std::string hp = host_path_for(rel);
-    auto sy = reject_if_symlink(hp, "open");
+    auto sy = reject_symlink_components(rel, "open");
     if (!sy.ok()) {
         return Result<std::unique_ptr<IVfsFileHandle>>(sy.errc(), sy.context());
     }
+    const std::string hp = host_path_for(rel);
     // Existence + type via stat first (typed NotFound beats PAL open's).
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
@@ -173,12 +200,12 @@ Result<void> HostDirBackend::create_file(const VfsPath& rel) {
     }
     if (read_only_) return Result<void>(RuntimeErrc::LockNotOwned, "backend is read-only");
     std::lock_guard lock(io_lock_);
-    const std::string hp = host_path_for(rel);
     if (rel.is_root()) {
         return Result<void>(RuntimeErrc::InvalidArgument, "cannot create root");
     }
-    auto sy = reject_if_symlink(hp, "create_file");
+    auto sy = reject_symlink_components(rel, "create_file");
     if (!sy.ok()) return sy;
+    const std::string hp = host_path_for(rel);
     // Create via PAL open(WriteNew) + immediate close.
     auto fh = pal::open_file(hp, pal::FileOpenMode::WriteNew);
     if (!fh.ok()) {
@@ -195,6 +222,10 @@ Result<void> HostDirBackend::delete_file(const VfsPath& rel) {
     }
     if (read_only_) return Result<void>(RuntimeErrc::LockNotOwned, "backend is read-only");
     std::lock_guard lock(io_lock_);
+    auto safe = reject_symlink_components(rel, "list");
+    if (!safe.ok()) {
+        return Result<std::vector<VfsDirEntry>>(safe.errc(), safe.context());
+    }
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) return Result<void>(st.errc(), st.context());
@@ -217,6 +248,8 @@ Result<void> HostDirBackend::create_directory(const VfsPath& rel) {
     if (rel.is_root()) {
         return Result<void>(RuntimeErrc::InvalidArgument, "cannot create root");
     }
+    auto safe = reject_symlink_components(rel, "create_directory");
+    if (!safe.ok()) return safe;
     return pal::create_host_directory(host_path_for(rel));
 }
 
@@ -231,6 +264,8 @@ Result<void> HostDirBackend::delete_directory(const VfsPath& rel) {
         return Result<void>(RuntimeErrc::InvalidArgument,
                             "refusing to delete the backend root");
     }
+    auto safe = reject_symlink_components(rel, "delete_directory");
+    if (!safe.ok()) return safe;
     return pal::remove_host_directory(host_path_for(rel));
 }
 
