@@ -944,36 +944,32 @@ TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
     ASSERT_TRUE(context.initialize().ok());
 
     DeterministicBackend backend(world.reg, cfg.value());
-    ASSERT_TRUE(backend.bind_execution_context(
-        pid.value(), 0xA10, guest.proc->address_space()).ok());
-
     ExecutionRequest request;
     request.entry_va = guest.out.exec.entry_va;
     request.stack_top_va = context.info().stack_top;
     request.stack_size = context.info().stack_size;
-    cpu::CpuState state;
-    state.reset();
-    state.set_reg(cpu::Gpr::Sp, context.info().stack_top - 0x20);
-    state.rip = request.entry_va;
+    context.cpu_mut().set_reg(cpu::Gpr::Sp, context.info().stack_top - 0x20);
+    context.cpu_mut().rip = request.entry_va;
     std::atomic<bool> interrupted{false};
     std::atomic<bool> finished{false};
     std::atomic<int> outcome{static_cast<int>(Outcome::Faulted)};
     struct RunnerState {
+        ExecutionContext* context;
         DeterministicBackend* backend;
         ExecutionRequest* request;
-        cpu::CpuState* state;
         std::atomic<bool>* interrupted;
         std::atomic<bool>* finished;
         std::atomic<int>* outcome;
-    } runner{&backend, &request, &state, &interrupted, &finished, &outcome};
+    } runner{&context, &backend, &request, &interrupted, &finished, &outcome};
 
     auto handle = world.core.create_thread(
         [](RtThread&, void* raw) -> void* {
             auto& run = *static_cast<RunnerState*>(raw);
-            const auto result = run.backend->run(*run.request, *run.state,
-                                                  *run.interrupted);
-            run.outcome->store(static_cast<int>(result.outcome),
-                               std::memory_order_release);
+            const auto result = run.context->invoke(*run.request, *run.backend,
+                                                     *run.interrupted);
+            run.outcome->store(result.ok()
+                ? static_cast<int>(result.value().outcome)
+                : static_cast<int>(Outcome::Faulted), std::memory_order_release);
             run.finished->store(true, std::memory_order_release);
             return nullptr;
         },
@@ -983,17 +979,17 @@ TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
     ASSERT_TRUE(thread_guard.ok());
     auto* thread = thread_guard.value().get()->as<RtThread>();
     ASSERT_NE(thread, nullptr);
-    request.control = thread->execution_control();
+    ASSERT_TRUE(context.bind_thread_control(thread->execution_control()).ok());
     ASSERT_TRUE(thread->start().ok());
     ASSERT_TRUE(thread->suspend().ok());
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(2);
-    while (!request.control->is_parked() &&
+    while (!thread->execution_control()->is_parked() &&
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    const bool parked = request.control->is_parked();
+    const bool parked = thread->execution_control()->is_parked();
     EXPECT_TRUE(parked) << "managed suspend did not park guest execution";
     EXPECT_FALSE(finished.load(std::memory_order_acquire));
     EXPECT_EQ(thread->state(), rt::ThreadState::Suspended);
@@ -1001,11 +997,11 @@ TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
     ASSERT_TRUE(thread->resume().ok());
     const auto resume_deadline = std::chrono::steady_clock::now() +
                                  std::chrono::seconds(2);
-    while (request.control->is_parked() &&
+    while (thread->execution_control()->is_parked() &&
            std::chrono::steady_clock::now() < resume_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_FALSE(request.control->is_parked());
+    EXPECT_FALSE(thread->execution_control()->is_parked());
 
     // Terminal stop is distinct from resume and wakes the running backend.
     thread->request_stop();
