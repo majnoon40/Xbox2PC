@@ -912,6 +912,7 @@ TEST(ProcessMgmtTest, ProcessSuspendResumeDoesNotCancelOwnedThreads) {
     ASSERT_TRUE(thread_ref.ok());
     auto* thread = thread_ref.value().get()->as<RtThread>();
     ASSERT_NE(thread, nullptr);
+    EXPECT_EQ(thread->owner_process_id(), managed->pid_value());
 
     const auto start_deadline = std::chrono::steady_clock::now() +
                                 std::chrono::seconds(2);
