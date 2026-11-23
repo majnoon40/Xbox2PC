@@ -86,8 +86,8 @@ public:
     std::vector<ModuleDescriptor> module_descriptors() const;
 
     // Threads (registered by ProcessManager; ids are object ids).
-    Result<void> begin_termination();
-    Result<void> finish_termination(std::uint64_t exit_code);
+    Result<void> begin_termination() override;
+    Result<void> finish_termination(std::uint64_t exit_code) override;
     Result<void> attach_thread(std::uint64_t thread_obj_id);
     Result<void> detach_thread(std::uint64_t thread_obj_id);
     std::vector<std::uint64_t> thread_ids() const;
