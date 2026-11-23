@@ -314,8 +314,10 @@ TEST(AbiTest, PrepareAndExtractRoundTrip) {
     // arg5/6 + arg7(fp) on the stack.
     EXPECT_EQ(c.reg(cpu::Gpr::Rcx), 100u);
     EXPECT_EQ(c.reg(cpu::Gpr::Rdx), 101u);
-    EXPECT_EQ(c.reg(cpu::Gpr::R8), 103u);
-    EXPECT_EQ(c.reg(cpu::Gpr::R9), 104u);
+    // Position 3 is occupied by XMM2, so integer arg 4 uses R9;
+    // R8 is not used for a later argument under the positional ABI.
+    EXPECT_EQ(c.reg(cpu::Gpr::R8), 0u);
+    EXPECT_EQ(c.reg(cpu::Gpr::R9), 103u);
     EXPECT_EQ(c.rip, 0x30001000u);
     // Extract back at the callee side.
     auto got = rt::abi::extract_args(c, spec, HostStack::reader(&st));
