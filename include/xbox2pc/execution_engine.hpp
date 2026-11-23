@@ -298,7 +298,8 @@ Result<MarshalResult> marshal_and_dispatch(cpu::CpuState& io_cpu,
                                            std::uint64_t pid,
                                            std::uint32_t depth,
                                            std::uint32_t max_depth,
-                                           std::uint64_t tid = 0);
+                                           std::uint64_t tid = 0,
+                                           const api::GuestCallbackInvoker& invoke_callback = {});
 
 // ── completion sentinel + binding range ──────────────────────────────────
 
