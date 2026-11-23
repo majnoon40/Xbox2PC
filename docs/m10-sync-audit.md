@@ -62,3 +62,8 @@ The existing M10 event tests validate the supported event subset. They do not va
 - Committed PAGE_NOACCESS is represented as committed but inaccessible memory, distinct from releasing a region.
 
 - Extended the virtual-memory slice with exact-region MEM_COMMIT at an existing reservation address and exact-region MEM_DECOMMIT. Decommit marks the region Reserved and protects the host subrange as inaccessible; partial ranges and physical-page discard fidelity remain unsupported.
+
+
+## AllocationProtect metadata
+
+VmRegion keeps allocation_protection independently from current protection. Win32 VirtualAlloc records the initial requested protection when creating a reservation; later VirtualProtect calls do not overwrite it. VirtualQuery returns this value in the x64 MEMORY_BASIC_INFORMATION.AllocationProtect field. Generic M4 reservations use the runtime's PAGE_READWRITE default. Image/mapped/shared region types remain outside this model.

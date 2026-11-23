@@ -797,6 +797,7 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     auto rd64=[&](const ApiCallResult& r,std::size_t o){std::uint64_t v=0;for(unsigned i=0;i<8;++i)v|=std::uint64_t(r.out_bytes[o+i])<<(8*i);return v;};
     EXPECT_EQ(rd64(result,0),base.value()); EXPECT_EQ(rd64(result,8),base.value()); EXPECT_EQ(rd64(result,24),0x2000u);
     EXPECT_EQ(rd32(result,32),0x1000u); EXPECT_EQ(rd32(result,36),0x04u);
+    EXPECT_EQ(rd32(result,16),0x04u); // original allocation protection
     // Querying the second page still returns the full contiguous region,
     // rather than a page-relative suffix.
     ctx.args[0]=base.value()+0x1123;
@@ -843,7 +844,13 @@ TEST(GdkServiceTest, Win32VirtualMemoryLifecycle) {
     const auto no_access = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
     ASSERT_TRUE(no_access.ok); ASSERT_EQ(no_access.return_value, 1u);
     EXPECT_EQ(no_access.out_bytes[0], 0x02u); // previous PAGE_READONLY
-    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x100000; ctx.args[2] = 48;
+    const auto query_after_protect = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(query_after_protect.ok);
+    EXPECT_EQ(query_after_protect.return_value, 48u);
+    EXPECT_EQ(query_after_protect.out_bytes[16], 0x04u);
+    EXPECT_EQ(query_after_protect.out_bytes[36], 0x01u);
+    ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
     const auto released = w.reg.dispatch("kernel32", "VirtualFree", ctx);
     ASSERT_TRUE(released.ok); EXPECT_EQ(released.return_value, 1u);
     const auto stats = w.pm.process_stats(w.last_handle);
@@ -924,6 +931,38 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     ctx.args[2] = 0x800; // MEM_RESET is deliberately unsupported.
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualAlloc", ctx).return_value, 0u);
     ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
+}
+
+TEST(GdkServiceTest, VirtualQueryPreservesReservedAllocationProtection) {
+    ApiWorld w;
+    (void)w.new_process("virtual-query-allocation-protect.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "virtual-query-allocation-protect.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+    ApiContext ctx; ctx.process_id = pid.value(); ctx.arg_count = 4;
+    ctx.args[0] = 0; ctx.args[1] = 0x2000; ctx.args[2] = 0x2000; ctx.args[3] = 0x02;
+    const auto reserved = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(reserved.ok); ASSERT_NE(reserved.return_value, 0u);
+    const auto base = reserved.return_value;
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x100000; ctx.args[2] = 48;
+    const auto before_commit = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(before_commit.ok); ASSERT_EQ(before_commit.return_value, 48u);
+    EXPECT_EQ(before_commit.out_bytes[16], 0x02u);
+    EXPECT_EQ(before_commit.out_bytes[32], 0x2000u);
+    ctx.arg_count = 4; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x1000; ctx.args[3] = 0x04;
+    const auto committed = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(committed.ok); EXPECT_EQ(committed.return_value, base);
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x100000; ctx.args[2] = 48;
+    const auto after_commit = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(after_commit.ok);
+    EXPECT_EQ(after_commit.out_bytes[16], 0x02u);
+    EXPECT_EQ(after_commit.out_bytes[36], 0x04u);
+    ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
 }
 

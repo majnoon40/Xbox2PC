@@ -144,3 +144,8 @@ MEM_COMMIT remains limited to an exact tracked reservation base, and
 partial-range commit/decommit/protection are not claimed. Regression coverage
 checks address rounding, overlap rejection, separate commit, combined
 reserve-and-commit, and release.
+
+
+## M10 VirtualQuery allocation protection
+
+Tracked guest regions retain the initial allocation protection separately from their current page protection. Win32 VirtualAlloc records the requested protection when creating a reservation; later VirtualProtect calls change only the current protection. VirtualQuery reports the retained value in MEMORY_BASIC_INFORMATION.AllocationProtect, including while reserved and after a later commit/protection change. Generic M4 reservations use the runtime's PAGE_READWRITE default.

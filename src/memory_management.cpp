@@ -322,6 +322,19 @@ Result<void> AddressSpace::decommit_region(std::uint64_t xbox_va) {
     return Result<void>::ok_result();
 }
 
+Result<void> AddressSpace::set_allocation_protection(
+    std::uint64_t xbox_va, MemProtect p) {
+    std::lock_guard lock(impl_->lock);
+    const auto it = impl_->regions.find(xbox_va);
+    if (it == impl_->regions.end())
+        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
+    if (it->second.state != RegionState::Reserved)
+        return Result<void>(RuntimeErrc::InvalidState,
+                            "allocation protection is immutable after commit");
+    it->second.allocation_protection = p;
+    return Result<void>::ok_result();
+}
+
 Result<void> AddressSpace::protect_region(std::uint64_t xbox_va, MemProtect p) {
     std::lock_guard lock(impl_->lock);
     const auto it = impl_->regions.find(xbox_va);

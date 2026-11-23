@@ -70,6 +70,7 @@ struct VmRegion {
     std::uint64_t size = 0;         // bytes (page-aligned on allocation)
     RegionState state = RegionState::Reserved;
     MemProtect protection = MemProtect::NoAccess;
+    MemProtect allocation_protection = MemProtect::ReadWrite;
     std::string name;               // diagnostics
     std::uint64_t alloc_id = 0;     // MemoryAllocator token (0 = not owned)
 };
@@ -115,6 +116,7 @@ public:
     Result<void> decommit_region(std::uint64_t xbox_va);
     // Change protection of a COMMITTED region (validated transitions).
     Result<void> protect_region(std::uint64_t xbox_va, MemProtect p);
+    Result<void> set_allocation_protection(std::uint64_t xbox_va, MemProtect p);
     // Release a region entirely (any state) — decommit + unreserve.
     Result<void> release_region(std::uint64_t xbox_va);
     // Resize (grow in place if the next bytes are free; shrink keeps the

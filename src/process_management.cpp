@@ -599,6 +599,18 @@ Result<std::uint64_t> ProcessManager::reserve_region_at_by_pid(
     return proc->address_space().reserve_region(xbox_va, size, name);
 }
 
+Result<void> ProcessManager::set_allocation_protection_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, MemProtect protection) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated,
+                            "guest process is not running");
+    std::lock_guard lock(lock_);
+    return proc->address_space().set_allocation_protection(xbox_va, protection);
+}
+
 Result<void> ProcessManager::commit_region_by_pid(
     std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
     auto found = find_process_by_pid(pid);

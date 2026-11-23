@@ -277,7 +277,7 @@ public:
         std::uint64_t base_address = space.base;
         std::uint64_t allocation_base = 0;
         std::uint64_t region_size = 0;
-        std::uint32_t allocation_protect = 0;  // not retained by M4
+        std::uint32_t allocation_protect = 0x04u; // default for tracked M4 reservations
         std::uint32_t state = 0x10000u;        // MEM_FREE
         std::uint32_t protect = 0x01u;         // PAGE_NOACCESS
         std::uint32_t type = 0;                // free regions have no type
@@ -310,6 +310,11 @@ public:
             base_address = region.xbox_va;
             allocation_base = region.xbox_va;
             region_size = region.size;
+            allocation_protect = region.allocation_protection == MemProtect::NoAccess ? 0x01u
+                : region.allocation_protection == MemProtect::ReadOnly ? 0x02u
+                : region.allocation_protection == MemProtect::ReadWrite ? 0x04u
+                : region.allocation_protection == MemProtect::ReadExecute ? 0x20u
+                : 0x40u;
             state = region.state == RegionState::Committed ? 0x1000u : 0x2000u;
             protect = region.protection == MemProtect::NoAccess ? 0x01u
                 : region.protection == MemProtect::ReadOnly ? 0x02u
@@ -351,7 +356,7 @@ public:
         out.has_out = true;
         out.out_size = kSize;
         out.out_bytes_size = kSize;
-        out.note = "partial: free gaps are modeled inside the guest address-space reservation; original allocation protection and non-private memory types are unavailable";
+        out.note = "partial: free gaps are modeled inside the guest address-space reservation; mapped/image/shared memory types are unavailable";
         return true;
     }
     std::string describe() const override {
@@ -1023,6 +1028,12 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
         reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
     }
     if (!reserved.ok()) return reserved;
+    auto allocation_protection = process_manager_.set_allocation_protection_by_pid(
+        pid, reserved.value(), decoded.value());
+    if (!allocation_protection.ok()) {
+        (void)process_manager_.release_region_by_pid(pid, reserved.value());
+        return Result<std::uint64_t>(allocation_protection.errc(), allocation_protection.context());
+    }
     if (allocation_type == kReserve) {
         return reserved;
     }
