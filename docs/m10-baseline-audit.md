@@ -160,12 +160,16 @@ Added evidence-backed descriptors and implementations for CreateEventW,
 SetEvent, ResetEvent, WaitForSingleObject, and CloseHandle. The implementation
 registers RtEvent objects with ObjectManager and issues per-process HandleTable
 entries. It covers manual/auto reset, initial signal state, finite/infinite
-waits, stale-handle rejection, and process-exit cleanup.
+waits, stale-handle rejection, and process-exit cleanup. Closing a handle removes it
+from the process table immediately; the underlying object is retired until
+process teardown so an already-running wait is not synchronously destroyed.
 
 This remains partial compatibility: only unnamed events with null security
 attributes are accepted; named events, duplicate-handle APIs,
 other waitable object types, last-error behavior, and scheduler-aware guest
 blocking are not implemented. Waits block the calling host execution thread.
+Closed event objects are reclaimed at successful process teardown (or final
+ObjectManager shutdown), not synchronously by CloseHandle.
 All five descriptors remain PartiallyImplemented.
 
 Evidence:

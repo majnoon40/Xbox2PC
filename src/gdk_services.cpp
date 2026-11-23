@@ -660,6 +660,9 @@ Result<void> GameRuntimeService::on_shutdown() {
         ts_bits_.clear();
         for (const auto& [key, entry] : events_) event_handles.emplace_back(key.first, entry);
         events_.clear();
+        // Retired event objects remain manager-owned until ObjectManager
+        // shutdown or successful process teardown; this avoids racing active waits.
+        retired_events_.clear();
     }
     for (const auto& [pid, entry] : event_handles) {
         auto process = process_manager_.find_process_by_pid(pid);
@@ -667,7 +670,6 @@ Result<void> GameRuntimeService::on_shutdown() {
             auto* owner = process.value().get()->as<ManagedProcess>();
             if (owner != nullptr) (void)owner->handle_table().close(entry.handle);
         }
-        (void)process_manager_.object_manager().destroy(entry.object_id);
     }
     owned_.clear();
     if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
@@ -892,15 +894,16 @@ Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t ha
         if (it == events_.end()) return Result<void>(RuntimeErrc::InvalidHandle, "event handle not owned by process");
         entry = it->second;
         events_.erase(it);
+        // Do not destroy the object here: another thread may already be
+        // waiting on it. Process teardown drains guest threads before the
+        // observer destroys retired objects.
+        retired_events_[pid].push_back(entry.object_id);
     }
     auto process = process_manager_.find_process_by_pid(pid);
     if (process.ok()) {
         auto* owner = process.value().get()->as<ManagedProcess>();
         if (owner != nullptr) (void)owner->handle_table().close(entry.handle);
     }
-    auto destroyed = process_manager_.object_manager().destroy(entry.object_id);
-    if (!destroyed.ok() && destroyed.errc() != RuntimeErrc::ObjectDestroyed)
-        return Result<void>(destroyed.errc(), destroyed.context());
     return Result<void>::ok_result();
 }
 void GameRuntimeService::release_process(std::uint64_t process_id) {
@@ -918,7 +921,14 @@ void GameRuntimeService::release_process(std::uint64_t process_id) {
                 it = events_.erase(it);
             } else ++it;
         }
+        const auto retired = retired_events_.find(process_id);
+        if (retired != retired_events_.end()) {
+            event_objects.insert(event_objects.end(), retired->second.begin(), retired->second.end());
+            retired_events_.erase(retired);
+        }
     }
+    // ProcessManager has already drained guest threads and closed this
+    // process's handle table before invoking this observer.
     for (const auto object_id : event_objects)
         (void)process_manager_.object_manager().destroy(object_id);
 }

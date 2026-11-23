@@ -136,6 +136,8 @@ private:
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
     struct EventHandle { Handle handle; std::uint64_t object_id = 0; };
     std::map<std::pair<std::uint64_t, std::uint64_t>, EventHandle> events_;
+    // Closed handles are retired until process exit so an in-flight wait can finish safely.
+    std::map<std::uint64_t, std::vector<std::uint64_t>> retired_events_;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 
