@@ -1291,6 +1291,51 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
                                  "unsupported waitable object");
 }
 
+Result<std::uint32_t> GameRuntimeService::wait_objects_any(
+    std::uint64_t pid, std::uint64_t tid,
+    const std::vector<std::uint64_t>& handles, std::uint32_t timeout_ms) {
+    if (handles.empty() || handles.size() > 64)
+        return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
+                                     "wait-any requires between 1 and 64 handles");
+    std::vector<std::uint64_t> unique;
+    unique.reserve(handles.size());
+    for (const auto handle : handles) {
+        if (handle == 0 || std::find(unique.begin(), unique.end(), handle) != unique.end())
+            return Result<std::uint32_t>(RuntimeErrc::InvalidArgument,
+                                         "wait-any handles must be non-null and unique");
+        unique.push_back(handle);
+        auto valid = lookup_sync_object(pid, handle);
+        if (!valid.ok()) return Result<std::uint32_t>(valid.errc(), valid.context());
+    }
+
+    const auto start = pal::now_ns();
+    const auto duration = timeout_ms == 0xFFFFFFFFu
+        ? pal::MonotonicNs(-1)
+        : static_cast<pal::MonotonicNs>(timeout_ms) * 1'000'000LL;
+    const auto deadline = duration < 0 || duration > INT64_MAX - start
+        ? INT64_MAX : start + duration;
+    for (;;) {
+        for (std::size_t i = 0; i < handles.size(); ++i) {
+            auto result = wait_object(pid, tid, handles[i], 0);
+            if (result.ok() && result.value() != 0x102u) {
+                const auto base = result.value() == 0x80u ? 0x80u : 0u;
+                return Result<std::uint32_t>(base + static_cast<std::uint32_t>(i));
+            }
+            if (!result.ok()) {
+                return Result<std::uint32_t>(result.errc(), result.context());
+            }
+        }
+        const auto now = pal::now_ns();
+        if (deadline != INT64_MAX && now >= deadline)
+            return Result<std::uint32_t>(0x102u);
+        const auto sleep_ns = deadline == INT64_MAX
+            ? pal::MonotonicNs(2'000'000)
+            : std::min<pal::MonotonicNs>(2'000'000, deadline - now);
+        if (sleep_ns > 0)
+            std::this_thread::sleep_for(std::chrono::nanoseconds(sleep_ns));
+    }
+}
+
 Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
                                                       std::uint64_t handle,
                                                       std::uint32_t timeout_ms) {
