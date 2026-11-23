@@ -179,6 +179,9 @@ jobs:
       - name: Capture inspect, validate-pe, and compat-report goldens
         run: scripts/capture-m11-goldens.sh
 
+      - name: Verify committed static golden hashes
+        run: sha256sum --check samples/m11/golden/SHA256SUMS.txt
+
       - name: Require both fixture validation reports to be valid
         run: |
           python3 - <<'PY'
