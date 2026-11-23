@@ -51,9 +51,21 @@ Both record state `Failed` + a distinct exit code
   via `RtThread::register_cancellation_waker` so `request_stop` breaks
   their wait; `CancellationToken`-style semantics, no lost-wakeup class
   because the predicate is re-checked after every wake.
-- Suspension: `ProcessManager::suspend_process` requests stop on every
-  owned thread; `resume_process` clears it (resume on the thread object
-  is the inverse of suspend per the state machine).
+- Suspension is separate from cancellation. Each `RtThread` owns a
+  shared `CooperativeExecutionGate`; `suspend()` requests a resumable
+  pause, `resume()` releases it, and `request_stop()` terminally cancels
+  it and wakes parked checkpoints. Thread mains cooperate through
+  `suspension_point()`; execution owners can pass
+  `thread.execution_control()` as `ExecutionRequest::control`, allowing
+  the deterministic backend to park at instruction boundaries.
+- `ProcessManager::suspend_process` and `resume_process` apply those
+  distinct operations across owned live threads, with rollback if a thread
+  transition fails. The Win32 event/mutex/semaphore wait path checks the
+  same cooperative safe point while polling, so a blocked guest thread can
+  be suspended and resumed without converting the wait into cancellation.
+  This is cooperative host-thread parking, not a guest scheduler or
+  asynchronous preemption: code that never reaches a safe point cannot be
+  paused until it reaches one.
 
 ## Destruction handshake (use-after-free fix)
 
