@@ -55,9 +55,10 @@ Both record state `Failed` + a distinct exit code
   shared `CooperativeExecutionGate`; `suspend()` requests a resumable
   pause, `resume()` releases it, and `request_stop()` terminally cancels
   it and wakes parked checkpoints. Thread mains cooperate through
-  `suspension_point()`; execution owners can pass
-  `thread.execution_control()` as `ExecutionRequest::control`, allowing
-  the deterministic backend to park at instruction boundaries.
+  `suspension_point()`; execution owners can bind
+  `thread.execution_control()` to an `ExecutionContext`; `invoke()` then
+  propagates that gate to requests automatically, allowing the deterministic
+  backend to park at instruction boundaries.
 - `ProcessManager::suspend_process` and `resume_process` apply those
   distinct operations across owned live threads, with rollback if a thread
   transition fails. The Win32 event/mutex/semaphore wait path checks the
