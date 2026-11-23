@@ -1883,8 +1883,17 @@ Result<bool> TaskQueueService::dispatch(
     callback.canceled = callback.canceled || queue->terminated;
     lock.unlock();
 
-    const auto invoked = invoke_callback(callback.callback_va,
-                                         callback.context, callback.canceled);
+    Result<void> invoked = Result<void>::ok_result();
+    try {
+        invoked = invoke_callback(callback.callback_va,
+                                  callback.context, callback.canceled);
+    } catch (const std::exception& error) {
+        invoked = Result<void>(RuntimeErrc::PlatformError,
+                               std::string("guest callback invoker threw: ") + error.what());
+    } catch (...) {
+        invoked = Result<void>(RuntimeErrc::PlatformError,
+                               "guest callback invoker threw an unknown exception");
+    }
     lock.lock();
     if (queue->active_callbacks != 0) --queue->active_callbacks;
     const bool has_handles = std::any_of(
