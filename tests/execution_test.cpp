@@ -701,6 +701,35 @@ TEST(BridgeTest, MarshalWaitForMultipleObjectsReadsGuestHandleArray) {
         cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
     ASSERT_TRUE(wait_all.ok());
     EXPECT_EQ(wait_all.value().api_result.return_value, 0xFFFFFFFFu);
+
+    // Counts above the explicit ABI bridge bound are rejected before reading.
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    values[0].int_v = 65;
+    values[2].int_v = 0;
+    HostStack oversized_stack(0x2003F000ull, 0x1000);
+    auto oversized_prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000006, plan.value().call, values,
+        HostStack::writer(&oversized_stack));
+    ASSERT_TRUE(oversized_prepared.ok());
+    auto oversized = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    EXPECT_FALSE(oversized.ok());
+
+    // An unreadable guest handle array is rejected by GuestMemory validation.
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    values[0].int_v = 2;
+    values[1].ptr_va = 0xDEAD0000;
+    values[1].int_v = 0xDEAD0000;
+    HostStack invalid_stack(0x2003F000ull, 0x1000);
+    auto invalid_prepared = rt::abi::prepare_call(
+        cpu_state, 0x51000007, plan.value().call, values,
+        HostStack::writer(&invalid_stack));
+    ASSERT_TRUE(invalid_prepared.ok());
+    auto invalid = marshal_and_dispatch(
+        cpu_state, mem, w.reg, plan.value(), pid, 0, 64, 91);
+    EXPECT_FALSE(invalid.ok());
 }
 
 TEST(BridgeTest, MarshalPointerCallWithOutBuffer) {
