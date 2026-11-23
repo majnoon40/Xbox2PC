@@ -145,6 +145,25 @@ TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
     }
 }
 
+TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
+    ApiRegistry reg;
+    const auto* alloc = reg.find("kernel32", "VirtualAlloc");
+    const auto* query = reg.find("kernel32", "VirtualQuery");
+    const auto* free = reg.find("kernel32", "VirtualFree");
+    const auto* wait = reg.find("kernel32", "WaitForSingleObject");
+    ASSERT_NE(alloc, nullptr);
+    ASSERT_NE(query, nullptr);
+    ASSERT_NE(free, nullptr);
+    ASSERT_NE(wait, nullptr);
+    EXPECT_EQ(alloc->impl, ApiStatus::PartiallyImplemented);
+    EXPECT_NE(alloc->notes.find("fixed-address"), std::string::npos);
+    EXPECT_NE(query->notes.find("MEM_IMAGE"), std::string::npos);
+    EXPECT_NE(query->notes.find("allocation protection"), std::string::npos);
+    EXPECT_NE(free->notes.find("exact-region MEM_DECOMMIT"), std::string::npos);
+    EXPECT_NE(wait->notes.find("guest mutex"), std::string::npos);
+    EXPECT_NE(wait->notes.find("guest semaphore"), std::string::npos);
+}
+ 
 TEST(ApiRegistryTest, LookupCaseFoldingMatchesTheOsLoader) {
     // Windows/GDK loader export resolution is case-insensitive for both
     // module and export names (documented loader behavior). The registry
