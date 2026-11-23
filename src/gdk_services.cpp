@@ -193,7 +193,7 @@ public:
         if (!r.ok()) out.note = r.error_string();
         return true;
     }
-    std::string describe() const override { return "Win32: VirtualAlloc (automatic placement subset)"; }
+    std::string describe() const override { return "Win32: VirtualAlloc (automatic/fixed reservation subset)"; }
 private: GameRuntimeService& svc_;
 };
 class VirtualFreeImpl : public IApiImplementation {
@@ -1003,10 +1003,25 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
         }
         return Result<std::uint64_t>(address);
     }
-    if (address != 0)
-        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
-                                     "fixed-address MEM_RESERVE is not supported");
-    auto reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
+    Result<std::uint64_t> reserved =
+        Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                              "reservation was not attempted");
+    if (address != 0) {
+        // Windows reserves at allocation-granularity boundaries (64 KiB),
+        // while commit operations are page-granular. Round the requested
+        // reserve address down before asking the address-space manager.
+        constexpr std::uint64_t kAllocationGranularity = 0x10000ull;
+        const std::uint64_t allocation_base =
+            address & ~(kAllocationGranularity - 1);
+        if (allocation_base == 0) {
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                         "fixed reservation rounded to null");
+        }
+        reserved = process_manager_.reserve_region_at_by_pid(
+            pid, allocation_base, size, "VirtualAlloc");
+    } else {
+        reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
+    }
     if (!reserved.ok()) return reserved;
     if (allocation_type == kReserve) {
         return reserved;

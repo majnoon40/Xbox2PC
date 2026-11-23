@@ -132,3 +132,15 @@ VirtualQuery returns the full contiguous tracked region boundaries for an
 address inside a multi-page allocation. Its BaseAddress and RegionSize are not
 truncated to the queried page; free-gap queries similarly return the complete
 gap bounded by the previous and next tracked regions.
+
+
+## M10 fixed-address VirtualAlloc reservations
+
+The Win32 adapter now supports fixed-address MEM_RESERVE and
+MEM_RESERVE | MEM_COMMIT. A non-null reservation address is rounded down to
+the Windows 64-KiB allocation-granularity boundary; the address-space manager
+then validates bounds, overlap, page alignment, and global reservation limits.
+MEM_COMMIT remains limited to an exact tracked reservation base, and
+partial-range commit/decommit/protection are not claimed. Regression coverage
+checks address rounding, overlap rejection, separate commit, combined
+reserve-and-commit, and release.

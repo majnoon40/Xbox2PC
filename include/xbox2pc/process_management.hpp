@@ -168,6 +168,7 @@ public:
                                 MemProtect prot, const ResourceLimits& global);
     Result<void> release_region(Handle process, std::uint64_t xbox_va);
     Result<std::uint64_t> reserve_region_by_pid(std::uint64_t pid, std::uint64_t size, const std::string& name);
+    Result<std::uint64_t> reserve_region_at_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, const std::string& name);
     Result<void> commit_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size);
     Result<void> decommit_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size);
     Result<MemProtect> protect_region_by_pid(std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, MemProtect prot);

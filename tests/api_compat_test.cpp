@@ -927,6 +927,71 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
 }
 
+TEST(GdkServiceTest, Win32VirtualAllocSupportsFixedAllocationGranularity) {
+    ApiWorld w;
+    (void)w.new_process("virtual-memory-fixed.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "virtual-memory-fixed.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    auto process = w.pm.find_process_by_pid(pid.value());
+    ASSERT_TRUE(process.ok());
+    auto* managed = process.value().get()->as<xbox2pc::rt::ManagedProcess>();
+    ASSERT_NE(managed, nullptr);
+    const std::uint64_t space_base = managed->address_space().base();
+    const std::uint64_t fixed_base =
+        (space_base + 0x1FFFFull) & ~0xFFFFull;
+    ASSERT_NE(fixed_base, 0u);
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.arg_count = 4;
+    ctx.args[0] = fixed_base + 0x2345;  // reserve rounds down to 64-KiB
+    ctx.args[1] = 0x2000;
+    ctx.args[2] = 0x2000;  // MEM_RESERVE
+    ctx.args[3] = 0x04;    // PAGE_READWRITE
+    const auto reserved = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(reserved.ok);
+    EXPECT_EQ(reserved.return_value, fixed_base);
+
+    const auto overlap = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(overlap.ok);
+    EXPECT_EQ(overlap.return_value, 0u);
+
+    ctx.args[0] = fixed_base;
+    ctx.args[2] = 0x1000;  // MEM_COMMIT
+    const auto committed = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(committed.ok);
+    EXPECT_EQ(committed.return_value, fixed_base);
+
+    ctx.arg_count = 3;
+    ctx.args[0] = fixed_base;
+    ctx.args[1] = 0;
+    ctx.args[2] = 0x8000;  // MEM_RELEASE
+    const auto released = w.reg.dispatch("kernel32", "VirtualFree", ctx);
+    ASSERT_TRUE(released.ok);
+    EXPECT_EQ(released.return_value, 1u);
+
+    ctx.arg_count = 4;
+    ctx.args[0] = fixed_base + 0x1000;
+    ctx.args[1] = 0x2000;
+    ctx.args[2] = 0x3000;  // fixed MEM_RESERVE | MEM_COMMIT
+    ctx.args[3] = 0x04;
+    const auto combined = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(combined.ok);
+    EXPECT_EQ(combined.return_value, fixed_base);
+    ctx.arg_count = 3;
+    ctx.args[0] = fixed_base;
+    ctx.args[1] = 0;
+    ctx.args[2] = 0x8000;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
+}
+
 TEST(GdkServiceTest, TimingNativeEquivalents) {
     ApiWorld w;
     auto v1 = w.tim->qpc_value();

@@ -562,6 +562,43 @@ Result<std::uint64_t> ProcessManager::reserve_region_by_pid(
     return proc->address_space().reserve_region_auto(size, name);
 }
 
+Result<std::uint64_t> ProcessManager::reserve_region_at_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size,
+    const std::string& name) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<std::uint64_t>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
+                                     "guest process is not running");
+    std::lock_guard lock(lock_);
+    const auto page = proc->address_space().page_size();
+    if (xbox_va == 0 || size == 0 || page == 0 ||
+        size > (~0ull) - (page - 1)) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "invalid fixed guest reservation");
+    }
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (limits_.max_reserved_bytes_total != 0) {
+        std::uint64_t total = 0;
+        for (const auto& [other_pid, id] : pid_to_object_id_) {
+            (void)other_pid;
+            auto object = objects_.lookup_id(id);
+            if (!object.ok() || object.value().get() == nullptr) continue;
+            auto* managed = object.value().get()->as<ManagedProcess>();
+            if (managed == nullptr) continue;
+            const auto used = managed->address_space().stats().reserved_bytes;
+            total = used > (~0ull) - total ? ~0ull : total + used;
+        }
+        if (total > limits_.max_reserved_bytes_total ||
+            aligned > limits_.max_reserved_bytes_total - total) {
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                         "global reserved-bytes limit");
+        }
+    }
+    return proc->address_space().reserve_region(xbox_va, size, name);
+}
+
 Result<void> ProcessManager::commit_region_by_pid(
     std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
     auto found = find_process_by_pid(pid);
