@@ -1746,6 +1746,16 @@ Result<void> TaskQueueService::on_shutdown() {
     const auto revoked = api_reg_.revoke_owner(id());
     {
         std::lock_guard lock(lock_);
+        for (auto& entry : queues_) {
+            entry.second->terminated = true;
+            entry.second->work_callbacks.clear();
+            entry.second->completion_callbacks.clear();
+        }
+        for (auto& queue : retired_queues_) {
+            queue->terminated = true;
+            queue->work_callbacks.clear();
+            queue->completion_callbacks.clear();
+        }
         queues_.clear();
         retired_queues_.clear();
     }
@@ -1938,6 +1948,13 @@ Result<void> TaskQueueService::terminate_queue(
 
 void TaskQueueService::release_process(std::uint64_t process_id) {
     std::lock_guard lock(lock_);
+    for (auto& queue : retired_queues_) {
+        if (queue->owner_process_id == process_id) {
+            queue->terminated = true;
+            queue->work_callbacks.clear();
+            queue->completion_callbacks.clear();
+        }
+    }
     for (auto& entry : queues_) {
         if (entry.second->owner_process_id == process_id) {
             entry.second->terminated = true;
