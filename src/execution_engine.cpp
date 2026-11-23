@@ -665,6 +665,15 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(ptr_out(8)); // duplicatedHandle
         plan.out_buffer_args.push_back(1);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XTaskQueueSubmitCallback") {
+        // Documented callback/context are guest addresses. This only permits
+        // safe ABI decoding and import inspection; dispatch remains unsupported
+        // until queue-owned callback lifetime and guest invocation exist.
+        plan.call.args.push_back(int_arg()); // queue handle
+        plan.call.args.push_back(int_arg()); // port enum
+        plan.call.args.push_back(ptr_in(0)); // callback context
+        plan.call.args.push_back(ptr_in(0)); // guest callback address
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "WaitForMultipleObjects") {
         plan.call.args.push_back(int_arg()); // nCount
         plan.call.args.push_back(ptr_in(0)); // lpHandles
