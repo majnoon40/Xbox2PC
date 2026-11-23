@@ -37,7 +37,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 - Added `RtGuestMutex`, whose ownership key is an explicit guest thread ID, with recursive acquisition, non-owner release rejection, abandonment recovery, timeout, cancellation predicate, and close wake-up.
 - Added `RtGuestSemaphore` with validated initial/maximum counts, timed/cancellable acquisition, bounded release, previous-count reporting, and close wake-up.
 - Added process-scoped handle-backed `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`, and `ReleaseSemaphore` support. `WaitForSingleObject` now accepts events, mutexes, and semaphores; mutex waits return `WAIT_ABANDONED_0` when ownership was abandoned.
-- Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. These waits still block the host execution thread in short bounded intervals; they are not scheduler-aware park/resume.
+- Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. The same wait safe point now checks the managed thread's shared cooperative suspension gate, so process suspend/resume parks and releases those waits without setting terminal stop. The wait implementation still uses bounded host-thread polling; this is not a guest scheduler, async preemption, or scheduler-owned park queue.
 - The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer and the descriptor metadata now reflects that behavior. Named objects, security descriptors, and DuplicateHandle-style duplication for Win32 synchronization objects remain unsupported. Task-queue handle duplication is implemented separately; see the task-queue section below.
 - `CloseHandle` closes service-created event, guest mutex, and guest semaphore handles. An internal guest wait-any primitive polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). Tests cover manual/auto-reset events, semaphore consumption, timeout, duplicate/oversized handle rejection, and abandoned-mutex results. The Win32 `WaitForMultipleObjects` wait-any subset is exposed through the guest marshalling bridge; wait-all semantics remain unimplemented.
 
@@ -83,3 +83,11 @@ VmRegion keeps allocation_protection independently from current protection. Win3
 - Closing one alias removes only that handle. Active dispatch waits retain the underlying queue while any duplicate alias remains; closing the final alias wakes blocked dispatch. Process exit removes every alias owned by that process.
 - `live_queues()` counts unique queue objects rather than aliases. Tests cover alias lifetime, process isolation, duplicate API output, closing the original handle while dispatch is blocked, and waking dispatch when the final alias closes.
 - Callback submission, callback invocation, callback-reference lifetime, automatic dispatch modes, and actual work/completion scheduling remain unsupported. Manual dispatch on an empty queue returns false after the requested timeout or when terminated/closed.
+
+
+## Managed-thread suspension continuation
+
+- `RtThread` owns a shared `CooperativeExecutionGate`. Its suspend request is resumable and is independent of the terminal cancellation state.
+- `ExecutionRequest::control` accepts that same gate, so the deterministic backend checks it at instruction boundaries. The execution owner must explicitly attach `thread.execution_control()` to the request.
+- `ProcessManager::suspend_process`/`resume_process` now use the thread suspend/resume operations rather than `request_stop` and a later attempt to clear the stop flag. Thread transitions are rolled back if a process-wide operation cannot be applied consistently.
+- A thread must reach an explicit safe point to pause. Native host code or guest paths without a connected execution gate are not asynchronously preempted; a full guest scheduler remains out of scope for this slice.
