@@ -179,6 +179,18 @@ jobs:
       - name: Capture inspect, validate-pe, and compat-report goldens
         run: scripts/capture-m11-goldens.sh
 
+      - name: Require both fixture validation reports to be valid
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for name in ("m11_freestanding", "m11_cpp_exceptions"):
+              path = Path("samples/m11/golden") / f"{name}.validate-pe.json"
+              report = json.loads(path.read_text())
+              assert report["valid"], f"{name} rejected: {report.get('issues')}"
+              print(f"{name}: PE validation passed")
+          PY
+
       - name: Upload PE fixtures, hashes, and golden outputs
         uses: actions/upload-artifact@v4
         with:

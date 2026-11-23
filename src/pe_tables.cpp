@@ -82,21 +82,32 @@ void parse_imports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
     img.imports.present = true;
     TableReader rd{base, size};
 
+    if (dir.rva == 0 || dir.size == 0) {
+        diags.warning("import directory has a zero RVA or size; imports unavailable");
+        return;
+    }
+
     const auto desc_off = rva_to_offset(img, dir.rva);
     if (!desc_off.has_value()) {
         diags.warning("import directory RVA " + std::to_string(dir.rva) +
                       " does not map to any section; imports unavailable", 0);
         return;
     }
+    if (!in_range(*desc_off, dir.size, size)) {
+        diags.warning("import directory raw range exceeds file bounds", *desc_off);
+        return;
+    }
+    const std::uint64_t desc_end = *desc_off + dir.size;
 
-    // The descriptor array runs until a zero descriptor; cap iteration to
-    // avoid hostile runaway loops (each real descriptor is 20 bytes).
+    // The descriptor array is null-terminated. DataDirectory.Size is a byte
+    // bound for the import data, not a descriptor count; linkers may include
+    // padding or other .idata data after the descriptor terminator.
     constexpr std::uint32_t kMaxDescriptors = 4096;
     std::uint32_t n_desc = 0;
     std::uint64_t off = *desc_off;
     for (; n_desc < kMaxDescriptors; ++n_desc) {
-        if (!in_range(off, 20, size)) {
-            diags.warning("import descriptor array truncated; read " +
+        if (!in_range(off, 20, desc_end)) {
+            diags.warning("import descriptor array truncated by declared directory size; read " +
                           std::to_string(n_desc) + " entries", off);
             break;
         }

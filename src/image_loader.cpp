@@ -351,12 +351,17 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
         }
     }
 
-    // Import directory specifics (descriptor-size multiple).
+    // Import descriptors are a null-terminated array of 20-byte records,
+    // but the data-directory size is a byte extent and need not itself be
+    // divisible by 20 (some linkers include the rest of .idata in that range).
     if (img.directories.size() > pe::kDirImport) {
         const auto& id = img.directories[pe::kDirImport];
-        if (id.size != 0 && (id.size % 20) != 0) {
+        if ((id.rva == 0) != (id.size == 0)) {
             issue(vcode::kImportDirectory,
-                  "import directory size not a multiple of 20 (descriptor size)");
+                  "import directory must have both a nonzero RVA and size, or both zero");
+        } else if (id.size != 0 && id.size < 20) {
+            issue(vcode::kImportDirectory,
+                  "import directory is smaller than one descriptor");
         }
     }
 

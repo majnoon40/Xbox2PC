@@ -100,6 +100,51 @@ TEST(LoaderValidationTest, ValidImagePassesEveryCheck) {
     EXPECT_TRUE(rep.has_tls_directory);
 }
 
+TEST(LoaderValidationTest, ImportDirectorySizeMayIncludeTrailingData) {
+    PeBuildSpec spec;
+    spec.imports = {{"KERNEL32.dll", {{"CreateFileW", 1}}}};
+    auto image = PeBuilder(spec).build();
+
+    // PE32+ data directories start at optional-header offset 0x98 + 112.
+    // The import descriptor table itself is 40 bytes here (one descriptor
+    // plus its null terminator). The declared import-data extent may include
+    // an extra byte of section padding and therefore need not be 20-byte aligned.
+    constexpr std::uint64_t import_size_offset =
+        0x98 + 112 + xbox2pc::pe::kDirImport * 8 + 4;
+    const std::uint32_t import_data_size = 41;
+    for (unsigned i = 0; i < 4; ++i) {
+        image[import_size_offset + i] =
+            static_cast<std::uint8_t>(import_data_size >> (i * 8));
+    }
+
+    Diagnostics diags;
+    const auto img = parse_image(image, "import-size-41.exe", diags);
+    ASSERT_EQ(img.imports.entries.size(), 1u);
+    EXPECT_FALSE(diags.has_warnings());
+    const auto report = validate_image(img, image.data(), image.size());
+    EXPECT_TRUE(report.valid) << report.issues.front().message;
+}
+
+TEST(LoaderValidationTest, ImportDirectoryMustFitAtLeastOneDescriptor) {
+    PeBuildSpec spec;
+    spec.imports = {{"KERNEL32.dll", {{"CreateFileW", 1}}}};
+    auto image = PeBuilder(spec).build();
+
+    constexpr std::uint64_t import_size_offset =
+        0x98 + 112 + xbox2pc::pe::kDirImport * 8 + 4;
+    const std::uint32_t import_data_size = 19;
+    for (unsigned i = 0; i < 4; ++i) {
+        image[import_size_offset + i] =
+            static_cast<std::uint8_t>(import_data_size >> (i * 8));
+    }
+
+    Diagnostics diags;
+    const auto img = parse_image(image, "import-size-19.exe", diags);
+    const auto report = validate_image(img, image.data(), image.size());
+    EXPECT_FALSE(report.valid);
+    EXPECT_TRUE(has_issue(report, vcode::kImportDirectory));
+}
+
 TEST(LoaderValidationTest, ZeroSectionAlignmentIsRejectedWithoutDivisionByZero) {
     PeBuildSpec spec;
     const auto image = PeBuilder(spec).build();
