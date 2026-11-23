@@ -61,6 +61,39 @@ TEST(BinaryValidationTest, DecodesRelocationsAndTlsWithoutExecutingCallbacks) {
     // Validation reports callback metadata only; it never executes callbacks.
 }
 
+TEST(BinaryValidationTest, RejectsDirectoriesWithOnlyAnRvaOrOnlyASize) {
+    xbox2pc::test::PeBuildSpec spec;
+    const auto base = xbox2pc::test::PeBuilder(spec).build();
+    const auto validate_directory = [&](std::uint16_t directory_index,
+                                        std::size_t expected_stage,
+                                        bool set_rva) {
+        auto bytes = base;
+        // PE32+ data directories start at optional-header offset 112.
+        constexpr std::size_t kDirectoriesOffset = 0x98 + 112;
+        const std::size_t entry = kDirectoriesOffset +
+            static_cast<std::size_t>(directory_index) * 8;
+        const std::uint32_t value = set_rva ? 0x2000u : 0u;
+        const std::uint32_t size = set_rva ? 0u : 8u;
+        for (unsigned i = 0; i < 4; ++i) {
+            bytes[entry + i] = static_cast<std::uint8_t>(value >> (i * 8));
+            bytes[entry + 4 + i] = static_cast<std::uint8_t>(size >> (i * 8));
+        }
+
+        const auto report = xbox2pc::validation::validate_pe(
+            bytes.data(), bytes.size(), "inconsistent-directory.exe");
+        EXPECT_FALSE(report.structurally_valid());
+        ASSERT_EQ(report.stages.size(), 6u);
+        EXPECT_EQ(report.stages[expected_stage].status,
+                  xbox2pc::validation::StageStatus::Failed);
+    };
+
+    validate_directory(1, 2, true);   // import
+    validate_directory(5, 3, true);   // relocation
+    validate_directory(9, 4, true);   // TLS
+    validate_directory(13, 2, true);  // delay import
+    validate_directory(5, 3, false);  // nonzero size with zero RVA
+}
+
 TEST(BinaryValidationTest, RejectsNonAmd64Machine) {
     xbox2pc::test::PeBuildSpec spec;
     spec.machine = 0x14C;  // I386
