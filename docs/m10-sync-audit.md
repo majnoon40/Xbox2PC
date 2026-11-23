@@ -56,7 +56,7 @@ The existing M10 event tests validate the supported event subset. They do not va
 ## M10 virtual-memory API slice
 
 - Added VirtualAlloc, VirtualFree, and VirtualProtect descriptors, implementations, and explicit x64 marshalling plans.
-- VirtualAlloc supports automatic placement with MEM_RESERVE and MEM_RESERVE|MEM_COMMIT. VirtualFree supports MEM_RELEASE with size zero. VirtualProtect changes protection across one complete tracked region and returns the previous protection.
+- VirtualAlloc supports automatic and fixed-address placement with MEM_RESERVE and MEM_RESERVE|MEM_COMMIT, plus exact-base MEM_COMMIT into an existing reservation. VirtualFree supports MEM_RELEASE with size zero and exact-region MEM_DECOMMIT. VirtualProtect changes protection across one complete tracked region and returns the previous protection.
 - Supported page protections are PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, and policy-gated PAGE_EXECUTE_READWRITE. Unsupported constants fail closed.
 - Fixed-address MEM_RESERVE, partial-region MEM_COMMIT/MEM_DECOMMIT, partial-region protection, allocation-granularity placement, and retained allocation-protection metadata remain unsupported.
 - Committed PAGE_NOACCESS is represented as committed but inaccessible memory, distinct from releasing a region.
