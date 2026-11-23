@@ -142,6 +142,12 @@ TEST(MemoryTest, PartialRangeCommitProtectDecommitAndRelease) {
     EXPECT_EQ(right.value().state, RegionState::Reserved);
     EXPECT_EQ(space.stats().committed_bytes, 2 * page);
 
+    // Invalid mixed-state ranges are rejected without changing neighbors.
+    EXPECT_FALSE(space.decommit_range(base + page, 3 * page).ok());
+    EXPECT_EQ(space.stats().committed_bytes, 2 * page);
+    EXPECT_FALSE(space.protect_range(base, 2 * page, MemProtect::ReadOnly).ok());
+    EXPECT_EQ(space.stats().committed_bytes, 2 * page);
+
     // Protection applies to a strict subrange and returns its old value.
     auto old = space.protect_range(base + page, page, MemProtect::ReadOnly);
     ASSERT_TRUE(old.ok());
