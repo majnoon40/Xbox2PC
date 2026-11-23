@@ -114,6 +114,11 @@ public:
                                    IExecutionEngine& engine,
                                    const std::atomic<bool>& interrupted);
 
+    // Attach the owning managed thread's shared cooperative gate. When a
+    // request has no explicit control, invoke() supplies this gate to the
+    // backend automatically.
+    Result<void> bind_thread_control(std::shared_ptr<ExecutionControl> control);
+
     // Single-step (engine supports it): one instruction.
     Result<std::uint64_t> step(const ExecutionRequest& req,
                                IExecutionEngine& engine);
@@ -147,6 +152,7 @@ private:
     // M9: true once initialize() acquired a ContextLimiter slot (the
     // destructor releases only what was acquired — no counter underflow).
     bool counted_ = false;
+    std::shared_ptr<ExecutionControl> execution_control_;
     mutable std::mutex lock_;
 };
 
