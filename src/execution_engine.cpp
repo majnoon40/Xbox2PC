@@ -278,8 +278,7 @@ ExecutionResult DeterministicBackend::run(
                     callback_request.stack_size = callback_request.stack_top_va - stack_floor;
                     callback_request.entry_args.clear();
                     callback_request.control = req.control;
-                    CpuState callback_cpu;
-                    callback_cpu.reset();
+                    CpuState callback_cpu = io_cpu;
                     callback_cpu.set_reg(Gpr::Sp, callback_rsp);
                     callback_cpu.set_reg(Gpr::Rcx, callback_context);
                     callback_cpu.set_reg(Gpr::Rdx, canceled ? 1u : 0u);
