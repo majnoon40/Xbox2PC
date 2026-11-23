@@ -1071,21 +1071,36 @@ TEST(ProcessMgmtTest, ActiveThreadsAtTermination) {
     ASSERT_TRUE(pm.initialize_process(ph.value(), mod, rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(pm.start_process(ph.value()).ok());
 
+    std::atomic<int> started{0};
     std::atomic<int> finished{0};
+    struct WorkerCounters {
+        std::atomic<int>* started;
+        std::atomic<int>* finished;
+    } counters{&started, &finished};
     for (int i = 0; i < 4; ++i) {
         auto th = pm.spawn_thread(
             ph.value(),
             [](rt::RtThread& self, void* arg) -> void* {
-                auto* fin = static_cast<std::atomic<int>*>(arg);
+                auto* counters = static_cast<WorkerCounters*>(arg);
+                counters->started->fetch_add(1, std::memory_order_release);
                 while (!self.stop_requested()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                fin->fetch_add(1);
+                counters->finished->fetch_add(1, std::memory_order_release);
                 return nullptr;
             },
-            &finished, "worker-" + std::to_string(i));
+            &counters, "worker-" + std::to_string(i));
         ASSERT_TRUE(th.ok());
     }
+    // Ensure every worker entered its body before terminating; otherwise a
+    // thread cancelled before trampoline entry is correctly never run.
+    const auto start_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (started.load(std::memory_order_acquire) != 4 &&
+           std::chrono::steady_clock::now() < start_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(started.load(std::memory_order_acquire), 4);
     // Terminate with ACTIVE threads: they observe the cooperative stop and
     // finish; cleanup completes without killing them.
     ASSERT_TRUE(pm.terminate_process(ph.value(), 0u).ok());
