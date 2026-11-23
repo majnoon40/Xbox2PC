@@ -280,7 +280,7 @@ Result<ExecutionResult> ExecutionContext::invoke(
     }
     state_ = ContextState::Executing;
     ExecutionRequest controlled = req;
-    if (controlled.control == nullptr) controlled.control = execution_control_;
+    if (execution_control_ != nullptr) controlled.control = execution_control_;
     auto res = engine.run(controlled, cpu_, interrupted);
     state_ = ContextState::Stopped;
     ++runs_;
@@ -303,7 +303,7 @@ Result<std::uint64_t> ExecutionContext::step(const ExecutionRequest& req,
         return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
     }
     ExecutionRequest controlled = req;
-    if (controlled.control == nullptr) controlled.control = execution_control_;
+    if (execution_control_ != nullptr) controlled.control = execution_control_;
     return engine.single_step(cpu_, controlled);
 }
 
