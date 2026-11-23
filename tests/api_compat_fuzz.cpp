@@ -127,8 +127,9 @@ TEST(ApiFuzzTest, ExportNameFuzzLookupsNeverCrash) {
 TEST(ApiFuzzTest, DispatchArgumentFuzzTypedResults) {
     ApiRegistry reg;
     RuntimeCore core;
+    xbox2pc::rt::ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<GameRuntimeService>(reg);
+        auto grt = std::make_unique<GameRuntimeService>(reg, pm);
         (void)core.services().register_service(std::move(grt));
     }
     (void)core.initialize();
@@ -162,11 +163,10 @@ TEST(ApiFuzzTest, DelayDescriptorFuzzTypedResults) {
     // Delay descriptors live in .data: [0xA00, 0xA80) window approx.
     std::mt19937_64 rng(0xDE1A0Dull);
     RuntimeCore core;
-    (void)core.initialize();
     xbox2pc::rt::ProcessManager pm(core.objects());
     ApiRegistry reg;
     {
-        auto grt = std::make_unique<GameRuntimeService>(reg);
+        auto grt = std::make_unique<GameRuntimeService>(reg, pm);
         (void)core.services().register_service(std::move(grt));
     }
     // (core.initialize already ran above — re-registering after is not

@@ -116,12 +116,12 @@ struct GuestStack {
 class AbiAdvancedTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        pm_ = std::make_unique<ProcessManager>(core_.objects());
         {
-            auto grt = std::make_unique<GameRuntimeService>(reg_);
+            auto grt = std::make_unique<GameRuntimeService>(reg_, *pm_);
             EXPECT_TRUE(core_.services().register_service(std::move(grt)).ok());
         }
         EXPECT_TRUE(core_.initialize().ok());
-        pm_ = std::make_unique<ProcessManager>(core_.objects());
         auto [ph, proc] = new_process("abi.exe");
         ph_ = ph;
         proc_ = proc;

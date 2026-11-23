@@ -85,7 +85,7 @@ int main() {
     RuntimeCore core;
     ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<api::GameRuntimeService>(reg);
+        auto grt = std::make_unique<api::GameRuntimeService>(reg, pm);
         auto tq = std::make_unique<api::TaskQueueService>(reg, pm);
         auto tim = std::make_unique<api::TimingService>(reg);
         (void)core.services().register_service(std::move(grt));

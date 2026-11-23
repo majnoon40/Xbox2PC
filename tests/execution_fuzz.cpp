@@ -196,12 +196,12 @@ TEST(ExecFuzzTest, GuestMemoryRangeFuzz) {
     // A live world with an image (RX) + scratch (RW) regions.
     api::ApiRegistry reg;
     RuntimeCore core;
+    ProcessManager pm(core.objects());
     {
-        auto grt = std::make_unique<api::GameRuntimeService>(reg);
+        auto grt = std::make_unique<api::GameRuntimeService>(reg, pm);
         core.services().register_service(std::move(grt));
     }
     core.initialize();
-    ProcessManager pm(core.objects());
     auto ph = pm.create_process("fz.exe", 64ull << 20);
     ASSERT_TRUE(ph.ok());
     auto pr = core.objects().lookup_handle(ph.value());
@@ -257,6 +257,7 @@ TEST(ExecFuzzTest, GuestMemoryRangeFuzz) {
     EXPECT_GT(oks, 0u);
     (void)loader.unload_image(pm, core.objects(), ph.value(), h.value());
     (void)pm.terminate_process(ph.value(), 0);
+    (void)core.shutdown();
 }
 
 TEST(ExecFuzzTest, MarshalPlanFuzz) {
