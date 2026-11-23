@@ -224,9 +224,9 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
         const std::uint64_t aligned = (extent + salign - 1) / salign * salign;
         if (aligned > need) need = aligned;
     }
+    const std::uint64_t hdr_aligned =
+        (img.opt.size_of_headers + salign - 1) / salign * salign;
     if (img.opt.size_of_image != 0) {
-        const std::uint64_t hdr_aligned =
-            (img.opt.size_of_headers + salign - 1) / salign * salign;
         if (img.opt.size_of_image < hdr_aligned || img.opt.size_of_image < need) {
             issue(vcode::kImageSizeInconsistent,
                   "SizeOfImage " + std::to_string(img.opt.size_of_image) +
@@ -275,11 +275,11 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
                       "section " + s.name + " raw data exceeds file size");
             }
         }
-        if (s.virtual_address != 0 &&
-            s.virtual_address < img.opt.size_of_headers &&
-            !rva_in_headers(s.virtual_address, img.opt.size_of_headers)) {
+        const std::uint64_t section_extent =
+            std::max<std::uint64_t>(s.virtual_size, s.size_of_raw_data);
+        if (section_extent != 0 && s.virtual_address < hdr_aligned) {
             issue(vcode::kSectionOutsideImage,
-                  "section " + s.name + " starts below SizeOfHeaders");
+                  "section " + s.name + " overlaps the mapped headers region");
         }
         if (std::max<std::uint64_t>(s.virtual_size, s.size_of_raw_data) >
             kMaxImageSize) {
@@ -296,8 +296,8 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
             };
             const std::uint64_t a_end = a.virtual_address + extent(a);
             const std::uint64_t b_end = b.virtual_address + extent(b);
-            if (a.virtual_address < b_end && b.virtual_address < a_end &&
-                (a.has_raw_data && b.has_raw_data)) {
+            if (extent(a) != 0 && extent(b) != 0 &&
+                a.virtual_address < b_end && b.virtual_address < a_end) {
                 issue(vcode::kSectionOverlap,
                       "sections " + a.name + " and " + b.name +
                           " overlap in virtual space with raw data");
@@ -310,6 +310,15 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
         const auto& dir = img.directories[d];
         if (dir.size == 0) continue;
         std::uint64_t end = 0;
+        if (d == pe::kDirSecurity) {
+            // IMAGE_DIRECTORY_ENTRY_SECURITY is the exception: VirtualAddress
+            // is a FILE OFFSET to the certificate table, not an image RVA.
+            if (!add_ok(dir.rva, dir.size, end) || end > file_size) {
+                issue(vcode::kDirectoryRange,
+                      "security certificate table exceeds file bounds");
+            }
+            continue;
+        }
         if (!add_ok(dir.rva, dir.size, end)) {
             issue(vcode::kDirectoryRange,
                   std::string(pe::directory_to_name(static_cast<std::uint16_t>(d))) +
@@ -699,6 +708,42 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
     const std::uint64_t hdr_pages =
         (img.opt.size_of_headers + space.page_size() - 1) / space.page_size() *
         space.page_size();
+    if (hdr_pages == 0 || hdr_pages > image_pages) {
+        rollback();
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "mapped headers exceed the image extent");
+    }
+    // Preflight every section against the page-rounded headers and against
+    // every other section before reserving any guest memory.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> section_ranges;
+    for (const auto& section : img.sections) {
+        const std::uint64_t extent =
+            std::max<std::uint64_t>(section.virtual_size,
+                                    section.size_of_raw_data);
+        if (extent == 0) continue;
+        const std::uint64_t pages =
+            (extent + space.page_size() - 1) / space.page_size() *
+            space.page_size();
+        if (section.virtual_address < hdr_pages ||
+            section.virtual_address > image_pages ||
+            pages > image_pages - section.virtual_address ||
+            section.virtual_address % space.page_size() != 0) {
+            rollback();
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "section overlaps headers or exceeds the mapped image: " +
+                           section.name);
+        }
+        const std::uint64_t end = section.virtual_address + pages;
+        for (const auto& existing : section_ranges) {
+            if (section.virtual_address < existing.second &&
+                existing.first < end) {
+                rollback();
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "page-rounded PE sections overlap");
+            }
+        }
+        section_ranges.emplace_back(section.virtual_address, end);
+    }
     auto hdr_res = space.reserve_region(base, hdr_pages, "pe-headers");
     if (!hdr_res.ok()) return Ret(hdr_res.errc(), hdr_res.context());
     reserved_vas.push_back(base);
