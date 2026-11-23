@@ -1118,7 +1118,7 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     const auto submitted = w.reg.dispatch("xgameruntime",
                                           "XTaskQueueSubmitCallback", submit);
     ASSERT_TRUE(submitted.ok) << submitted.error;
-    EXPECT_EQ(submitted.return_value, kSOk);
+    EXPECT_EQ(submitted.return_value, 0u);
 
     std::uint64_t seen_va = 0;
     std::uint64_t seen_context = 0;
@@ -1160,7 +1160,7 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     EXPECT_TRUE(seen_canceled);
     EXPECT_FALSE(w.tq->submit_callback(
         pid.value(), queue.value(), XTaskQueuePort::Work, 1, 0x140001000).ok());
-    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+    EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
 }
 
 TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
