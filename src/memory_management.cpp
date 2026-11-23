@@ -100,19 +100,16 @@ AddressSpace::AddressSpace(std::uint64_t host_capacity, std::uint64_t xbox_base,
                            std::string name)
     : impl_(std::make_unique<Impl>()),
       xbox_base_(xbox_base),
-      capacity_(host_capacity),
+      capacity_((xbox_base > (~0ull) - host_capacity) ? 0 : host_capacity),
       page_size_(pal::host_page_size()),
       space_id_(g_next_space_id.fetch_add(1, std::memory_order_acq_rel)),
       name_(std::move(name)) {
-    // Reject coordinate ranges whose exclusive end would wrap. Keep the
-    // backing mapping unavailable so every later operation fails closed.
-    if (xbox_base_ > (~0ull) - capacity_) {
-        capacity_ = 0;
-        return;
-    }
+    // Reject zero/overflowed coordinate ranges. capacity_ is sanitized in
+    // the initializer because it is immutable; invalid spaces stay unmapped.
+    if (capacity_ == 0 || capacity_ != host_capacity) return;
     // Backing host mapping: reserve (PROT_NONE) the whole capacity up
     // front; per-region commit flips subranges to RW via mprotect.
-    impl_->host = pal::reserve_memory(host_capacity);
+    impl_->host = pal::reserve_memory(capacity_);
     if (impl_->host == nullptr) {
         // Construction failure is observable: every region op will fail
         // with OutOfResources and the failure is recorded in metadata of
