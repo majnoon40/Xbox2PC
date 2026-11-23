@@ -928,6 +928,13 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x4000;
     const auto decommitted = w.reg.dispatch("kernel32", "VirtualFree", ctx);
     ASSERT_TRUE(decommitted.ok); EXPECT_EQ(decommitted.return_value, 1u);
+    // MEM_DECOMMIT preserves the reservation while returning the region to MEM_RESERVE.
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x100000; ctx.args[2] = 48;
+    const auto after_decommit = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(after_decommit.ok);
+    ASSERT_EQ(after_decommit.return_value, 48u);
+    EXPECT_EQ(after_decommit.out_bytes[32], 0x00u);
+    EXPECT_EQ(after_decommit.out_bytes[33], 0x20u); // MEM_RESERVE
     ctx.arg_count = 4; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x1000; ctx.args[3] = 0x04;
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualAlloc", ctx).return_value, base);
     ctx.args[2] = 0x800; // MEM_RESET is deliberately unsupported.
