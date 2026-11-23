@@ -85,7 +85,8 @@ public:
 
     using ThreadMain = void* (*)(RtThread& self, void* user_arg);
 
-    RtThread(ThreadMain main, void* arg, std::string name);
+    RtThread(ThreadMain main, void* arg, std::string name,
+             std::uint64_t owner_process_id = 0);
     ~RtThread() override;
 
     // Lifecycle control.
@@ -138,6 +139,8 @@ public:
     // Introspection.
     ThreadState state() const { return state_.load(std::memory_order_acquire); }
     std::uint64_t thread_id() const { return thread_id_; }
+    // Stable guest process identity assigned by ProcessManager before start.
+    std::uint64_t owner_process_id() const { return owner_process_id_; }
     std::uint64_t exit_code() const;
     ThreadPriority priority() const { return sched_.priority; }
     void set_priority(ThreadPriority p);   // abstract; host mapping later
@@ -163,6 +166,7 @@ private:
     void on_destroy() override;
 
     const std::uint64_t thread_id_;        // runtime id (unique, never zero)
+    const std::uint64_t owner_process_id_; // zero only for unmanaged/test threads
     ThreadMain const main_;
     void* const arg_;
     std::string name_;
