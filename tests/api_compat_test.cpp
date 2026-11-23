@@ -734,6 +734,22 @@ TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
     ASSERT_TRUE(selected.ok());
     EXPECT_EQ(selected.value(), 1u); // WAIT_OBJECT_0 + second index
 
+    ApiContext multi_ctx;
+    multi_ctx.process_id = pid.value();
+    multi_ctx.arg_count = 4;
+    multi_ctx.args[0] = 2;
+    multi_ctx.args[1] = 0x1000; // pointer is represented by the marshalling plan
+    multi_ctx.args[2] = 0;      // wait-any
+    multi_ctx.args[3] = 0;      // poll
+    multi_ctx.pointer_arrays[1] = handles;
+    auto win32_multi = w.reg.dispatch("kernel32", "WaitForMultipleObjects", multi_ctx);
+    ASSERT_TRUE(win32_multi.ok);
+    EXPECT_EQ(win32_multi.return_value, 1u);
+    multi_ctx.args[2] = 1; // wait-all is explicitly unsupported
+    auto wait_all = w.reg.dispatch("kernel32", "WaitForMultipleObjects", multi_ctx);
+    ASSERT_TRUE(wait_all.ok);
+    EXPECT_EQ(wait_all.return_value, 0xFFFFFFFFu);
+
     const std::vector<std::uint64_t> only_unsignaled{first.value()};
     auto timed_out = w.grt->wait_objects_any(pid.value(), 0, only_unsignaled, 0);
     ASSERT_TRUE(timed_out.ok());
