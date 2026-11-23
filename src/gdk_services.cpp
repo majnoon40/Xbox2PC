@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 
 namespace xbox2pc::rt::api {
 
@@ -350,6 +351,38 @@ public:
 
 private:
     TimingService& svc_;
+};
+
+class CurrentProcessIdImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.process_id == 0 ||
+            ctx.process_id > std::numeric_limits<std::uint32_t>::max()) {
+            out.error = "calling process identity is unavailable or out of DWORD range";
+            return false;
+        }
+        out.return_value = static_cast<std::uint32_t>(ctx.process_id);
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: GetCurrentProcessId (guest process context)";
+    }
+};
+
+class CurrentThreadIdImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.thread_id == 0 ||
+            ctx.thread_id > std::numeric_limits<std::uint32_t>::max()) {
+            out.error = "calling thread identity is unavailable or out of DWORD range";
+            return false;
+        }
+        out.return_value = static_cast<std::uint32_t>(ctx.thread_id);
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: GetCurrentThreadId (guest calling-thread context)";
+    }
 };
 
 }  // namespace
@@ -722,8 +755,16 @@ Result<void> TimingService::on_initialize() {
     const auto r2 = api_reg_.register_implementation(
         "kernel32", "QueryPerformanceFrequency",
         keep(std::make_shared<QpfImpl>(*this)), owner);
+    const auto r3 = api_reg_.register_implementation(
+        "kernel32", "GetCurrentProcessId",
+        keep(std::make_shared<CurrentProcessIdImpl>()), owner);
+    const auto r4 = api_reg_.register_implementation(
+        "kernel32", "GetCurrentThreadId",
+        keep(std::make_shared<CurrentThreadIdImpl>()), owner);
     if (!r1.ok()) return r1;
     if (!r2.ok()) return r2;
+    if (!r3.ok()) return r3;
+    if (!r4.ok()) return r4;
     return Result<void>::ok_result();
 }
 
