@@ -93,3 +93,14 @@ latest branch head before this audit can be marked fully verified.
    overflowing range before invoking the stack reader. A regression test
    verifies that an overflowing frame is rejected without any stack read.
 
+
+
+6. **Critical — API out-payload size was trusted when reading a fixed-capacity
+   host array.** `ApiCallResult::out_bytes` is capped at 256 bytes, but an
+   extensible API implementation could report a larger `out_bytes_size`.
+   The bridge previously passed the larger size to the guest-memory writer,
+   which could read beyond the host array. It now rejects oversized payloads
+   before touching guest return state or reading the payload. A regression
+   test registers a deliberately oversized implementation and verifies that
+   dispatch fails without changing guest RSP/RAX.
+
