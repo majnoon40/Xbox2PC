@@ -31,14 +31,21 @@ Result<void> BoundedReader::read_exact(void* out, std::uint64_t len) {
                             "read past end: want " + std::to_string(len) +
                                 " bytes, have " + std::to_string(remaining()));
     }
-    std::memcpy(out, data_ + pos_, static_cast<std::size_t>(len));
+    if (len != 0) {
+        std::memcpy(out, data_ + pos_, static_cast<std::size_t>(len));
+    }
     pos_ += len;
     return Result<void>::ok_result();
 }
 
 Result<std::uint64_t> BoundedReader::read_some(void* out, std::uint64_t len) {
     const std::uint64_t n = len < remaining() ? len : remaining();
-    std::memcpy(out, data_ + pos_, static_cast<std::size_t>(n));
+    // memcpy's pointer arguments are declared nonnull: a zero-length copy
+    // with a null destination (e.g. empty vector data()) is UB by the
+    // standard, so guard the copy itself.
+    if (n != 0) {
+        std::memcpy(out, data_ + pos_, static_cast<std::size_t>(n));
+    }
     pos_ += n;
     return Result<std::uint64_t>(n);
 }

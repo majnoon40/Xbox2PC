@@ -374,10 +374,16 @@ TEST_F(X86DifferentialTest, NativeHardwareReferenceComparison) {
         //   - SHL/SHR/SAR with count >= width: CF undefined too.
         //   - rotates with masked count != 1: OF undefined.
         std::uint64_t arch_mask = 0x0FD7ull;
-        // The first opcode byte (skipping REX / legacy prefixes).
+        // The first opcode byte (skipping legacy + REX prefixes; legacy first,
+        // REX last, matching the encoding order in the corpus rows).
         std::size_t op_idx = 0;
-        while (op_idx < c.code.size() &&
-               (c.code[op_idx] >= 0x40 && c.code[op_idx] <= 0x4F)) {
+        while (op_idx < c.code.size()) {
+            const std::uint8_t b = c.code[op_idx];
+            const bool legacy =
+                b == 0x66 || b == 0x67 || b == 0xF2 || b == 0xF3 ||
+                (b >= 0xF0 && b <= 0xF3) || (b >= 0x2E && b <= 0x3F);
+            const bool rex = b >= 0x40 && b <= 0x4F;
+            if (!legacy && !rex) break;
             ++op_idx;
         }
         const std::uint8_t op0 = op_idx < c.code.size() ? c.code[op_idx] : 0;

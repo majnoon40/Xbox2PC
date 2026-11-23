@@ -762,6 +762,10 @@ StepResult Interpreter::step(const Decoded& ins) {
             std::uint64_t divisor = a.raw & m;
             if (bits == 8) {
                 dividend = read_gpr(cx.cpu, 0, 16, cx.rex);                   // AX
+            } else if (bits == 64) {
+                // The 64-bit path reads RDX:RAX halves directly below;
+                // building 'hi << 64' here would be UB for no consumer.
+                dividend = 0;
             } else {
                 const std::uint64_t lo = read_gpr(cx.cpu, 0, bits, cx.rex) & m;
                 const std::uint64_t hi_reg = read_gpr(cx.cpu, 2, bits, cx.rex) & m;
