@@ -26,6 +26,7 @@
 #include <gtest/gtest.h>
 
 #include "xbox2pc/api_compat.hpp"
+#include "xbox2pc/execution_engine.hpp"
 #include "xbox2pc/compat_report.hpp"
 #include "xbox2pc/gdk_services.hpp"
 #include "xbox2pc/package_vfs.hpp"
