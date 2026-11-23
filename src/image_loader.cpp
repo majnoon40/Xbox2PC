@@ -207,7 +207,10 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
 
     // Image size consistency: SizeOfImage must cover headers + every
     // section's virtual extent (spec: SizeOfImage is section-aligned).
-    const std::uint32_t salign = img.opt.section_alignment;
+    const std::uint32_t raw_salign = img.opt.section_alignment;
+    // Continue collecting validation issues without dividing by zero when
+    // the hostile header supplies SectionAlignment == 0.
+    const std::uint32_t salign = raw_salign == 0 ? 1u : raw_salign;
     std::uint64_t need = img.opt.size_of_headers;
     for (const auto& s : img.sections) {
         const std::uint64_t vs =
@@ -510,7 +513,11 @@ bool apply_dir64(AddressSpace& space, std::uint64_t xbox_va,
     std::uint64_t v = 0;
     std::memcpy(&v, dst.value(), sizeof(v));
     if (delta_negative) {
-        v = delta > v ? 0 : v - delta;
+        if (delta > v) {
+            err = "relocation value underflows when applying the base delta";
+            return false;
+        }
+        v -= delta;
     } else {
         std::uint64_t nv = 0;
         if (!add_ok(v, delta, nv)) {
@@ -621,9 +628,10 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
         return Ret(RuntimeErrc::InvalidArgument,
                    "preferred/requested base not page-aligned");
     }
-    const bool in_bounds = preferred >= space.base() &&
-                           preferred - space.base() + image_pages <=
-                               space.capacity();
+    const std::uint64_t preferred_off =
+        preferred >= space.base() ? preferred - space.base() : ~0ull;
+    const bool in_bounds = preferred_off <= space.capacity() &&
+                           image_pages <= space.capacity() - preferred_off;
     if (in_bounds && space.find_overlap(preferred, image_pages) == 0) {
         base = preferred;
     } else if (want_base != 0) {
@@ -640,14 +648,25 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
         // first reserve below fail with typed AlreadyExists — a clean,
         // deterministic failure, never corruption.
         base = space.base();
+        const std::uint64_t page = space.page_size();
         for (const auto& r : space.list_regions()) {
-            if (r.xbox_va >= base + image_pages) break;  // gap before it fits
-            if (r.xbox_va + r.size <= base) continue;    // entirely below
-            base = r.xbox_va + r.size;
-            base = (base + space.page_size() - 1) / space.page_size() *
-                   space.page_size();
+            if (r.xbox_va >= base && r.xbox_va - base >= image_pages) {
+                break;  // the gap before this region is large enough
+            }
+            const std::uint64_t region_end = r.xbox_va + r.size;
+            if (region_end > base) {
+                const std::uint64_t rem = region_end % page;
+                const std::uint64_t delta = rem == 0 ? 0 : page - rem;
+                if (region_end > (~0ull) - delta) {
+                    return Ret(RuntimeErrc::OutOfResources,
+                               "image placement alignment overflow");
+                }
+                base = region_end + delta;
+            }
         }
-        if (base + image_pages > space.base() + space.capacity()) {
+        if (base < space.base() ||
+            base - space.base() > space.capacity() ||
+            image_pages > space.capacity() - (base - space.base())) {
             return Ret(RuntimeErrc::OutOfResources,
                        "no free gap for the image in the address space");
         }
@@ -809,12 +828,24 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
                                reloc_type_to_name(e.type) +
                                " (rejected, not skipped)");
             }
-            // The full 8-byte target must sit inside ONE section.
+            // The full 8-byte target must be within the image and ONE
+            // mapped section. Validate the RVA before adding the image base.
+            if (e.target_rva > img.opt.size_of_image ||
+                img.opt.size_of_image - e.target_rva < 8 ||
+                layout.actual_base > (~0ull) - e.target_rva) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "relocation target RVA outside the image");
+            }
             const SectionLayout* host = nullptr;
             const std::uint64_t target_va = layout.actual_base + e.target_rva;
+            if (target_va > (~0ull) - 8) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "relocation target VA overflows");
+            }
             for (const auto& sl : layout.sections) {
                 if (target_va >= sl.mapped_base &&
-                    target_va + 8 <= sl.mapped_base + sl.mapped_size) {
+                    target_va - sl.mapped_base <= sl.mapped_size &&
+                    8 <= sl.mapped_size - (target_va - sl.mapped_base)) {
                     host = &sl;
                     break;
                 }
