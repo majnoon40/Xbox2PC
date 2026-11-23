@@ -14,6 +14,7 @@ struct InstructionRecord {
     std::uint8_t length = 0;
     std::string bytes_hex;
     std::string text;
+    bool interpreter_supported = false;
 };
 
 struct Region {
@@ -40,6 +41,7 @@ struct AnalysisReport {
     // asserted to be data without control-flow or relocation evidence.
     std::vector<Region> candidate_embedded_data;
     std::vector<Region> unsupported_instructions;
+    std::vector<Region> unsupported_execution;
     std::vector<Region> uncertain_regions;
     std::vector<SegmentUse> fs_gs_uses;
     std::vector<std::string> notes;
