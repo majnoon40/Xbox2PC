@@ -560,7 +560,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-WAIT-MULTIPLE]";
         a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitformultipleobjects";
-        a.notes = "supports wait-any for 1-64 readable process-owned event, guest mutex, and guest semaphore handles; wait-all is unsupported; host execution thread is polled and not scheduler-aware";
+        a.notes = "supports wait-any and transactional wait-all for 1-64 unique readable process-owned event, guest mutex, and guest semaphore handles; wait-all rolls back auto-reset event, semaphore, and mutex acquisitions on timeout; abandoned mutex state is preserved; host execution thread is polled and not scheduler-aware";
         add(a);
     }
     {
