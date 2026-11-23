@@ -53,8 +53,15 @@ TEST(StaticAnalysisTest, SeparatesUnsupportedEncodingsFromInvalidDataCandidates)
 
 TEST(StaticAnalysisTest, MarksTruncatedExecutableTailUncertain) {
     xbox2pc::test::PeBuildSpec spec;
-    spec.text_payloads.push_back({0x1000, {0x90, 0x48}});
-    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+    spec.text_payloads.push_back({0x1000, {0x48}});
+    auto bytes = xbox2pc::test::PeBuilder(spec).build();
+    // PE section table starts at 0x188 for this fixture; SizeOfRawData is
+    // at IMAGE_SECTION_HEADER + 16. Expose exactly one file-backed byte so
+    // the REX prefix is genuinely truncated at the section boundary.
+    bytes[0x198] = 1;
+    bytes[0x199] = 0;
+    bytes[0x19A] = 0;
+    bytes[0x19B] = 0;
 
     const auto report =
         xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "truncated-tail.exe");
