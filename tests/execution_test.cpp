@@ -109,19 +109,23 @@ public:
         ++bind_count;
         return Result<void>::ok_result();
     }
-    ExecutionResult run(const ExecutionRequest&, cpu::CpuState& state,
+    ExecutionResult run(const ExecutionRequest& request, cpu::CpuState& state,
                         const std::atomic<bool>&) override {
         run_called = true;
+        run_control = request.control.get();
         ExecutionResult result;
         result.outcome = Outcome::Returned;
         result.cpu.state = state;
         return result;
     }
     bool supports_single_step() const override { return true; }
-    Result<std::uint64_t> single_step(cpu::CpuState&, const ExecutionRequest&) override {
+    Result<std::uint64_t> single_step(cpu::CpuState&, const ExecutionRequest& request) override {
         step_called = true;
+        step_control = request.control.get();
         return Result<std::uint64_t>(0x1234u);
     }
+    const ExecutionControl* run_control = nullptr;
+    const ExecutionControl* step_control = nullptr;
     std::uint64_t bound_pid = 0;
     std::uint64_t bound_tid = 0;
     AddressSpace* bound_space = nullptr;
@@ -2150,6 +2154,12 @@ TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
     EXPECT_EQ(engine.bound_pid, pid.value());
     EXPECT_EQ(engine.bound_tid, managed_thread.thread_id());
     EXPECT_EQ(engine.bound_space, &process->address_space());
+    EXPECT_EQ(engine.run_control, managed_thread.execution_control().get());
+
+    ASSERT_TRUE(context.step(request, engine).ok());
+    EXPECT_TRUE(engine.step_called);
+    EXPECT_EQ(engine.step_control, managed_thread.execution_control().get());
+    EXPECT_EQ(context.info().tls_index, 0u);
     EXPECT_TRUE(context.destroy().ok());
 }
 
