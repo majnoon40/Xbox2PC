@@ -33,6 +33,7 @@ const char* return_kind_to_name(ReturnKind r) {
         case ReturnKind::Void: return "void";
         case ReturnKind::HResult: return "HRESULT";
         case ReturnKind::Bool: return "BOOL";
+        case ReturnKind::Uint32: return "uint32";
         case ReturnKind::Uint32Enum: return "uint32-enum";
         case ReturnKind::Pointer: return "pointer-out";
         case ReturnKind::Unknown: return "unknown";
@@ -128,6 +129,12 @@ const char* kQpcUrl =
 const char* kQpfUrl =
     "https://learn.microsoft.com/en-us/windows/win32/api/profileapi/"
     "nf-profileapi-queryperformancefrequency";
+const char* kCurrentProcessIdUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/"
+    "nf-processthreadsapi-getcurrentprocessid";
+const char* kCurrentThreadIdUrl =
+    "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/"
+    "nf-processthreadsapi-getcurrentthreadid";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
@@ -435,6 +442,40 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.evidence = "[MS-QPC]";
         a.evidence_url = kQpfUrl;
         a.notes = "PAL monotonic frequency; fixed at boot documented";
+        add(a);
+    }
+
+    // — kernel32 (process/thread identity) —
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetCurrentProcessId";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD GetCurrentProcessId()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
+        a.evidence = "[MS-PROCESS-THREAD-ID]";
+        a.evidence_url = kCurrentProcessIdUrl;
+        a.notes = "returns the calling guest process ID; fails when no guest process context exists";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetCurrentThreadId";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD GetCurrentThreadId()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-PROCESS-THREAD-ID]";
+        a.evidence_url = kCurrentThreadIdUrl;
+        a.notes = "returns the calling guest thread ID when execution context supplies one; zero/unavailable context is rejected";
         add(a);
     }
 
