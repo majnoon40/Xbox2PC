@@ -1161,9 +1161,10 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
     if (img.directories.size() <= pe::kDirTls) return Ret(std::nullopt);
     const auto& dir = img.directories[pe::kDirTls];
     if (dir.size == 0) return Ret(std::nullopt);
-    if (dir.size < 64) {
+    // IMAGE_TLS_DIRECTORY64 is 40 bytes (four 64-bit VAs and two DWORDs).
+    if (dir.size < 40) {
         return Ret(RuntimeErrc::InvalidArgument,
-                   "TLS directory smaller than 64 bytes (PE32+)");
+                   "TLS directory smaller than 40 bytes (PE32+)");
     }
     bool ok = false;
     const std::uint64_t off = checked_rva_to_offset(img, dir.rva, ok);
@@ -1171,7 +1172,7 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
         return Ret(RuntimeErrc::InvalidArgument,
                    "TLS directory RVA not file-backed");
     }
-    if (off + 64 > file_size) {
+    if (off > file_size || file_size - off < 40) {
         return Ret(RuntimeErrc::InvalidArgument,
                    "TLS directory truncated in file");
     }
@@ -1183,37 +1184,103 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
         !rd.u32(off + 32, zero_fill)) {
         return Ret(RuntimeErrc::InvalidArgument, "TLS directory read failure");
     }
-    if (end_va < start_va) {
-        return Ret(RuntimeErrc::InvalidArgument,
-                   "TLS template end before start");
+    const std::uint64_t image_base = img.opt.image_base;
+    const std::uint64_t image_size = img.opt.size_of_image;
+    std::uint64_t start_rva = 0, end_rva = 0;
+    if (start_va == 0 && end_va == 0) {
+        // A zero-length TLS template is valid.
+    } else {
+        if (start_va < image_base || end_va < image_base || end_va < start_va) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS template VAs are outside the image or reversed");
+        }
+        start_rva = start_va - image_base;
+        end_rva = end_va - image_base;
+        if (start_rva > image_size || end_rva > image_size) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS template range exceeds the image");
+        }
     }
     TlsInfo info;
     info.present = true;
-    info.raw_data_start_rva = start_va - img.opt.image_base;
-    info.raw_data_end_rva = end_va - img.opt.image_base;
-    info.template_size = end_va - start_va;
-    info.template_rva = info.raw_data_start_rva;
-    info.index_slot_rva = static_cast<std::uint32_t>(idx_va - img.opt.image_base);
+    info.raw_data_start_rva = start_rva;
+    info.raw_data_end_rva = end_rva;
+    info.template_size = end_rva - start_rva;
+    info.template_rva = start_rva;
+    if (idx_va != 0) {
+        if (idx_va < image_base) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS index VA is below the image base");
+        }
+        const std::uint64_t index_rva = idx_va - image_base;
+        if (index_rva > image_size || image_size - index_rva < 4) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS index slot lies outside the image");
+        }
+        info.index_slot_rva = static_cast<std::uint32_t>(index_rva);
+    }
     info.callbacks_va = cb_va;
     info.zero_fill_size = zero_fill;
-    if (info.template_size > kMaxTlsTemplate) {
+    if (info.template_size > kMaxTlsTemplate ||
+        zero_fill > kMaxTlsTemplate - info.template_size) {
         return Ret(RuntimeErrc::OutOfResources,
-                   "TLS template exceeds the limit");
+                   "TLS template plus zero-fill exceeds the limit");
     }
-    // Callback count (bounded walk; NEVER executed).
+    if (info.template_size != 0) {
+        bool start_ok = false, end_ok = false;
+        (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(start_rva),
+                                    start_ok);
+        (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(end_rva - 1),
+                                    end_ok);
+        if (!start_ok || !end_ok) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS template is not fully file-backed");
+        }
+    }
+    // Callback count (bounded walk; callbacks are NEVER executed).
     std::uint32_t cbs = 0;
     if (cb_va != 0) {
-        const std::uint64_t cb_rva = cb_va - img.opt.image_base;
+        if (cb_va < image_base) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback-array VA is below the image base");
+        }
+        const std::uint64_t cb_rva = cb_va - image_base;
+        if (cb_rva > image_size || image_size - cb_rva < 8) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback-array pointer lies outside the image");
+        }
         bool cok = false;
         std::uint64_t p = checked_rva_to_offset(
             img, static_cast<std::uint32_t>(cb_rva), cok);
-        if (cok) {
-            while (p + 8 <= file_size && cbs < 64) {
-                std::uint64_t cb = 0;
-                if (!rd.u64(p, cb) || cb == 0) break;
-                ++cbs;
-                p += 8;
+        if (!cok) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback array is not file-backed");
+        }
+        bool terminated = false;
+        while (p <= file_size && file_size - p >= 8) {
+            if (cbs == 64) {
+                return Ret(RuntimeErrc::OutOfResources,
+                           "TLS callback count exceeds 64");
             }
+            std::uint64_t cb = 0;
+            if (!rd.u64(p, cb)) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS callback entry is truncated");
+            }
+            if (cb == 0) {
+                terminated = true;
+                break;
+            }
+            if (cb < image_base || cb - image_base >= image_size) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS callback VA lies outside the image");
+            }
+            ++cbs;
+            p += 8;
+        }
+        if (!terminated) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "TLS callback array lacks an in-bounds terminator");
         }
     }
     info.callback_count = cbs;
