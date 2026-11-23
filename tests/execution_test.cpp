@@ -633,6 +633,17 @@ TEST(BridgeTest, PlanForDescriptorsAndErrors) {
     EXPECT_EQ(multi_plan.value().pointer_array_args[0].count_arg, 0u);
     EXPECT_EQ(multi_plan.value().pointer_array_args[0].max_count, 64u);
     EXPECT_EQ(multi_plan.value().pointer_array_args[0].element_size, 8u);
+    const auto* delayed = w.reg.find("xgameruntime",
+                                     "XTaskQueueSubmitDelayedCallback");
+    ASSERT_NE(delayed, nullptr);
+    auto delayed_plan = plan_for_descriptor(*delayed);
+    ASSERT_TRUE(delayed_plan.ok()) << delayed_plan.error_string();
+    ASSERT_EQ(delayed_plan.value().call.args.size(), 5u);
+    EXPECT_EQ(delayed_plan.value().call.args[0].kind, abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[1].kind, abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[2].kind, abi::ArgKind::Int);
+    EXPECT_EQ(delayed_plan.value().call.args[3].kind, abi::ArgKind::Ptr);
+    EXPECT_EQ(delayed_plan.value().call.args[4].kind, abi::ArgKind::Ptr);
     // An unknown descriptor is refused.
     api::ApiDescriptor fake;
     fake.library = "fakelib";
