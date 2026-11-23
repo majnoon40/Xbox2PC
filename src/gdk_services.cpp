@@ -659,12 +659,12 @@ Result<void> GameRuntimeService::on_shutdown() {
         std::lock_guard lock(state_lock_);
         procs_.clear();
         ts_bits_.clear();
-        for (const auto& [key, object_id] : events_) {
+        for (const auto& [key, object_id] : sync_objects_) {
             active_handles.push_back(key);
             objects_to_destroy.push_back(object_id);
         }
         events_.clear();
-        for (const auto& [pid, ids] : retired_event_objects_) {
+        for (const auto& [pid, ids] : retired_sync_objects_) {
             (void)pid;
             objects_to_destroy.insert(objects_to_destroy.end(), ids.begin(), ids.end());
         }
@@ -803,122 +803,197 @@ Result<MemoryQuerySnapshot> GameRuntimeService::query_memory_snapshot(
     return Result<MemoryQuerySnapshot>(std::move(snapshot));
 }
 
-Result<RefGuard> GameRuntimeService::lookup_event(std::uint64_t pid,
-                                                               std::uint64_t raw) const {
-    if (pid == 0 || raw == 0) {
-        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null or runtime-global event handle");
-    }
+Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,
+                                                                  std::uint64_t raw) const {
+    if (pid == 0 || raw == 0)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null or runtime-global synchronization handle");
     auto process = process_manager_.find_process_by_pid(pid);
-    if (!process.ok()) {
-        return Result<RefGuard>(RuntimeErrc::NotFound, "event owner process does not exist");
-    }
+    if (!process.ok()) return Result<RefGuard>(RuntimeErrc::NotFound, "synchronization owner process does not exist");
     auto* owner = process.value().get()->as<ManagedProcess>();
-    if (owner == nullptr) {
-        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "event owner is not a managed process");
-    }
+    if (owner == nullptr) return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
     auto object = owner->handle_table().lookup(Handle::from_raw(raw));
     if (!object.ok()) return Result<RefGuard>(object.errc(), object.context());
-    if (object.value().get() == nullptr ||
-        object.value().get()->type_id() != TypeId::Event ||
-        object.value().get()->as<RtEvent>() == nullptr) {
-        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle does not refer to an event");
+    auto* value = object.value().get();
+    if (value == nullptr ||
+        !((value->type_id() == TypeId::Event && value->as<RtEvent>() != nullptr) ||
+          (value->type_id() == TypeId::Mutex && value->as<RtGuestMutex>() != nullptr) ||
+          (value->type_id() == TypeId::Semaphore && value->as<RtGuestSemaphore>() != nullptr))) {
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a supported synchronization object");
     }
     return Result<RefGuard>(std::move(object.value()));
 }
 
-Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
-                                                        bool manual_reset,
-                                                        bool initially_set) {
-    if (pid == 0) return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "event requires guest process identity");
+Result<std::uint64_t> GameRuntimeService::create_sync_object(
+    std::uint64_t pid, std::unique_ptr<RuntimeObject> object) {
+    if (pid == 0 || object == nullptr)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "invalid process or synchronization object");
     auto process = process_manager_.find_process_by_pid(pid);
-    if (!process.ok()) return Result<std::uint64_t>(RuntimeErrc::NotFound, "event owner process does not exist");
+    if (!process.ok()) return Result<std::uint64_t>(RuntimeErrc::NotFound, "owner process does not exist");
     auto* owner = process.value().get()->as<ManagedProcess>();
-    if (owner == nullptr || owner->state() != ProcessState::Running) {
-        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "event owner process is not running");
-    }
-
-    auto object_id = process_manager_.objects().register_object(
-        std::make_unique<RtEvent>(!manual_reset, initially_set));
+    if (owner == nullptr || owner->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "owner process is not running");
+    auto object_id = process_manager_.objects().register_object(std::move(object));
     if (!object_id.ok()) return Result<std::uint64_t>(object_id.errc(), object_id.context());
-
-    auto object = process_manager_.objects().lookup_id(object_id.value());
-    if (!object.ok()) {
+    auto reference = process_manager_.objects().lookup_id(object_id.value());
+    if (!reference.ok()) {
         (void)process_manager_.objects().destroy(object_id.value());
-        return Result<std::uint64_t>(object.errc(), object.context());
+        return Result<std::uint64_t>(reference.errc(), reference.context());
     }
-    auto handle = owner->handle_table().create(*object.value().get());
+    auto handle = owner->handle_table().create(*reference.value().get());
     if (!handle.ok()) {
-        object.value().release();
+        reference.value().release();
         (void)process_manager_.objects().destroy(object_id.value());
         return Result<std::uint64_t>(handle.errc(), handle.context());
     }
-
     const auto raw = handle.value().raw();
     {
         std::lock_guard lock(state_lock_);
-        events_[{pid, raw}] = object_id.value();
+        sync_objects_[{pid, raw}] = object_id.value();
     }
-
-    // If teardown raced creation, the observer either already removed this
-    // entry or will do so after this check. Never return a handle for a dead
-    // process.
     if (owner->state() != ProcessState::Running) {
         (void)owner->handle_table().close(handle.value());
         bool owned_entry = false;
         {
             std::lock_guard lock(state_lock_);
-            owned_entry = events_.erase({pid, raw}) != 0;
+            owned_entry = sync_objects_.erase({pid, raw}) != 0;
         }
-        object.value().release();
+        reference.value().release();
         if (owned_entry) (void)process_manager_.objects().destroy(object_id.value());
-        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "event owner process exited during creation");
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "owner process exited during synchronization-object creation");
     }
     return Result<std::uint64_t>(raw);
 }
 
-Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t handle) {
-    auto object = lookup_event(pid, handle);
+Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
+                                                        bool manual_reset,
+                                                        bool initially_set) {
+    return create_sync_object(pid, std::make_unique<RtEvent>(!manual_reset, initially_set));
+}
+
+Result<std::uint64_t> GameRuntimeService::create_mutex(
+    std::uint64_t pid, std::uint64_t thread_id, bool initially_owned) {
+    if (initially_owned && thread_id == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "initial ownership requires a guest thread id");
+    const auto handle = create_sync_object(pid, std::make_unique<RtGuestMutex>());
+    if (!handle.ok() || !initially_owned) return handle;
+    auto object = lookup_sync_object(pid, handle.value());
+    if (!object.ok()) {
+        (void)close_sync_handle(pid, handle.value());
+        return Result<std::uint64_t>(object.errc(), object.context());
+    }
+    auto acquired = object.value().get()->as<RtGuestMutex>()->acquire(thread_id, 0);
+    if (!acquired.ok()) {
+        (void)close_sync_handle(pid, handle.value());
+        return Result<std::uint64_t>(acquired.errc(), acquired.context());
+    }
+    return handle;
+}
+
+Result<void> GameRuntimeService::release_mutex(std::uint64_t pid,
+                                                std::uint64_t handle,
+                                                std::uint64_t thread_id) {
+    auto object = lookup_sync_object(pid, handle);
     if (!object.ok()) return Result<void>(object.errc(), object.context());
-    return object.value().get()->as<RtEvent>()->set();
+    auto* mutex = object.value().get()->as<RtGuestMutex>();
+    if (mutex == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not a mutex");
+    return mutex->release(thread_id);
+}
+
+Result<std::uint64_t> GameRuntimeService::create_semaphore(
+    std::uint64_t pid, std::int64_t initial_count, std::int64_t maximum_count) {
+    if (maximum_count <= 0 || initial_count < 0 || initial_count > maximum_count)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "semaphore requires 0 <= initial <= maximum and maximum > 0");
+    return create_sync_object(pid, std::make_unique<RtGuestSemaphore>(initial_count, maximum_count));
+}
+
+Result<std::int64_t> GameRuntimeService::release_semaphore(
+    std::uint64_t pid, std::uint64_t handle, std::uint32_t release_count) {
+    auto object = lookup_sync_object(pid, handle);
+    if (!object.ok()) return Result<std::int64_t>(object.errc(), object.context());
+    auto* semaphore = object.value().get()->as<RtGuestSemaphore>();
+    if (semaphore == nullptr) return Result<std::int64_t>(RuntimeErrc::ObjectTypeMismatch, "handle is not a semaphore");
+    return semaphore->release(release_count);
+}
+
+Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t handle) {
+    auto object = lookup_sync_object(pid, handle);
+    if (!object.ok()) return Result<void>(object.errc(), object.context());
+    auto* event = object.value().get()->as<RtEvent>();
+    if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not an event");
+    return event->set();
 }
 
 Result<void> GameRuntimeService::reset_event(std::uint64_t pid, std::uint64_t handle) {
     auto object = lookup_event(pid, handle);
     if (!object.ok()) return Result<void>(object.errc(), object.context());
-    return object.value().get()->as<RtEvent>()->reset();
+    auto* event = object.value().get()->as<RtEvent>();
+    if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not an event");
+    return event->reset();
+}
+
+Result<std::uint32_t> GameRuntimeService::wait_object(
+    std::uint64_t pid, std::uint64_t tid, std::uint64_t handle,
+    std::uint32_t timeout_ms) {
+    auto object = lookup_sync_object(pid, handle);
+    if (!object.ok()) return Result<std::uint32_t>(object.errc(), object.context());
+    const pal::MonotonicNs timeout_ns = timeout_ms == 0xFFFFFFFFu
+        ? pal::kInfiniteTimeout
+        : static_cast<pal::MonotonicNs>(timeout_ms) * 1'000'000LL;
+    auto* value = object.value().get();
+    if (auto* event = value->as<RtEvent>()) {
+        auto waited = event->wait_ns(timeout_ns);
+        if (waited.ok()) return Result<std::uint32_t>(0u);
+        if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
+        return Result<std::uint32_t>(waited.errc(), waited.context());
+    }
+    if (auto* mutex = value->as<RtGuestMutex>()) {
+        auto waited = mutex->acquire(tid, timeout_ns);
+        if (waited.ok()) return Result<std::uint32_t>(waited.value() ? 0x80u : 0u);
+        if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
+        return Result<std::uint32_t>(waited.errc(), waited.context());
+    }
+    if (auto* semaphore = value->as<RtGuestSemaphore>()) {
+        auto waited = semaphore->acquire(timeout_ns);
+        if (waited.ok()) return Result<std::uint32_t>(0u);
+        if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
+        return Result<std::uint32_t>(waited.errc(), waited.context());
+    }
+    return Result<std::uint32_t>(RuntimeErrc::ObjectTypeMismatch, "unsupported waitable object");
 }
 
 Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
                                                       std::uint64_t handle,
                                                       std::uint32_t timeout_ms) {
-    auto object = lookup_event(pid, handle);
-    if (!object.ok()) return Result<std::uint32_t>(object.errc(), object.context());
-    auto* event = object.value().get()->as<RtEvent>();
-    auto waited = timeout_ms == 0xFFFFFFFFu ? event->wait_infinite()
-                                            : event->wait_ms(static_cast<std::int64_t>(timeout_ms));
-    if (waited.ok()) return Result<std::uint32_t>(0u);
-    if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
-    return Result<std::uint32_t>(waited.errc(), waited.context());
+    return wait_object(pid, 0, handle, timeout_ms);
 }
 
-Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t handle) {
-    auto object = lookup_event(pid, handle);
+Result<void> GameRuntimeService::close_sync_handle(std::uint64_t pid, std::uint64_t handle) {
+    auto object = lookup_sync_object(pid, handle);
     if (!object.ok()) return Result<void>(object.errc(), object.context());
     auto process = process_manager_.find_process_by_pid(pid);
     if (!process.ok()) return Result<void>(process.errc(), process.context());
     auto* owner = process.value().get()->as<ManagedProcess>();
-    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "event owner is not a managed process");
-
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
     const auto object_id = object.value().get()->id();
+    if (auto* mutex = object.value().get()->as<RtGuestMutex>()) mutex->close();
+    if (auto* semaphore = object.value().get()->as<RtGuestSemaphore>()) semaphore->close();
     auto closed = owner->handle_table().close(Handle::from_raw(handle));
     if (!closed.ok()) return closed;
     {
         std::lock_guard lock(state_lock_);
-        const auto erased = events_.erase({pid, handle});
-        if (erased == 0) return Result<void>(RuntimeErrc::InvalidHandle, "event handle already closed");
-        retired_event_objects_[pid].push_back(object_id);
+        const auto erased = sync_objects_.erase({pid, handle});
+        if (erased == 0) return Result<void>(RuntimeErrc::InvalidHandle, "synchronization handle already closed");
+        retired_sync_objects_[pid].push_back(object_id);
     }
     return Result<void>::ok_result();
+}
+
+Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t handle) {
+    auto object = lookup_sync_object(pid, handle);
+    if (!object.ok()) return Result<void>(object.errc(), object.context());
+    if (object.value().get()->as<RtEvent>() == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not an event");
+    return close_sync_handle(pid, handle);
 }
 
 void GameRuntimeService::release_process(std::uint64_t process_id) {

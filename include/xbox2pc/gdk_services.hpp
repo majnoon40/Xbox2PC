@@ -25,6 +25,7 @@
 #include "xbox2pc/api_compat.hpp"
 #include "xbox2pc/platform.hpp"
 #include "xbox2pc/process_management.hpp"
+#include "xbox2pc/sync_objects.hpp"
 #include "xbox2pc/service_registry.hpp"
 #include "xbox2pc/sync_objects.hpp"
 #include "xbox2pc/thread_model.hpp"
@@ -116,16 +117,23 @@ public:
     Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
     Result<MemoryQuerySnapshot> query_memory_snapshot(std::uint64_t process_id) const;
     Result<std::uint64_t> create_event(std::uint64_t process_id, bool manual_reset, bool initially_set);
+    Result<std::uint64_t> create_mutex(std::uint64_t process_id, std::uint64_t thread_id, bool initially_owned);
+    Result<void> release_mutex(std::uint64_t process_id, std::uint64_t handle, std::uint64_t thread_id);
+    Result<std::uint64_t> create_semaphore(std::uint64_t process_id, std::int64_t initial_count, std::int64_t maximum_count);
+    Result<std::int64_t> release_semaphore(std::uint64_t process_id, std::uint64_t handle, std::uint32_t release_count);
     Result<void> set_event(std::uint64_t process_id, std::uint64_t handle);
     Result<void> reset_event(std::uint64_t process_id, std::uint64_t handle);
+    Result<std::uint32_t> wait_object(std::uint64_t process_id, std::uint64_t thread_id, std::uint64_t handle, std::uint32_t timeout_ms);
     Result<std::uint32_t> wait_event(std::uint64_t process_id, std::uint64_t handle, std::uint32_t timeout_ms);
+    Result<void> close_sync_handle(std::uint64_t process_id, std::uint64_t handle);
     Result<void> close_event(std::uint64_t process_id, std::uint64_t handle);
 
     // Registry back-reference (tests/introspection).
     ApiRegistry& registry() { return api_reg_; }
 
 private:
-    Result<RefGuard> lookup_event(std::uint64_t process_id, std::uint64_t handle) const;
+    Result<RefGuard> lookup_sync_object(std::uint64_t process_id, std::uint64_t handle) const;
+    Result<std::uint64_t> create_sync_object(std::uint64_t process_id, std::unique_ptr<RuntimeObject> object);
     struct ProcState {
         std::uint64_t init_count = 0;
         bool uninit_failed_terminal = false;  // documented terminal state
@@ -138,8 +146,8 @@ private:
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
     // Active event handles map to ObjectManager object IDs. Closed objects
     // are retired until process teardown so in-flight waiters remain pinned.
-    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> events_;
-    std::map<std::uint64_t, std::vector<std::uint64_t>> retired_event_objects_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> sync_objects_;
+    std::map<std::uint64_t, std::vector<std::uint64_t>> retired_sync_objects_;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 
