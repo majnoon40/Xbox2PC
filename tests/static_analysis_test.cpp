@@ -1,4 +1,7 @@
 #include <cstdint>
+#include <string>
+#include <algorithm>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -102,6 +105,26 @@ TEST(StaticAnalysisTest, ReportsFsSegmentUse) {
     ASSERT_TRUE(report.parsed);
     ASSERT_FALSE(report.fs_gs_uses.empty());
     EXPECT_EQ(report.fs_gs_uses.front().segment, "FS");
+}
+
+TEST(StaticAnalysisTest, BoundsWorkEvenWhenEveryByteIsUnsupported) {
+    xbox2pc::test::PeBuildSpec spec;
+    // EVEX prefix bytes are recognized as an unsupported encoding. Repeating
+    // them ensures the safety cap counts rejected decode attempts too.
+    spec.text_payloads.push_back({0x1000, std::vector<std::uint8_t>(1'000'001, 0x62)});
+    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+
+    const auto report =
+        xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "unsupported-flood.exe");
+
+    ASSERT_TRUE(report.parsed);
+    ASSERT_FALSE(report.uncertain_regions.empty());
+    EXPECT_NE(report.notes.end(),
+              std::find_if(report.notes.begin(), report.notes.end(),
+                  [](const std::string& note) {
+                      return note.find("safety cap") != std::string::npos;
+                  }));
+    EXPECT_LT(report.unsupported_instructions.size(), 10u);
 }
 
 TEST(StaticAnalysisTest, HandlesNullAndEmptyInput) {
