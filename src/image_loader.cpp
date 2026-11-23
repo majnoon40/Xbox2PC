@@ -749,6 +749,11 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
     auto hdr_res = space.reserve_region(base, hdr_pages, "pe-headers");
     if (!hdr_res.ok()) return Ret(hdr_res.errc(), hdr_res.context());
     reserved_vas.push_back(base);
+    auto header_type = space.set_region_type(base, VmRegionType::Image);
+    if (!header_type.ok()) {
+        rollback();
+        return Ret(header_type.errc(), header_type.context());
+    }
     auto commit_hdr = space.commit_region(base);
     if (!commit_hdr.ok()) {
         rollback();
@@ -788,6 +793,11 @@ Result<ImageLayoutInfo> ImageLoader::map_image(AddressSpace& space,
             return Ret(res.errc(), res.context());
         }
         reserved_vas.push_back(sva);
+        auto section_type = space.set_region_type(sva, VmRegionType::Image);
+        if (!section_type.ok()) {
+            rollback();
+            return Ret(section_type.errc(), section_type.context());
+        }
         auto com = space.commit_region(sva);
         if (!com.ok()) {
             rollback();

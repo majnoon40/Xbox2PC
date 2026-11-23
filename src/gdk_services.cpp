@@ -321,7 +321,9 @@ public:
                 : region.protection == MemProtect::ReadWrite ? 0x04u
                 : region.protection == MemProtect::ReadExecute ? 0x20u
                 : 0x40u;
-            type = 0x20000u; // MEM_PRIVATE
+            type = region.region_type == VmRegionType::Image ? 0x1000000u
+                : region.region_type == VmRegionType::Mapped ? 0x40000u
+                : 0x20000u; // MEM_IMAGE / MEM_MAPPED / MEM_PRIVATE
         } else {
             if (base_address > page || next_region <= page ||
                 next_region <= base_address) {

@@ -183,3 +183,8 @@ Evidence:
 `VirtualAlloc` supports fixed-address MEM_RESERVE and MEM_RESERVE|MEM_COMMIT. The requested address is rounded down to the Windows 64-KiB allocation-granularity boundary, with overlap, capacity, and global reservation-limit checks. MEM_COMMIT on an existing reservation remains limited to a complete tracked reservation; partial commit/decommit/protection ranges remain unsupported.
 
 Regression tests cover reserve-only protection metadata, protection changes without losing the original value, fixed-address rounding, overlap rejection, combined reserve-and-commit, and free-region metadata.
+
+
+## M10.8 — VirtualQuery image memory type
+
+Tracked regions now retain a Windows memory type. Generic guest allocations remain MEM_PRIVATE; the PE image loader tags image headers and sections as MEM_IMAGE before commit. VirtualQuery reports the tracked type instead of incorrectly labeling every mapped PE image as MEM_PRIVATE. MEM_MAPPED is reserved in the metadata model for future file-mapping support and is not currently produced.

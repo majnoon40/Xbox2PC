@@ -798,6 +798,7 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     EXPECT_EQ(rd64(result,0),base.value()); EXPECT_EQ(rd64(result,8),base.value()); EXPECT_EQ(rd64(result,24),0x2000u);
     EXPECT_EQ(rd32(result,32),0x1000u); EXPECT_EQ(rd32(result,36),0x04u);
     EXPECT_EQ(rd32(result,16),0x04u); // original allocation protection
+    EXPECT_EQ(rd32(result,40),0x20000u); // MEM_PRIVATE
     // Querying the second page still returns the full contiguous region,
     // rather than a page-relative suffix.
     ctx.args[0]=base.value()+0x1123;

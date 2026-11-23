@@ -149,3 +149,8 @@ reserve-and-commit, and release.
 ## M10 VirtualQuery allocation protection
 
 Tracked guest regions retain the initial allocation protection separately from their current page protection. Win32 VirtualAlloc records the requested protection when creating a reservation; later VirtualProtect calls change only the current protection. VirtualQuery reports the retained value in MEMORY_BASIC_INFORMATION.AllocationProtect, including while reserved and after a later commit/protection change. Generic M4 reservations use the runtime's PAGE_READWRITE default.
+
+
+## Region memory type
+
+Address-space regions retain a memory type independently from their state and page protection. Generic reservations are MEM_PRIVATE. The PE image loader tags its headers and each mapped section as MEM_IMAGE before commit. VirtualQuery reports MEM_PRIVATE, MEM_MAPPED, or MEM_IMAGE from this metadata; MEM_MAPPED is representable for future file-mapping support but is not currently created by the runtime.

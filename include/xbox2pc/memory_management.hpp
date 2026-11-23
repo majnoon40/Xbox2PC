@@ -59,6 +59,8 @@ enum class RegionState : std::uint8_t {
     Committed,  // host storage assigned (RW unless re-protected)
 };
 
+enum class VmRegionType : std::uint8_t { Private, Mapped, Image };
+
 const char* region_state_to_name(RegionState s);
 
 // ── region descriptor ────────────────────────────────────────────────────
@@ -71,6 +73,7 @@ struct VmRegion {
     RegionState state = RegionState::Reserved;
     MemProtect protection = MemProtect::NoAccess;
     MemProtect allocation_protection = MemProtect::ReadWrite;
+    VmRegionType region_type = VmRegionType::Private;
     std::string name;               // diagnostics
     std::uint64_t alloc_id = 0;     // MemoryAllocator token (0 = not owned)
 };
@@ -117,6 +120,7 @@ public:
     // Change protection of a COMMITTED region (validated transitions).
     Result<void> protect_region(std::uint64_t xbox_va, MemProtect p);
     Result<void> set_allocation_protection(std::uint64_t xbox_va, MemProtect p);
+    Result<void> set_region_type(std::uint64_t xbox_va, VmRegionType type);
     // Release a region entirely (any state) — decommit + unreserve.
     Result<void> release_region(std::uint64_t xbox_va);
     // Resize (grow in place if the next bytes are free; shrink keeps the

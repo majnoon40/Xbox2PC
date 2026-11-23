@@ -335,6 +335,19 @@ Result<void> AddressSpace::set_allocation_protection(
     return Result<void>::ok_result();
 }
 
+Result<void> AddressSpace::set_region_type(
+    std::uint64_t xbox_va, VmRegionType type) {
+    std::lock_guard lock(impl_->lock);
+    const auto it = impl_->regions.find(xbox_va);
+    if (it == impl_->regions.end())
+        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
+    if (it->second.state != RegionState::Reserved)
+        return Result<void>(RuntimeErrc::InvalidState,
+                            "region type is immutable after commit");
+    it->second.region_type = type;
+    return Result<void>::ok_result();
+}
+
 Result<void> AddressSpace::protect_region(std::uint64_t xbox_va, MemProtect p) {
     std::lock_guard lock(impl_->lock);
     const auto it = impl_->regions.find(xbox_va);
