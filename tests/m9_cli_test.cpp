@@ -62,6 +62,38 @@ TEST(M9CliTest, AllNineBinaryCommandsProduceJsonForSyntheticPe) {
             EXPECT_NE(json.find("\"UNKNOWN\""), std::string::npos);
         }
     }
+
+    // A directory with a nonzero RVA and zero size is malformed even though
+    // the M1 parser can safely skip its empty payload. The compatibility
+    // report must expose that invalidity instead of leaving imports UNKNOWN.
+    auto invalid_bytes = bytes;
+    constexpr std::size_t kImportDirectoryEntry = 0x98 + 112 + 8;
+    invalid_bytes[kImportDirectoryEntry + 0] = 0x00;
+    invalid_bytes[kImportDirectoryEntry + 1] = 0x20;
+    invalid_bytes[kImportDirectoryEntry + 2] = 0x00;
+    invalid_bytes[kImportDirectoryEntry + 3] = 0x00;
+    invalid_bytes[kImportDirectoryEntry + 4] = 0;
+    invalid_bytes[kImportDirectoryEntry + 5] = 0;
+    invalid_bytes[kImportDirectoryEntry + 6] = 0;
+    invalid_bytes[kImportDirectoryEntry + 7] = 0;
+    const auto invalid_input = root / "invalid-import-directory.exe";
+    {
+        std::ofstream file(invalid_input, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(invalid_bytes.data()),
+                   static_cast<std::streamsize>(invalid_bytes.size()));
+        ASSERT_TRUE(file.good());
+    }
+    const auto invalid_output = root / "invalid-import-directory.json";
+    EXPECT_EQ(run_command({"xbox2pc", "binary-compat", invalid_input.string(),
+                           "--json", invalid_output.string()}), 1);
+    std::ifstream invalid_file(invalid_output, std::ios::binary);
+    const std::string invalid_json((std::istreambuf_iterator<char>(invalid_file)),
+                                   std::istreambuf_iterator<char>());
+    const auto imports_pos = invalid_json.find("\\"imports\\"");
+    ASSERT_NE(imports_pos, std::string::npos);
+    EXPECT_NE(invalid_json.find("\\"status\\":\\"INVALID\\"", imports_pos),
+              std::string::npos);
+
     std::filesystem::remove_all(root);
 }
 
