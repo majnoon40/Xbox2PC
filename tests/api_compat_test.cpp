@@ -391,6 +391,18 @@ TEST(ApiResolverTest, ResolverStates) {
     EXPECT_EQ(win32.value, 0x51010002ull);
     EXPECT_TRUE(xbox2pc::rt::exec::is_api_binding(win32.value));
 
+    // A second resolver sharing the same registry receives a distinct ID.
+    ApiResolver second_resolver(w.reg);
+    ImportLookup second_lookup;
+    second_lookup.dll = "xgameruntime";
+    second_lookup.symbol = "XGameRuntimeInitialize";
+    const auto second_binding = second_resolver.resolve(second_lookup);
+    EXPECT_EQ(second_binding.status, ImportStatus::Resolved);
+    EXPECT_EQ(second_binding.value, 0x51000003ull);
+    EXPECT_NE(second_binding.value, b.value);
+    EXPECT_EQ(resolver.bindings_issued(), 2u);
+    EXPECT_EQ(second_resolver.bindings_issued(), 1u);
+
     // Known module + unimplemented export -> Unresolved (descriptor, no impl
     // cannot happen here: all 16 are implemented; use an unlisted export).
     look.symbol = "XSystemAllowFullDownloadBandwidth";   // documented but NOT in our table
