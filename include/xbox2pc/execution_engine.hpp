@@ -77,6 +77,7 @@
 #include "xbox2pc/guest_exceptions.hpp"
 #include "xbox2pc/guest_memory.hpp"
 #include "xbox2pc/runtime_error.hpp"
+#include "xbox2pc/thread_model.hpp"
 #include "xbox2pc/xbox_abi.hpp"
 
 namespace xbox2pc::rt::exec {
@@ -141,27 +142,8 @@ struct ApiBindingInfo {
     std::uint32_t ordinal = 0;
 };
 
-// Cooperative execution gate. Suspension is distinct from cancellation:
-// request_suspend() parks at the next instruction boundary, resume() allows
-// execution to continue, and the existing interrupted flag remains terminal.
-// This is a host-thread park for the deterministic backend, not a guest
-// scheduler/context switch.
-class ExecutionControl {
-public:
-    void request_suspend();
-    void resume();
-    bool is_suspend_requested() const;
-    bool is_parked() const;
-
-    // Returns false when cancellation was observed while parked.
-    bool checkpoint(const std::atomic<bool>& interrupted);
-
-private:
-    mutable std::mutex mutex_;
-    std::condition_variable changed_;
-    bool suspend_requested_ = false;
-    std::atomic<bool> parked_{false};
-};
+// Alias the M3-managed-thread gate for execution requests and backends.
+using ExecutionControl = CooperativeExecutionGate;
 
 struct ExecutionRequest {
     std::uint64_t entry_va = 0;
