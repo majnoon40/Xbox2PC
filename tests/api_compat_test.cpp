@@ -1135,7 +1135,7 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
             seen_va = callback_va;
             seen_context = callback_context;
             seen_canceled = canceled;
-            return Result<void>::ok_result();
+            return xbox2pc::rt::Result<void>::ok_result();
         };
     const auto dispatched = w.reg.dispatch("xgameruntime",
                                            "XTaskQueueDispatch", dispatch);
