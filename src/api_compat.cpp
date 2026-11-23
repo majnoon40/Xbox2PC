@@ -427,8 +427,9 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         add(a);
     }
 
-        // Callback submission is described and resolvable as metadata, but
-    // guest callback execution and queue scheduling are not implemented.
+        // Guest callbacks are retained in the manual queue and invoked by
+    // XTaskQueueDispatch on the calling guest thread through the bounded
+    // execution backend. Delayed callbacks remain a separate unsupported API.
     {
         ApiDescriptor a;
         a.library = "xgameruntime";
@@ -439,10 +440,10 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.signature = "HRESULT XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, void* callbackContext, XTaskQueueCallback* callback)";
         a.category = registry::ApiCategory::XboxGdk;
         a.compat = ApiStatus::PartiallyImplemented;
-        a.impl = ApiStatus::Unsupported;
+        a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[GDK-TQ]";
         a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/functions/xtaskqueuesubmitcallback?view=gdk-2604";
-        a.notes = "documented callback submission API; guest callback invocation, queue-held callback references, cancellation delivery, and dispatch scheduling are not implemented";
+        a.notes = "manual-mode callback submission and guest invocation are implemented; callback signature is void(context, canceled); automatic dispatch, delayed callbacks, monitors, waiters, and scheduler-owned execution remain unsupported";
         add(a);
     }
     {
