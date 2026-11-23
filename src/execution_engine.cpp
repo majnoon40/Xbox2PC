@@ -716,9 +716,9 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.out_buffer_args.push_back(1);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "XTaskQueueSubmitCallback") {
-        // Documented callback/context are guest addresses. This only permits
-        // safe ABI decoding and import inspection; dispatch remains unsupported
-        // until queue-owned callback lifetime and guest invocation exist.
+        // The service retains the guest callback VA and context. Dispatch
+        // supplies a bounded invoker that runs the callback on this guest
+        // thread while preserving the suspended caller CPU state.
         plan.call.args.push_back(int_arg()); // queue handle
         plan.call.args.push_back(int_arg()); // port enum
         plan.call.args.push_back(ptr_in(0)); // callback context
