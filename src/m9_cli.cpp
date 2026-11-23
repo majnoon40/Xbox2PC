@@ -255,8 +255,28 @@ Json compatibility_json(const xbox2pc::pe::PeImage& image,
     import_status.set("resolution", "NOT_TESTED");
     out.set("imports", std::move(import_status));
 
-    out.set("relocations", directory_json(image, xbox2pc::pe::kDirReloc));
-    out.set("tls", directory_json(image, xbox2pc::pe::kDirTls));
+    auto checked_directory = [&](std::uint16_t index, std::size_t stage_index,
+                                  const char* unperformed_operation) {
+        Json directory = directory_json(image, index);
+        const bool present = index < image.directories.size() &&
+            (image.directories[index].rva != 0 || image.directories[index].size != 0);
+        const char* status = "NOT_TESTED";
+        if (present && stage_index < validation.stages.size()) {
+            switch (validation.stages[stage_index].status) {
+                case xbox2pc::validation::StageStatus::Passed: status = "SUPPORTED"; break;
+                case xbox2pc::validation::StageStatus::Warning: status = "PARTIALLY_SUPPORTED"; break;
+                case xbox2pc::validation::StageStatus::Failed: status = "INVALID"; break;
+                case xbox2pc::validation::StageStatus::NotTested: status = "NOT_TESTED"; break;
+            }
+        }
+        directory.set("status", status);
+        directory.set("unperformed_operation", unperformed_operation);
+        return directory;
+    };
+    out.set("relocations", checked_directory(
+        xbox2pc::pe::kDirReloc, 3, "base relocation application"));
+    out.set("tls", checked_directory(
+        xbox2pc::pe::kDirTls, 4, "TLS callback execution"));
     out.set("exception_metadata", directory_json(image, xbox2pc::pe::kDirException));
 
     Json instructions = Json::object();
