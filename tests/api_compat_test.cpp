@@ -152,10 +152,15 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     const auto* query = reg.find("kernel32", "VirtualQuery");
     const auto* free = reg.find("kernel32", "VirtualFree");
     const auto* wait = reg.find("kernel32", "WaitForSingleObject");
+    const auto* wait_many = reg.find("kernel32", "WaitForMultipleObjects");
     ASSERT_NE(alloc, nullptr);
     ASSERT_NE(query, nullptr);
     ASSERT_NE(free, nullptr);
     ASSERT_NE(wait, nullptr);
+    ASSERT_NE(wait_many, nullptr);
+    EXPECT_EQ(wait_many->impl, ApiStatus::PartiallyImplemented);
+    EXPECT_NE(wait_many->notes.find("wait-any"), std::string::npos);
+    EXPECT_NE(wait_many->notes.find("wait-all is unsupported"), std::string::npos);
     EXPECT_EQ(alloc->impl, ApiStatus::PartiallyImplemented);
     EXPECT_NE(alloc->notes.find("fixed-address"), std::string::npos);
     EXPECT_NE(query->notes.find("MEM_IMAGE"), std::string::npos);
