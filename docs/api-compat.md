@@ -69,10 +69,10 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XThreadSetTimeSensitive | `HRESULT ...(bool)` | partially-implemented |
 | XThreadIsTimeSensitive | `bool XThreadIsTimeSensitive()` | partially-implemented |
 | XTaskQueueCreate | `HRESULT ...(mode, mode, handle*)` | partially-implemented |
-| XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented (timeout wait; no callback execution) |
+| XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented (manual FIFO callback dispatch on the calling guest thread) |
 | XTaskQueueCloseHandle | `void ...(queue)` | partially-implemented |
 | XTaskQueueTerminate | `HRESULT ...(queue, bool, void*, cb*)` | partially-implemented |
-| XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | unsupported implementation |
+| XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | partially-implemented (bounded manual-port queue + guest callback invocation) |
 | XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
 | XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | partially-implemented (same-process shared queue handle; no callback execution) |
 | WaitForMultipleObjects | `DWORD ...(count, HANDLE*, waitAll, timeout)` | partially-implemented (wait-any and transactional wait-all subsets) |
@@ -279,7 +279,7 @@ mirrored).
   unsupported/unknown — deliberately, without fabrication).
 - No verified ordinals (nothing ships one).
 - Guest-code execution is limited to the deterministic interpreter subset and explicitly supported execution paths; this is not a complete Xbox execution environment or game-compatibility claim.
-- XTaskQueue models process-owned Manual-mode queue handles only. Callback submission and delayed submission are cataloged but fail closed: guest callback invocation, cancellation delivery, callback-held queue references, and dispatch scheduling are not implemented. ThreadPool/Immediate modes are unsupported.
+- XTaskQueue models process-owned Manual-mode queues. `XTaskQueueSubmitCallback` and `XTaskQueueDispatch` support bounded FIFO work/completion queues and invoke one guest callback on the calling guest thread, including cancellation delivery after termination. Delayed callbacks, ThreadPool/Immediate modes, monitors, waiters, and scheduler-owned dispatch remain unsupported.
 - XSystemGetDeviceType always returns the documented Unknown
   fallback (no device spoofing).
 - Delay-load resolution resolves at load time; the runtime does not
@@ -288,4 +288,4 @@ mirrored).
 
 ## Current execution boundary
 
-The M8 execution-context foundation is present: guest CPU state, ABI marshalling, a bounded interpreter, TLS callback execution, and controlled entry-point invocation. M10 expands selected Game OS services but still lacks scheduler-aware waits, complete guest-thread lifecycle integration, full task-queue callback execution, broad system-service coverage, and full Win32 virtual-memory semantics. A successful import resolution or partial guest execution does not establish that a retail Xbox game can boot.
+The M8 execution-context foundation is present: guest CPU state, ABI marshalling, a bounded interpreter, TLS callback execution, and controlled entry-point invocation. M10 expands selected Game OS services but still lacks scheduler-aware waits, complete guest-thread lifecycle integration, automatic/delayed task-queue scheduling, broad system-service coverage, and full Win32 virtual-memory semantics. A successful import resolution or partial guest execution does not establish that a retail Xbox game can boot.
