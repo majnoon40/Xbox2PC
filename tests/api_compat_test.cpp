@@ -1342,14 +1342,19 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x1000; ctx.args[2] = 0x4000;
     const auto partial_decommit = w.reg.dispatch("kernel32", "VirtualFree", ctx);
     ASSERT_TRUE(partial_decommit.ok);
-    EXPECT_EQ(partial_decommit.return_value, 0u); // partial decommit is rejected atomically
+    EXPECT_EQ(partial_decommit.return_value, 1u);
     ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x100000; ctx.args[2] = 48;
-    const auto still_committed = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
-    ASSERT_TRUE(still_committed.ok);
-    ASSERT_EQ(still_committed.return_value, 48u);
-    EXPECT_EQ(still_committed.out_bytes[32], 0x00u);
-    EXPECT_EQ(still_committed.out_bytes[33], 0x10u); // MEM_COMMIT
-    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x4000;
+    const auto first_page_reserved = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(first_page_reserved.ok);
+    ASSERT_EQ(first_page_reserved.return_value, 48u);
+    EXPECT_EQ(first_page_reserved.out_bytes[32], 0x00u);
+    EXPECT_EQ(first_page_reserved.out_bytes[33], 0x20u); // MEM_RESERVE
+    ctx.args[0] = base + 0x1000;
+    const auto second_page_committed = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(second_page_committed.ok);
+    EXPECT_EQ(second_page_committed.out_bytes[32], 0x00u);
+    EXPECT_EQ(second_page_committed.out_bytes[33], 0x10u); // MEM_COMMIT
+    ctx.arg_count = 3; ctx.args[0] = base + 0x1000; ctx.args[1] = 0x1000; ctx.args[2] = 0x4000;
     const auto decommitted = w.reg.dispatch("kernel32", "VirtualFree", ctx);
     ASSERT_TRUE(decommitted.ok); EXPECT_EQ(decommitted.return_value, 1u);
     // MEM_DECOMMIT preserves the reservation while returning the region to MEM_RESERVE.
