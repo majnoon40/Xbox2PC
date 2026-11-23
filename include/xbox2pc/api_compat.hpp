@@ -53,6 +53,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -131,6 +132,9 @@ struct ApiDescriptor {
 // argument values — implementations interpret them as the documented
 // parameter semantics (sizes, flags, buffer ids) through THIS layer only.
 
+using GuestCallbackInvoker = std::function<Result<void>(std::uint64_t callback_va,
+    std::uint64_t callback_context, bool canceled)>;
+
 struct ApiContext {
     // The calling process (0 = runtime-global / no process).
     std::uint64_t process_id = 0;
@@ -147,6 +151,10 @@ struct ApiContext {
     // APIs documented as unsafe on time-sensitive threads refuse when
     // the context thread is marked time-sensitive.
     bool thread_time_sensitive = false;
+    // Present only while a guest execution backend is dispatching an API.
+    // Lets manual task-queue dispatch re-enter the same bounded guest backend
+    // without exposing a host function pointer to guest memory.
+    GuestCallbackInvoker invoke_guest_callback;
 };
 
 struct ApiCallResult {
