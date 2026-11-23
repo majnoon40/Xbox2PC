@@ -330,6 +330,26 @@ TEST(AbiTest, PrepareAndExtractRoundTrip) {
     EXPECT_EQ(got.value()[5].int_v, 105u);
 }
 
+TEST(AbiTest, ExtractRejectsOverflowingCalleeStackFrameBeforeReading) {
+    rt::abi::CallSpec spec;
+    for (int i = 0; i < 5; ++i) spec.args.push_back({});
+    cpu::CpuState c;
+    c.reset();
+    c.set_reg(cpu::Gpr::Sp, ~std::uint64_t{0} - 15);
+
+    int reads = 0;
+    rt::abi::StackReader reader;
+    reader.ctx = &reads;
+    reader.read64 = [](void* ctx, std::uint64_t) -> Result<std::uint64_t> {
+        ++*static_cast<int*>(ctx);
+        return Result<std::uint64_t>(0);
+    };
+
+    const auto extracted = rt::abi::extract_args(c, spec, reader);
+    EXPECT_FALSE(extracted.ok());
+    EXPECT_EQ(reads, 0);
+}
+
 TEST(AbiTest, ReturnKindsAndPreservation) {
     cpu::CpuState before;
     before.reset();
