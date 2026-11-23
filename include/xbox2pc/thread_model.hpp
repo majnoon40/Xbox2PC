@@ -34,6 +34,25 @@
 
 namespace xbox2pc::rt {
 
+// Shared cooperative gate used by managed threads and execution backends.
+// Suspension is resumable; cancellation is terminal and always wakes a parked
+// checkpoint. Safe points are explicit: callers must check between work units.
+class CooperativeExecutionGate {
+public:
+    void request_suspend();
+    void resume();
+    void cancel();
+    bool is_suspend_requested() const;
+    bool is_parked() const;
+    bool checkpoint(const std::atomic<bool>& interrupted);
+private:
+    mutable std::mutex mutex_;
+    std::condition_variable changed_;
+    bool suspend_requested_ = false;
+    std::atomic<bool> cancelled_{false};
+    std::atomic<bool> parked_{false};
+};
+
 // ── thread states ─────────────────────────────────────────────────────────
 enum class ThreadState {
     Created,    // object exists; host thread not started
@@ -76,6 +95,9 @@ public:
     // Cooperative safe point for thread mains. Returns false after stop.
     // A suspended thread parks here until resume() or request_stop().
     bool suspension_point();
+    std::shared_ptr<CooperativeExecutionGate> execution_control() const {
+        return execution_control_;
+    }
     Result<void> block_note();      // Running -> Blocked (called by sync waits)
     Result<void> unblock_note();    // Blocked -> Running/Ready
     Result<void> terminate(std::uint64_t exit_code);  // -> Terminated
@@ -149,9 +171,7 @@ private:
     std::unique_ptr<pal::PalThread> host_;
     mutable std::mutex transition_lock_;   // serializes transitions (const readers lock too)
     std::atomic<bool> stop_flag_{false};
-    mutable std::mutex suspend_lock_;
-    std::condition_variable suspend_cv_;
-    bool suspend_requested_ = false;
+    std::shared_ptr<CooperativeExecutionGate> execution_control_;
     std::atomic<std::uint64_t> exit_code_{0};
     std::atomic<bool> exited_{false};
     std::string fail_reason_;
