@@ -929,7 +929,7 @@ struct LoadedGuest {
 };
 }  // namespace
 
-TEST(ExecutionControlTest, DeterministicBackendParksAndCanBeCancelled) {
+TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
     ExecWorld world;
     const std::vector<std::uint8_t> loop_code{0xE9, 0xFB, 0xFF, 0xFF, 0xFF};
     LoadedGuest guest(world, loop_code, "suspend-loop.exe");
@@ -951,21 +951,41 @@ TEST(ExecutionControlTest, DeterministicBackendParksAndCanBeCancelled) {
     request.entry_va = guest.out.exec.entry_va;
     request.stack_top_va = context.info().stack_top;
     request.stack_size = context.info().stack_size;
-    request.control = std::make_shared<ExecutionControl>();
-    request.control->request_suspend();
-
     cpu::CpuState state;
     state.reset();
     state.set_reg(cpu::Gpr::Sp, context.info().stack_top - 0x20);
     state.rip = request.entry_va;
     std::atomic<bool> interrupted{false};
     std::atomic<bool> finished{false};
-    Outcome outcome = Outcome::Faulted;
-    std::thread runner([&] {
-        const auto result = backend.run(request, state, interrupted);
-        outcome = result.outcome;
-        finished.store(true, std::memory_order_release);
-    });
+    std::atomic<int> outcome{static_cast<int>(Outcome::Faulted)};
+    struct RunnerState {
+        DeterministicBackend* backend;
+        ExecutionRequest* request;
+        cpu::CpuState* state;
+        std::atomic<bool>* interrupted;
+        std::atomic<bool>* finished;
+        std::atomic<int>* outcome;
+    } runner{&backend, &request, &state, &interrupted, &finished, &outcome};
+
+    auto handle = world.core.create_thread(
+        [](RtThread&, void* raw) -> void* {
+            auto& run = *static_cast<RunnerState*>(raw);
+            const auto result = run.backend->run(*run.request, *run.state,
+                                                  *run.interrupted);
+            run.outcome->store(static_cast<int>(result.outcome),
+                               std::memory_order_release);
+            run.finished->store(true, std::memory_order_release);
+            return nullptr;
+        },
+        &runner, "guest-execution-thread");
+    ASSERT_TRUE(handle.ok());
+    auto thread_guard = world.core.objects().lookup_handle(handle.value());
+    ASSERT_TRUE(thread_guard.ok());
+    auto* thread = thread_guard.value().get()->as<RtThread>();
+    ASSERT_NE(thread, nullptr);
+    request.control = thread->execution_control();
+    ASSERT_TRUE(thread->start().ok());
+    ASSERT_TRUE(thread->suspend().ok());
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(2);
@@ -974,15 +994,27 @@ TEST(ExecutionControlTest, DeterministicBackendParksAndCanBeCancelled) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     const bool parked = request.control->is_parked();
-    EXPECT_TRUE(parked) << "backend did not park at an instruction boundary";
+    EXPECT_TRUE(parked) << "managed suspend did not park guest execution";
     EXPECT_FALSE(finished.load(std::memory_order_acquire));
+    EXPECT_EQ(thread->state(), rt::ThreadState::Suspended);
 
-    // Termination must release the parked backend even without resume().
-    interrupted.store(true, std::memory_order_release);
-    runner.join();
-    EXPECT_TRUE(finished.load(std::memory_order_acquire));
-    EXPECT_EQ(outcome, Outcome::Interrupted);
+    ASSERT_TRUE(thread->resume().ok());
+    const auto resume_deadline = std::chrono::steady_clock::now() +
+                                 std::chrono::seconds(2);
+    while (request.control->is_parked() &&
+           std::chrono::steady_clock::now() < resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     EXPECT_FALSE(request.control->is_parked());
+
+    // Terminal stop is distinct from resume and wakes the running backend.
+    thread->request_stop();
+    const auto joined = thread->join_ns(2'000'000'000LL);
+    ASSERT_TRUE(joined.ok());
+    EXPECT_TRUE(finished.load(std::memory_order_acquire));
+    EXPECT_EQ(outcome.load(std::memory_order_acquire),
+              static_cast<int>(Outcome::Interrupted));
+    EXPECT_EQ(thread->state(), rt::ThreadState::Terminated);
 }
 
 TEST(ContextTest, AutomaticallyBindsProcessThreadAndAddressSpaceToEngine) {
