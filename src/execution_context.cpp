@@ -226,7 +226,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         req.api_binding_values.push_back(binding.value);
         req.api_bindings.push_back(std::move(binding));
     }
-    (void)tls_index;
+    info_.tls_index = tls_index;
     return Ret(req);
 }
 
