@@ -521,6 +521,8 @@ bool apply_dir64(AddressSpace& space, std::uint64_t xbox_va,
     }
     std::uint64_t v = 0;
     std::memcpy(&v, dst.value(), sizeof(v));
+    // Null pointers must remain null when the image is rebased.
+    if (v == 0) return true;
     if (delta_negative) {
         if (delta > v) {
             err = "relocation value underflows when applying the base delta";
@@ -859,6 +861,19 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
     auto blocks = decode_relocations(img, file, file_size,
                                       limits_.max_relocations);
     if (!blocks.ok()) return Ret(blocks.errc(), blocks.context());
+
+    // Validate every relocation type before touching memory. A late
+    // unsupported entry must not leave earlier DIR64 entries applied.
+    for (const auto& blk : blocks.value()) {
+        for (const auto& e : blk.entries) {
+            if (e.type != RelocType::Absolute && e.type != RelocType::Dir64) {
+                return Ret(RuntimeErrc::PlatformUnsupported,
+                           std::string("unsupported relocation type: ") +
+                               reloc_type_to_name(e.type) +
+                               " (rejected, not skipped)");
+            }
+        }
+    }
 
     // Relocation writes need page RW; sections were protected final in
     // map_image. Flip each affected section to RW, apply, restore.
