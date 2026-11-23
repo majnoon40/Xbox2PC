@@ -110,6 +110,8 @@ private:
     mutable std::mutex detail_lock_;
     std::vector<ModuleDescriptor> modules_;
     std::vector<std::uint64_t> threads_;
+    // Threads paused by ProcessManager (not manually suspended beforehand).
+    std::vector<std::uint64_t> process_suspended_threads_;
 };
 
 // ── process manager ────────────────────────────────────────────────────────
@@ -137,8 +139,7 @@ public:
                                     const RuntimeConfig& config);
     // start_process: Created/Initializing -> Running.
     Result<void> start_process(Handle process);
-    // suspend/resume abstractions (state transitions on all threads:
-    // request_stop on suspend, clear on resume — cooperative).
+    // suspend/resume abstractions (resumable cooperative gates across owned threads).
     Result<void> suspend_process(Handle process);
     Result<void> resume_process(Handle process);
     // terminate_process: drives the EXACT cleanup ordering (header top).
