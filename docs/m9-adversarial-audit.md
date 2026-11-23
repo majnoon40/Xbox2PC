@@ -73,3 +73,14 @@ latest branch head before this audit can be marked fully verified.
 `REAL_XBOX_EXECUTABLE_TESTED: NO`
 
 `GTA_VI_COMPATIBILITY: NOT_VERIFIED`
+
+
+4. **High — inconsistent PE data-directory RVA/size pairs could be treated as
+   absent directories.** A nonzero RVA with zero size was silently skipped by
+   the M6 pre-validation path; a zero RVA with nonzero size could be interpreted
+   as a header-relative directory. The M9 validator now rejects mismatched
+   pairs across the directory table, marks the corresponding import,
+   relocation, or TLS stage invalid, and the compatibility report propagates an
+   invalid import stage as `INVALID`. Directed tests cover regular imports,
+   delay imports, relocations, and TLS, including both mismatch directions.
+
