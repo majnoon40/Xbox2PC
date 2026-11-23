@@ -923,7 +923,7 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
     b.status = loader::ImportStatus::Resolved;
     b.value = (d->category == registry::ApiCategory::XboxGdk ? 0x51000000ull : 0x51010000ull) +
               binding_id;
-    ++next_id_;
+    ++bindings_issued_;
     b.note = "dispatch-table binding (registry id " + std::to_string(binding_id) +
              "); evidence " + d->evidence + " " + d->evidence_url;
     return b;
