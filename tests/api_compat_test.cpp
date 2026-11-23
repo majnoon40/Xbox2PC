@@ -705,6 +705,38 @@ TEST(GdkServiceTest, Win32GuestMutexAndSemaphoreLifecycle) {
     EXPECT_EQ(w.reg.dispatch("kernel32", "CloseHandle", ctx).return_value, 1u);
 }
 
+TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
+    ApiWorld w;
+    (void)w.new_process("wait-any.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "wait-any.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    auto first = w.grt->create_event(pid.value(), true, false);
+    auto second = w.grt->create_event(pid.value(), true, true);
+    ASSERT_TRUE(first.ok());
+    ASSERT_TRUE(second.ok());
+    const std::vector<std::uint64_t> handles{first.value(), second.value()};
+    auto selected = w.grt->wait_objects_any(pid.value(), 0, handles, 0);
+    ASSERT_TRUE(selected.ok());
+    EXPECT_EQ(selected.value(), 1u); // WAIT_OBJECT_0 + second index
+
+    const std::vector<std::uint64_t> only_unsignaled{first.value()};
+    auto timed_out = w.grt->wait_objects_any(pid.value(), 0, only_unsignaled, 0);
+    ASSERT_TRUE(timed_out.ok());
+    EXPECT_EQ(timed_out.value(), 0x102u); // WAIT_TIMEOUT
+
+    const std::vector<std::uint64_t> duplicate{first.value(), first.value()};
+    EXPECT_FALSE(w.grt->wait_objects_any(pid.value(), 0, duplicate, 0).ok());
+    const std::vector<std::uint64_t> too_many(65, first.value());
+    EXPECT_FALSE(w.grt->wait_objects_any(pid.value(), 0, too_many, 0).ok());
+}
+ 
 TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
     ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
