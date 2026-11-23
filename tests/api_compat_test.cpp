@@ -998,6 +998,11 @@ TEST(GdkServiceTest, TaskQueueDuplicateHandleApiWritesOutHandle) {
 TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
     ApiWorld w;
     (void)w.new_process("task-queue-process-exit.exe");
+    rt::ModuleDescriptor module;
+    module.module_name = "task-queue-process-exit.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
     const auto pid_result = w.pm.resolve_pid(w.last_handle);
     ASSERT_TRUE(pid_result.ok());
     const auto pid = pid_result.value();
