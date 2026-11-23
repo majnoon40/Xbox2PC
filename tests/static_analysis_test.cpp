@@ -63,6 +63,24 @@ TEST(StaticAnalysisTest, MarksTruncatedExecutableTailUncertain) {
     EXPECT_FALSE(report.uncertain_regions.empty());
 }
 
+
+TEST(StaticAnalysisTest, ReportsDecoderSupportedButInterpreterUnsupported) {
+    xbox2pc::test::PeBuildSpec spec;
+    // BSWAP RAX is a valid decoder instruction but is not implemented by
+    // the current bounded interpreter.
+    spec.text_payloads.push_back({0x1000, {0x48, 0x0F, 0xC8}});
+    const auto bytes = xbox2pc::test::PeBuilder(spec).build();
+
+    const auto report =
+        xbox2pc::analysis::analyze_pe(bytes.data(), bytes.size(), "bswap.exe");
+
+    ASSERT_TRUE(report.parsed);
+    ASSERT_FALSE(report.confirmed_instructions.empty());
+    EXPECT_EQ(report.confirmed_instructions.front().text, "bswap rax");
+    EXPECT_FALSE(report.confirmed_instructions.front().interpreter_supported);
+    ASSERT_FALSE(report.unsupported_execution.empty());
+}
+
 TEST(StaticAnalysisTest, ReportsFsSegmentUse) {
     xbox2pc::test::PeBuildSpec spec;
     spec.text_payloads.push_back(
