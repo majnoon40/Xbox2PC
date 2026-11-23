@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <string>
@@ -169,9 +170,8 @@ private:
 
 // ── TaskQueueService (XTaskQueue) ─────────────────────────────────────────
 
-// Process-owned manual-mode task queue handles. Empty dispatch returns
-// false because guest callback submission/execution is not implemented;
-// unsupported dispatch modes are rejected rather than simulated.
+// Process-owned manual-mode task queues. Submitted guest callbacks are
+// retained and invoked only by an explicit manual Dispatch call.
 class TaskQueueService : public RtService {
 public:
     static const char* service_type_name() { return "gdk_task_queue"; }
@@ -190,10 +190,14 @@ public:
                                         std::uint32_t completion_mode);
     Result<std::uint64_t> duplicate_queue(std::uint64_t process_id,
                                            std::uint64_t queue_id);
-    // Dispatch waits for work up to timeout_ms (or until termination/close).
-    // No guest callback submissions exist yet, so an empty queue returns false.
+    Result<void> submit_callback(std::uint64_t process_id, std::uint64_t queue_id,
+                                 XTaskQueuePort port, std::uint64_t callback_context,
+                                 std::uint64_t callback_va);
+    // Dispatch at most one callback. The invoker runs it on the current guest
+    // thread; delayed and automatic dispatch modes remain unsupported.
     Result<bool> dispatch(std::uint64_t process_id, std::uint64_t queue_id,
-                          XTaskQueuePort port, std::uint32_t timeout_ms);
+                          XTaskQueuePort port, std::uint32_t timeout_ms,
+                          const GuestCallbackInvoker& invoke_callback);
     Result<void> close_queue(std::uint64_t process_id, std::uint64_t queue_id);
     Result<void> terminate_queue(std::uint64_t process_id,
                                  std::uint64_t queue_id, bool wait);
@@ -208,12 +212,18 @@ private:
         bool terminated = false;
         std::uint32_t work_mode = 0;
         std::uint32_t completion_mode = 0;
+        struct Callback { std::uint64_t context = 0; std::uint64_t callback_va = 0; bool canceled = false; };
+        std::deque<Callback> work_callbacks;
+        std::deque<Callback> completion_callbacks;
+        std::uint32_t active_callbacks = 0;
     };
     ApiRegistry& api_reg_;
     ProcessManager& pm_;
     mutable std::mutex lock_;
     std::condition_variable queue_cv_;
     std::map<std::uint64_t, std::shared_ptr<Queue>> queues_;
+    // Keep callback-bearing queues alive after the last public handle closes.
+    std::vector<std::shared_ptr<Queue>> retired_queues_;
     std::uint64_t next_id_ = 1;
     std::uint64_t process_exit_observer_id_ = 0;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
