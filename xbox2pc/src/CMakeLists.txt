@@ -17,6 +17,12 @@ target_include_directories(xbox2pc_pe_parser PUBLIC
 target_link_libraries(xbox2pc_pe_parser PUBLIC xbox2pc_diagnostics)
 target_compile_features(xbox2pc_pe_parser PUBLIC cxx_std_20)
 
+# ── M9: structural PE validation (never maps or executes) ──
+add_library(xbox2pc_rt_binary_validation STATIC binary_validation.cpp)
+target_include_directories(xbox2pc_rt_binary_validation PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_binary_validation PUBLIC xbox2pc_pe_parser)
+target_compile_features(xbox2pc_rt_binary_validation PUBLIC cxx_std_20)
+
 # ── json_writer (M2: strict JSON serialization) ──
 add_library(xbox2pc_json STATIC json_writer.cpp)
 target_include_directories(xbox2pc_json PUBLIC ${PROJECT_SOURCE_DIR}/include)
