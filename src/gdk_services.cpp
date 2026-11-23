@@ -434,6 +434,7 @@ public:
         out.return_value = kSOk;
         out.has_out = true;
         out.out_value = r.value();   // XTaskQueueHandle* out slot
+        out.out_size = sizeof(std::uint64_t);
         out.note = "manual-mode queue created (documented handle out)";
         return true;
     }
@@ -457,6 +458,7 @@ public:
         out.return_value = kSOk;
         out.has_out = true;
         out.out_value = duplicated.value();
+        out.out_size = sizeof(std::uint64_t);
         out.note = "same-process queue handle duplicated; shared queue state retained";
         return true;
     }
