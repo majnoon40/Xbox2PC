@@ -56,12 +56,18 @@ struct ExecWorld {
     RuntimeCore core;
     ProcessManager pm;
     api::GameRuntimeService* grt = nullptr;
+    api::TaskQueueService* tq = nullptr;
 
     ExecWorld() : pm(core.objects()) {
         {
             auto grt_s = std::make_unique<api::GameRuntimeService>(reg, pm);
             grt = grt_s.get();
             EXPECT_TRUE(core.services().register_service(std::move(grt_s)).ok());
+        }
+        {
+            auto tq_s = std::make_unique<api::TaskQueueService>(reg, pm);
+            tq = tq_s.get();
+            EXPECT_TRUE(core.services().register_service(std::move(tq_s)).ok());
         }
         EXPECT_TRUE(core.initialize().ok());
     }
