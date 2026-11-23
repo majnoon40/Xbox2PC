@@ -234,7 +234,7 @@ Result<void> ProcessManager::suspend_process(Handle process) {
     if (!r.ok()) return r;
     // Suspend each owned live thread through its resumable gate. This is
     // deliberately not request_stop(): stop is terminal cancellation.
-    std::vector<RtThread*> suspended;
+    std::vector<RefGuard> suspended;
     for (const std::uint64_t tid : proc->thread_ids()) {
         auto t = objects_.lookup_id(tid);
         if (!t.ok() || t.value().get() == nullptr) continue;
@@ -245,13 +245,15 @@ Result<void> ProcessManager::suspend_process(Handle process) {
             state == ThreadState::Failed || state == ThreadState::Created) continue;
         auto paused = thread->suspend();
         if (!paused.ok()) {
-            for (auto it = suspended.rbegin(); it != suspended.rend(); ++it)
-                (void)(*it)->resume();
+            for (auto it = suspended.rbegin(); it != suspended.rend(); ++it) {
+                auto* previous = it->get()->as<RtThread>();
+                if (previous != nullptr) (void)previous->resume();
+            }
             (void)proc->resume();
             return Result<void>(paused.errc(),
                                 "process suspension rolled back: " + paused.context());
         }
-        suspended.push_back(thread);
+        suspended.push_back(std::move(t.value()));
     }
     return Result<void>::ok_result();
 }
@@ -264,7 +266,7 @@ Result<void> ProcessManager::resume_process(Handle process) {
     }
     auto r = proc->resume();
     if (!r.ok()) return r;
-    std::vector<RtThread*> resumed;
+    std::vector<RefGuard> resumed;
     for (const std::uint64_t tid : proc->thread_ids()) {
         auto t = objects_.lookup_id(tid);
         if (!t.ok() || t.value().get() == nullptr) continue;
@@ -272,13 +274,15 @@ Result<void> ProcessManager::resume_process(Handle process) {
         if (thread == nullptr || thread->state() != ThreadState::Suspended) continue;
         auto running = thread->resume();
         if (!running.ok()) {
-            for (auto it = resumed.rbegin(); it != resumed.rend(); ++it)
-                (void)(*it)->suspend();
+            for (auto it = resumed.rbegin(); it != resumed.rend(); ++it) {
+                auto* previous = it->get()->as<RtThread>();
+                if (previous != nullptr) (void)previous->suspend();
+            }
             (void)proc->suspend();
             return Result<void>(running.errc(),
                                 "process resume rolled back: " + running.context());
         }
-        resumed.push_back(thread);
+        resumed.push_back(std::move(t.value()));
     }
     return Result<void>::ok_result();
 }
