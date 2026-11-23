@@ -1415,6 +1415,22 @@ TEST(GdkServiceTest, Win32VirtualMemorySupportsPartialPageRanges) {
     ASSERT_EQ(protected_range.out_bytes_size, 4u);
     EXPECT_EQ(protected_range.out_bytes[0], 0x04u); // previous PAGE_READWRITE
 
+    // A byte range crossing into the following reserved page must fail
+    // without changing either page; a short range within the committed
+    // page is rounded to that whole page.
+    ctx.args[0] = base + 3 * 4096 - 64;
+    ctx.args[1] = 128;
+    ctx.args[2] = 0x02;
+    ctx.args[3] = 0x1000;
+    const auto crosses_reserved = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(crosses_reserved.ok);
+    EXPECT_EQ(crosses_reserved.return_value, 0u);
+    ctx.args[1] = 64;
+    const auto tail_page = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(tail_page.ok);
+    EXPECT_EQ(tail_page.return_value, 1u);
+    EXPECT_EQ(tail_page.out_bytes[0], 0x04u); // second committed page was RW
+
     // Decommit the second page only, preserving the first page's protection.
     ctx.arg_count = 3;
     ctx.args[0] = base + 2 * 4096;
