@@ -44,8 +44,8 @@ selected manual work/completion port. `XTaskQueueDispatch` invokes one
 queued callback on the calling guest thread using the deterministic backend;
 the callback receives `context` in RCX and `canceled` in RDX. The nested
 callback uses a separate frame carved below the suspended caller stack,
-shares the parent request's resolved API bindings, instruction budget, and
-cooperative execution gate, and returns without modifying the caller CPU
+shares the parent request's resolved API bindings and cooperative execution
+gate, and uses the same configured per-invocation instruction limit, and returns without modifying the caller CPU
 state. Termination marks pending callbacks canceled for later manual dispatch.
 
 Each port is bounded to 4096 pending callbacks. Delayed submission, automatic
