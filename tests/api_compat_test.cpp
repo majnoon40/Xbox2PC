@@ -185,8 +185,8 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     ASSERT_NE(delayed, nullptr);
     ASSERT_NE(duplicate_queue, nullptr);
     EXPECT_EQ(submit->compat, ApiStatus::PartiallyImplemented);
-    EXPECT_EQ(submit->impl, ApiStatus::Unsupported);
-    EXPECT_NE(submit->notes.find("guest callback invocation"), std::string::npos);
+    EXPECT_EQ(submit->impl, ApiStatus::PartiallyImplemented);
+    EXPECT_NE(submit->notes.find("manual-mode callback submission"), std::string::npos);
     EXPECT_EQ(delayed->compat, ApiStatus::PartiallyImplemented);
     EXPECT_EQ(delayed->impl, ApiStatus::Unsupported);
     EXPECT_NE(delayed->notes.find("timer scheduling"), std::string::npos);
@@ -1095,6 +1095,72 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(gone.ok());   // unknown handle now
     // Unknown mode values rejected.
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
+}
+
+TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-callback.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    auto queue = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+
+    ApiContext submit;
+    submit.process_id = pid.value();
+    submit.arg_count = 4;
+    submit.args[0] = queue.value();
+    submit.args[1] = static_cast<std::uint32_t>(XTaskQueuePort::Work);
+    submit.args[2] = 0x12345678;
+    submit.args[3] = 0x140001000;
+    const auto submitted = w.reg.dispatch("xgameruntime",
+                                          "XTaskQueueSubmitCallback", submit);
+    ASSERT_TRUE(submitted.ok) << submitted.error;
+    EXPECT_EQ(submitted.return_value, kSOk);
+
+    std::uint64_t seen_va = 0;
+    std::uint64_t seen_context = 0;
+    bool seen_canceled = true;
+    ApiContext dispatch;
+    dispatch.process_id = pid.value();
+    dispatch.arg_count = 3;
+    dispatch.args[0] = queue.value();
+    dispatch.args[1] = static_cast<std::uint32_t>(XTaskQueuePort::Work);
+    dispatch.args[2] = 0;
+    dispatch.invoke_guest_callback =
+        [&](std::uint64_t callback_va, std::uint64_t callback_context,
+            bool canceled) {
+            seen_va = callback_va;
+            seen_context = callback_context;
+            seen_canceled = canceled;
+            return Result<void>::ok_result();
+        };
+    const auto dispatched = w.reg.dispatch("xgameruntime",
+                                           "XTaskQueueDispatch", dispatch);
+    ASSERT_TRUE(dispatched.ok) << dispatched.error;
+    EXPECT_EQ(dispatched.return_value, 1u);
+    EXPECT_EQ(seen_va, 0x140001000u);
+    EXPECT_EQ(seen_context, 0x12345678u);
+    EXPECT_FALSE(seen_canceled);
+
+    // Termination cancels pending work. Manual dispatch delivers it with
+    // canceled=true so guest code can release its callback context.
+    submit.args[2] = 0x87654321;
+    ASSERT_TRUE(w.reg.dispatch("xgameruntime",
+                               "XTaskQueueSubmitCallback", submit).ok);
+    ASSERT_TRUE(w.tq->terminate_queue(pid.value(), queue.value(), false).ok());
+    seen_canceled = false;
+    const auto canceled = w.reg.dispatch("xgameruntime",
+                                         "XTaskQueueDispatch", dispatch);
+    ASSERT_TRUE(canceled.ok) << canceled.error;
+    EXPECT_EQ(canceled.return_value, 1u);
+    EXPECT_EQ(seen_context, 0x87654321u);
+    EXPECT_TRUE(seen_canceled);
+    EXPECT_FALSE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 1, 0x140001000).ok());
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
 }
 
 TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
