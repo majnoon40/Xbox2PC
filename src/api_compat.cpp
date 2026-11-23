@@ -582,7 +582,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.category = registry::ApiCategory::WindowsWin32;
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-VIRTUAL-ALLOC]"; a.evidence_url = kVirtualAllocUrl;
-        a.notes = "automatic and fixed-address MEM_RESERVE and MEM_RESERVE|MEM_COMMIT; exact-region MEM_COMMIT at an existing reservation address; partial-range commit is unsupported";
+        a.notes = "automatic and fixed-address MEM_RESERVE and MEM_RESERVE|MEM_COMMIT; page-range MEM_COMMIT within one reservation";
         add(a);
     }
     {
@@ -592,7 +592,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.category = registry::ApiCategory::WindowsWin32;
         a.compat = ApiStatus::PartiallyImplemented; a.impl = ApiStatus::PartiallyImplemented;
         a.evidence = "[MS-VIRTUAL-FREE]"; a.evidence_url = kVirtualFreeUrl;
-        a.notes = "supports MEM_RELEASE with dwSize zero and exact-region MEM_DECOMMIT; partial-range decommit is unsupported";
+        a.notes = "supports MEM_RELEASE with dwSize zero and page-range MEM_DECOMMIT; release requires the original allocation base";
         add(a);
     }
     {
