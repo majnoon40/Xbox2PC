@@ -20,8 +20,9 @@ provenance remains `UNKNOWN`; a Windows PE header is not proof of Xbox
 targeting. Imports are parsed but runtime resolution remains `NOT_TESTED`.
 Relocation blocks and TLS metadata are decoded by the existing M6 validators;
 relocation application and callback execution are not performed. Instruction
-status describes a linear decoder scan, not reachable code or a complete CFG.
-Overall status deliberately remains `UNKNOWN` until Xbox-specific evidence
-and runtime tests exist.
+status distinguishes decoder-unsupported encodings from decoder-recognized
+instructions outside the current interpreter support matrix. The static scan
+is not reachability analysis or a complete CFG. Overall status deliberately
+remains `UNKNOWN` until Xbox-specific evidence and runtime tests exist.
 
 No percentages or guessed compatibility scores are emitted.
