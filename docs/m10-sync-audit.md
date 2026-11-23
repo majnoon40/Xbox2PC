@@ -57,13 +57,13 @@ The M10 tests cover the implemented event, mutex, and semaphore slices, includin
 ## M10 virtual-memory API slice
 
 - Added VirtualAlloc, VirtualFree, and VirtualProtect descriptors, implementations, and explicit x64 marshalling plans.
-- VirtualAlloc supports automatic and fixed-address placement with MEM_RESERVE and MEM_RESERVE|MEM_COMMIT, plus exact-base MEM_COMMIT into an existing reservation. VirtualFree supports MEM_RELEASE with size zero and exact-region MEM_DECOMMIT. VirtualProtect changes protection across one complete tracked region and returns the previous protection.
+- VirtualAlloc supports automatic and fixed-address placement with MEM_RESERVE and MEM_RESERVE|MEM_COMMIT, plus page-range MEM_COMMIT within one reservation. VirtualFree supports MEM_RELEASE with size zero and page-range MEM_DECOMMIT. VirtualProtect changes protection over page ranges and returns the first page's previous protection.
 - Supported page protections are PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_EXECUTE_READ, and policy-gated PAGE_EXECUTE_READWRITE. Unsupported constants fail closed.
-- Partial-region MEM_COMMIT/MEM_DECOMMIT and partial-region protection remain unsupported. Fixed-address reservations use 64-KiB allocation-granularity rounding; initial allocation-protection metadata is retained and reported by VirtualQuery.
+- Page-range operations split metadata segments while preserving the original allocation base. MEM_RELEASE requires that original base. Fixed-address reservations use 64-KiB allocation-granularity rounding; initial allocation-protection metadata is retained and reported by VirtualQuery.
 - Committed PAGE_NOACCESS is represented as committed but inaccessible memory, distinct from releasing a region.
 - Reservation quotas count the full reserved virtual-address span even after pages are committed. Region growth must satisfy both the reservation quota and, for committed regions, the committed-byte quota.
 
-- Extended the virtual-memory slice with exact-region MEM_COMMIT at an existing reservation address and exact-region MEM_DECOMMIT. Decommit marks the region Reserved and protects the host subrange as inaccessible; partial ranges and physical-page discard fidelity remain unsupported.
+- Extended the virtual-memory slice with page-range MEM_COMMIT and MEM_DECOMMIT. Linux decommit marks the host subrange inaccessible and discards anonymous backing with MADV_DONTNEED; this is host behavior, not Xbox physical-memory fidelity.
 
 
 ## AllocationProtect metadata
