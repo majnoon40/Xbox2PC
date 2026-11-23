@@ -1640,9 +1640,8 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
         guest.original_bytes.data(), guest.original_bytes.size(),
         guest.resolver, probe_diagnostics);
     ASSERT_TRUE(probed_imports.ok()) << probed_imports.error_string();
-    // The raw thunk walk may be empty for this mapped fixture; load_image
-    // must still preserve the parser's validated import metadata through its
-    // fallback and produce the binding used by execution preparation.
+    ASSERT_EQ(probed_imports.value().size(), 1u)
+        << "raw PE thunk walk must resolve the fixture's single import";
 
     // Loaded images are owned by the process handle table, not the
     // global object-manager handle table.
@@ -1688,6 +1687,10 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
     EXPECT_EQ(request.value().api_bindings[0].export_name, "XGameRuntimeInitialize");
     EXPECT_TRUE(is_api_binding(request.value().api_bindings[0].value));
 
+    // Drop the process-table object pin before unload_image destroys the
+    // loaded-image object. Keeping this RefGuard alive would self-deadlock
+    // ObjectManager::destroy while it waits for outstanding pins to drain.
+    loaded_ref.value().release();
     (void)context.destroy();
     (void)guest.loader.unload_image(w.pm, w.core.objects(), guest.ph, guest.image);
     (void)w.pm.terminate_process(guest.ph, 0);
