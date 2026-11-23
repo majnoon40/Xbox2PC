@@ -446,14 +446,14 @@ TEST_F(AbiAdvancedTest, NonvolatilePreservedAcrossMarshalledCall) {
 
 TEST_F(AbiAdvancedTest, NestedGuestCallThroughEngine) {
     // Two-level guest call chain: main -> helper1 -> helper2. RAX
-    // accumulates: helper2 sets 5, helper1 adds 3, main adds 4 -> 13.
+    // accumulates: helper2 sets 5, helper1 adds 3, main adds 4 -> 12.
     std::vector<std::uint8_t> code;
     auto emit = [&](std::initializer_list<std::uint8_t> bs) {
         for (std::uint8_t b : bs) code.push_back(b);
     };
     // main at 0 (RVA 0x1000).
     emit({0xB8, 0x01, 0, 0, 0});                     // mov eax, 1
-    const std::int32_t rel1 = 0x30 - 5;               // -> helper1
+    const std::int32_t rel1 = 0x30 - 10;              // CALL next-RIP -> helper1
     emit({0xE8, static_cast<std::uint8_t>(rel1 & 0xFF), 0, 0, 0});
     emit({0x83, 0xC0, 0x04});                         // add eax, 4
     emit({0xC3});                                     // ret
