@@ -149,7 +149,7 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
     // frame size. On return, write_return() restores RSP +8 past the
     // return address slot.
     const std::uint64_t rsp = cpu.reg(Gpr::Sp);
-    if ((rsp % 8) != 0 || rsp < 4096) {
+    if ((rsp % kStackAlignment) != 0 || rsp < 4096) {
         return Result<void>(RuntimeErrc::InvalidArgument,
                             "caller RSP not usable (alignment/floor)");
     }
@@ -320,7 +320,7 @@ Result<void> write_return(CpuState& cpu, const CallSpec& spec,
                             "return kind mismatch with the call spec");
     }
     const std::uint64_t rsp = cpu.reg(Gpr::Sp);
-    if (rsp == 0 || rsp > ((1ull << 63) - 8)) {
+    if (rsp == 0 || rsp >= ((1ull << 63) - 8)) {
         return Result<void>(RuntimeErrc::InvalidArgument, "RSP overflow on return");
     }
 
