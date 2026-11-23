@@ -111,6 +111,8 @@ public:
     Result<std::uint64_t> reserve_region_auto(std::uint64_t size, std::string name);
     // Commit a reserved region (host storage via mprotect RW subrange).
     Result<void> commit_region(std::uint64_t xbox_va);
+    // Decommit one complete region while retaining its virtual reservation.
+    Result<void> decommit_region(std::uint64_t xbox_va);
     // Change protection of a COMMITTED region (validated transitions).
     Result<void> protect_region(std::uint64_t xbox_va, MemProtect p);
     // Release a region entirely (any state) — decommit + unreserve.

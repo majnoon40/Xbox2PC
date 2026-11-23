@@ -956,12 +956,29 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
     std::uint64_t pid, std::uint64_t address, std::uint64_t size,
     std::uint32_t allocation_type, std::uint32_t protection) {
     constexpr std::uint32_t kCommit = 0x1000u, kReserve = 0x2000u;
-    if (pid == 0 || address != 0 || size == 0 ||
-        (allocation_type != kReserve && allocation_type != (kReserve | kCommit)))
+    if (pid == 0 || size == 0 ||
+        (allocation_type != kReserve && allocation_type != kCommit &&
+         allocation_type != (kReserve | kCommit)))
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
-            "VirtualAlloc supports automatic placement with MEM_RESERVE or MEM_RESERVE|MEM_COMMIT");
+            "VirtualAlloc supports MEM_RESERVE, MEM_COMMIT on an exact reserved region, and MEM_RESERVE|MEM_COMMIT");
     auto decoded = decode_win32_page_protection(protection);
     if (!decoded.ok()) return Result<std::uint64_t>(decoded.errc(), decoded.context());
+    if (allocation_type == kCommit) {
+        if (address == 0)
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                         "MEM_COMMIT requires an existing guest reservation address");
+        auto committed = process_manager_.commit_region_by_pid(pid, address, size);
+        if (!committed.ok()) return Result<std::uint64_t>(committed.errc(), committed.context());
+        auto changed = process_manager_.protect_region_by_pid(pid, address, size, decoded.value());
+        if (!changed.ok()) {
+            (void)process_manager_.decommit_region_by_pid(pid, address, size);
+            return Result<std::uint64_t>(changed.errc(), changed.context());
+        }
+        return Result<std::uint64_t>(address);
+    }
+    if (address != 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "fixed-address MEM_RESERVE is not supported");
     auto reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
     if (!reserved.ok()) return reserved;
     if (allocation_type == kReserve) {
@@ -986,10 +1003,14 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
 
 Result<void> GameRuntimeService::virtual_free(
     std::uint64_t pid, std::uint64_t address, std::uint64_t size, std::uint32_t free_type) {
-    if (pid == 0 || address == 0 || size != 0 || free_type != 0x8000u)
-        return Result<void>(RuntimeErrc::InvalidArgument,
-            "VirtualFree supports MEM_RELEASE with dwSize zero only");
-    return process_manager_.release_region_by_pid(pid, address);
+    if (pid == 0 || address == 0)
+        return Result<void>(RuntimeErrc::InvalidArgument, "VirtualFree requires a non-null guest address");
+    if (free_type == 0x8000u && size == 0)
+        return process_manager_.release_region_by_pid(pid, address);
+    if (free_type == 0x4000u && size != 0)
+        return process_manager_.decommit_region_by_pid(pid, address, size);
+    return Result<void>(RuntimeErrc::InvalidArgument,
+        "VirtualFree supports MEM_RELEASE with size zero or whole-region MEM_DECOMMIT");
 }
 
 Result<MemProtect> GameRuntimeService::virtual_protect(

@@ -110,3 +110,8 @@ Inferred (xbox2pc design decisions — no Xbox documentation consulted):
 - Reserved/Committed two-state region model,
 - W^X-by-default discipline and the `allow_wx_pages` opt-in,
 - allocator id/metadata/tracking model.
+
+
+## Guest decommit model
+
+AddressSpace now supports decommitting one complete tracked region: it protects the host subrange as inaccessible and transitions the descriptor from Committed back to Reserved. This is the runtime's current MEM_DECOMMIT model; partial-page-range decommit and physical-page discard/recommit fidelity are not claimed.

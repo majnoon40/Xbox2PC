@@ -303,6 +303,25 @@ Result<void> AddressSpace::commit_region(std::uint64_t xbox_va) {
     return Result<void>::ok_result();
 }
 
+
+Result<void> AddressSpace::decommit_region(std::uint64_t xbox_va) {
+    std::lock_guard lock(impl_->lock);
+    const auto it = impl_->regions.find(xbox_va);
+    if (it == impl_->regions.end())
+        return Result<void>(RuntimeErrc::NotFound, "no region at that address");
+    VmRegion& region = it->second;
+    if (region.state != RegionState::Committed)
+        return Result<void>(RuntimeErrc::InvalidState, "region is not committed");
+    if (impl_->host == nullptr)
+        return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
+    const auto host_ok = apply_subrange_protect(*impl_->host,
+        xbox_va - xbox_base_, region.size, MemProtect::NoAccess);
+    if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
+    region.state = RegionState::Reserved;
+    region.protection = MemProtect::NoAccess;
+    return Result<void>::ok_result();
+}
+
 Result<void> AddressSpace::protect_region(std::uint64_t xbox_va, MemProtect p) {
     std::lock_guard lock(impl_->lock);
     const auto it = impl_->regions.find(xbox_va);

@@ -844,9 +844,18 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     ctx.args[0] = 0; ctx.args[1] = 0x2000; ctx.args[2] = 0x2000; ctx.args[3] = 0x04;
     const auto reserved = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
     ASSERT_TRUE(reserved.ok); ASSERT_NE(reserved.return_value, 0u);
+    const auto base = reserved.return_value;
+    ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x1000; ctx.args[3] = 0x04;
+    const auto committed = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(committed.ok); EXPECT_EQ(committed.return_value, base);
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x4000;
+    const auto decommitted = w.reg.dispatch("kernel32", "VirtualFree", ctx);
+    ASSERT_TRUE(decommitted.ok); EXPECT_EQ(decommitted.return_value, 1u);
+    ctx.arg_count = 4; ctx.args[0] = base; ctx.args[1] = 0x2000; ctx.args[2] = 0x1000; ctx.args[3] = 0x04;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualAlloc", ctx).return_value, base);
     ctx.args[2] = 0x800; // MEM_RESET is deliberately unsupported.
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualAlloc", ctx).return_value, 0u);
-    ctx.arg_count = 3; ctx.args[0] = reserved.return_value; ctx.args[1] = 0; ctx.args[2] = 0x8000;
+    ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
 }
 

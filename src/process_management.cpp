@@ -595,6 +595,26 @@ Result<void> ProcessManager::commit_region_by_pid(
     return proc->address_space().commit_region(xbox_va);
 }
 
+
+Result<void> ProcessManager::decommit_region_by_pid(
+    std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size) {
+    auto found = find_process_by_pid(pid);
+    if (!found.ok()) return Result<void>(found.errc(), found.context());
+    auto* proc = found.value().get()->as<ManagedProcess>();
+    if (proc == nullptr || proc->state() != ProcessState::Running)
+        return Result<void>(RuntimeErrc::ProcessTerminated, "guest process is not running");
+    std::lock_guard lock(lock_);
+    auto region = proc->address_space().find_region(xbox_va);
+    if (!region.ok()) return Result<void>(region.errc(), region.context());
+    const auto page = proc->address_space().page_size();
+    if (size == 0 || page == 0 || size > (~0ull) - (page - 1))
+        return Result<void>(RuntimeErrc::InvalidArgument, "invalid guest decommit size");
+    const auto aligned = ((size + page - 1) / page) * page;
+    if (aligned != region.value().size || region.value().state != RegionState::Committed)
+        return Result<void>(RuntimeErrc::InvalidArgument, "decommit must cover one complete committed region");
+    return proc->address_space().decommit_region(xbox_va);
+}
+
 Result<MemProtect> ProcessManager::protect_region_by_pid(
     std::uint64_t pid, std::uint64_t xbox_va, std::uint64_t size, MemProtect prot) {
     auto found = find_process_by_pid(pid);
