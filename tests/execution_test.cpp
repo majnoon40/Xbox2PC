@@ -652,6 +652,11 @@ TEST(BridgeTest, MarshalWaitForMultipleObjectsReadsGuestHandleArray) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("wait-multiple.exe");
     const auto pid = proc->pid();
+    ModuleDescriptor module;
+    module.module_name = "wait-multiple.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(ph, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(ph).ok());
     guest::GuestMemory mem(proc->address_space());
     auto first = w.grt->create_event(pid, true, false);
     auto second = w.grt->create_event(pid, true, true);
