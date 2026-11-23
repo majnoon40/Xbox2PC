@@ -73,6 +73,12 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
         return report;
     }
 
+    auto directory_pair_valid = [&](std::uint16_t index) {
+        if (index >= image.directories.size()) return true;
+        const auto& directory = image.directories[index];
+        return (directory.rva == 0) == (directory.size == 0);
+    };
+
     report.is_pe32_plus_amd64 = image.opt.is_pe32plus &&
         image.coff.machine == xbox2pc::pe::kMachineAmd64;
 
@@ -92,6 +98,14 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
         }
         for (const auto& line : diagnostics.lines()) {
             structure.findings.push_back(line);
+        }
+    }
+    for (std::size_t i = 0; i < image.directories.size(); ++i) {
+        const auto& directory = image.directories[i];
+        if ((directory.rva == 0) != (directory.size == 0)) {
+            structure.status = StageStatus::Failed;
+            structure.findings.push_back(
+                directory.name + " directory has an inconsistent RVA/size pair");
         }
     }
     if (!image.opt.is_pe32plus) {
@@ -182,6 +196,10 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
             import_validation_failed = true;
         }
     }
+    import_validation_failed =
+        import_validation_failed ||
+        !directory_pair_valid(xbox2pc::pe::kDirImport) ||
+        !directory_pair_valid(xbox2pc::pe::kDirDelayImport);
     Stage imports = make_stage(
         "imports",
         import_validation_failed ? StageStatus::Failed :
@@ -201,9 +219,16 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
     Stage relocations = make_stage(
         "relocations", StageStatus::Passed,
         "relocation blocks decoded; relocation application not performed");
+    if (!directory_pair_valid(xbox2pc::pe::kDirReloc)) {
+        relocations.status = StageStatus::Failed;
+        relocations.findings.push_back("relocation directory has an inconsistent RVA/size pair");
+    }
     const auto relocation_blocks = xbox2pc::rt::loader::decode_relocations(
         image, data, size, xbox2pc::rt::loader::kMaxRelocEntries);
-    if (!relocation_blocks.ok()) {
+    if (!directory_pair_valid(xbox2pc::pe::kDirReloc)) {
+        // The directory-pair failure above is authoritative; do not reinterpret
+        // the zero-sized directory as a valid empty relocation table.
+    } else if (!relocation_blocks.ok()) {
         relocations.status = StageStatus::Failed;
         relocations.findings.push_back(relocation_blocks.error_string());
     } else {
@@ -222,9 +247,15 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
         "tls", StageStatus::Passed,
         "TLS metadata decoded; callbacks are never executed by validation");
     xbox2pc::rt::loader::LoadDiagnostics tls_diagnostics;
+    if (!directory_pair_valid(xbox2pc::pe::kDirTls)) {
+        tls.status = StageStatus::Failed;
+        tls.findings.push_back("TLS directory has an inconsistent RVA/size pair");
+    }
     const auto tls_info = xbox2pc::rt::loader::decode_tls(
         image, data, size, tls_diagnostics);
-    if (!tls_info.ok()) {
+    if (!directory_pair_valid(xbox2pc::pe::kDirTls)) {
+        // Do not reinterpret a malformed zero-sized directory as absent TLS.
+    } else if (!tls_info.ok()) {
         tls.status = StageStatus::Failed;
         tls.findings.push_back(tls_info.error_string());
     } else if (!tls_info.value().has_value()) {
