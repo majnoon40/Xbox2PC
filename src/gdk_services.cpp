@@ -708,7 +708,7 @@ Result<MemoryQuerySnapshot> GameRuntimeService::query_memory_snapshot(
     snapshot.capacity = space.capacity();
     snapshot.page_size = space.page_size();
     snapshot.regions = space.list_regions();
-    return Result<MemoryQuerySnapshot>::ok_result(std::move(snapshot));
+    return Result<MemoryQuerySnapshot>(std::move(snapshot));
 }
 
 void GameRuntimeService::release_process(std::uint64_t process_id) {
