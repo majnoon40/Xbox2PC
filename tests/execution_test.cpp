@@ -996,6 +996,21 @@ TEST(EngineTest, RejectsUnmappedSyntheticApiBinding) {
     ASSERT_TRUE(result.exception.has_value());
     EXPECT_EQ(result.exception->fault, GuestFault::InvalidState);
     EXPECT_EQ(result.api_calls, 0u);
+
+    // A duplicated value with two different import identities is ambiguous
+    // and must be rejected rather than dispatching whichever appears first.
+    request.api_bindings.push_back(
+        ApiBindingInfo{request.entry_va, "xgameruntime", "XGameRuntimeInitialize", false, 0});
+    request.api_bindings.push_back(
+        ApiBindingInfo{request.entry_va, "xgameruntime", "XGameRuntimeUninitialize", false, 0});
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, stack_va + 0x100);
+    cpu_state.rip = request.entry_va;
+    const auto duplicate = backend.run(request, cpu_state, interrupted);
+    EXPECT_EQ(duplicate.outcome, Outcome::Faulted);
+    ASSERT_TRUE(duplicate.exception.has_value());
+    EXPECT_EQ(duplicate.exception->fault, GuestFault::InvalidState);
+    EXPECT_EQ(duplicate.api_calls, 0u);
 }
 
 TEST(EngineTest, ExecutesSubsetProgram) {
