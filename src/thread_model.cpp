@@ -253,7 +253,8 @@ Result<void> RtThread::resume() {
 bool RtThread::suspension_point() {
     const bool allowed = execution_control_->checkpoint(stop_flag_);
     if (!allowed) return false;
-    if (state_.load(std::memory_order_acquire) == ThreadState::Suspended) {
+    const auto current = state_.load(std::memory_order_acquire);
+    if (current == ThreadState::Suspended || current == ThreadState::Ready) {
         state_.store(ThreadState::Running, std::memory_order_release);
     }
     return true;
