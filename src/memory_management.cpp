@@ -373,8 +373,8 @@ Result<void> AddressSpace::decommit_range(std::uint64_t xbox_va,
     }
     if (impl_->host == nullptr)
         return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
-    const auto host_ok = apply_subrange_protect(*impl_->host,
-        xbox_va - xbox_base_, size, MemProtect::NoAccess);
+    const auto host_ok = impl_->host->decommit_subrange(
+        xbox_va - xbox_base_, size);
     if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
     if (!split_region_at(impl_->regions, xbox_va) ||
         !split_region_at(impl_->regions, end))
