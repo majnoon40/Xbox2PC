@@ -140,13 +140,17 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
     };
     // `k` more bytes must exist in the buffer AND inside the 15-byte limit.
     auto need = [&](std::size_t k) -> bool {
+        // If the required bytes cannot fit within the architectural limit,
+        // classify the encoding as too long even when the supplied buffer
+        // also ends here. Truncation applies only when more bytes could still
+        // complete a legal <=15-byte instruction.
+        if (i + k > kMaxInstructionBytes) {
+            set_bad(RejectClass::TooLong, "instruction exceeds the 15-byte architectural limit");
+            return false;
+        }
         if (k > len - i) {
             set_bad(RejectClass::NeedMoreBytes,
                     "instruction truncated: buffer ends inside the instruction");
-            return false;
-        }
-        if (i + k > kMaxInstructionBytes) {
-            set_bad(RejectClass::TooLong, "instruction exceeds the 15-byte architectural limit");
             return false;
         }
         return true;
