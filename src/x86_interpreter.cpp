@@ -1098,6 +1098,15 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Xchg: {
+            // Memory XCHG is implicitly LOCKed by the ISA. The current
+            // deterministic backend has no atomic guest-memory primitive,
+            // so reject it rather than silently execute a racy operation.
+            if (ins.ops[0].kind == x64::OpKind::Mem ||
+                ins.ops[1].kind == x64::OpKind::Mem) {
+                cx.abort(GuestFault::UnsupportedInstruction,
+                         "memory XCHG is implicitly atomic and unsupported");
+                return StepResult::failed(cx.fail);
+            }
             Value a_v, b_v;
             if (!read_operand(cx, ins.ops[0], a_v)) return StepResult::failed(cx.fail);
             if (!read_operand(cx, ins.ops[1], b_v)) return StepResult::failed(cx.fail);
@@ -1224,7 +1233,8 @@ StepResult Interpreter::step(const Decoded& ins) {
                     cx.cpu.set_flag(cpu::kFlagCF, cf);
                 }
                 if (masked == 1) {
-                    cx.cpu.set_flag(cpu::kFlagOF, sign_bit(result, bits) != 0);
+                    const bool msb = sign_bit(result, bits) != 0;
+                    cx.cpu.set_flag(cpu::kFlagOF, msb != cx.cpu.flag(cpu::kFlagCF));
                 }
             } else if (ins.mnem == Mnemonic::Shr) {
                 if (masked <= bits) {
@@ -1263,10 +1273,16 @@ StepResult Interpreter::step(const Decoded& ins) {
                                                     ((result >> (bits - 2)) & 1ull));
                 }
             }
-            // RCL/RCR set CF above; their OF (count 1) uses the top two bits.
-            if ((ins.mnem == Mnemonic::Rcl || ins.mnem == Mnemonic::Rcr) && masked == 1) {
-                cx.cpu.set_flag(cpu::kFlagOF, ((result >> (bits - 1)) & 1ull) !=
-                                                ((result >> (bits - 2)) & 1ull));
+            if (ins.mnem == Mnemonic::Rcl && masked == 1) {
+                // RCL: OF = MSB(result) XOR CF.
+                cx.cpu.set_flag(cpu::kFlagOF,
+                                (((result >> (bits - 1)) & 1ull) != 0) !=
+                                    cx.cpu.flag(cpu::kFlagCF));
+            } else if (ins.mnem == Mnemonic::Rcr && masked == 1) {
+                // RCR: OF = XOR of the two most significant result bits.
+                cx.cpu.set_flag(cpu::kFlagOF,
+                                ((result >> (bits - 1)) & 1ull) !=
+                                    ((result >> (bits - 2)) & 1ull));
             }
             set_pf_zf_sf(cx.cpu, result, bits);
             if (!write_operand(cx, ins.ops[0], result)) {
@@ -1278,6 +1294,16 @@ StepResult Interpreter::step(const Decoded& ins) {
 
         case Mnemonic::Bt: case Mnemonic::Bts: case Mnemonic::Btr:
         case Mnemonic::Btc: {
+            // A register bit offset on a memory operand is a bit-string
+            // index: it can move the effective address to another word.
+            // Until that addressing rule is implemented, reject it instead
+            // of incorrectly wrapping the index within the first word.
+            if (ins.ops[0].kind == x64::OpKind::Mem &&
+                ins.ops[1].kind == x64::OpKind::Reg) {
+                cx.abort(GuestFault::UnsupportedInstruction,
+                         "memory bit-string register offsets are unsupported");
+                return StepResult::failed(cx.fail);
+            }
             Value dst, pos;
             if (!read_operand(cx, ins.ops[0], dst)) return StepResult::failed(cx.fail);
             // ops[1]: immediate bit index, or the same-width register form
@@ -1319,9 +1345,13 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Pop: {
+            // POP computes a memory destination using the incremented RSP,
+            // but a failed destination write must not leave RSP changed.
+            const CpuState before = cx.cpu;
             Value v;
             if (!pop_u64(cx, v)) return StepResult::failed(cx.fail);
             if (!write_operand(cx, ins.ops[0], v.raw & width_mask(ins.ops[0].bits))) {
+                cx.cpu = before;
                 return StepResult::failed(cx.fail);
             }
             cx.cpu.rip += ins.length;
