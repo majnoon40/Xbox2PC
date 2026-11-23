@@ -131,6 +131,9 @@ struct ApiDescriptor {
 struct ApiContext {
     // The calling process (0 = runtime-global / no process).
     std::uint64_t process_id = 0;
+    // Calling guest thread (0 = unavailable/runtime-global). Distinct from
+    // process_id: thread-scoped APIs must never overload process identity.
+    std::uint64_t thread_id = 0;
     // Argument slots (up to 8; documented x64 register parameters).
     static constexpr std::size_t kMaxArgs = 8;
     std::uint64_t args[kMaxArgs] = {0};

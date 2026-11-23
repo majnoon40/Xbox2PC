@@ -523,13 +523,45 @@ TEST(GdkServiceTest, TimingNativeEquivalents) {
     EXPECT_EQ(w.tim->qpc_frequency().value(), 1'000'000'000ull);
 }
 
-TEST(GdkServiceTest, ThreadTimeSensitiveBits) {
+TEST(GdkServiceTest, ThreadTimeSensitiveBitsAreProcessScoped) {
     ApiWorld w;
-    EXPECT_TRUE(w.grt->set_time_sensitive(7, true).ok());
-    EXPECT_TRUE(w.grt->is_time_sensitive(7).value());
-    EXPECT_TRUE(w.grt->set_time_sensitive(7, false).ok());
-    EXPECT_FALSE(w.grt->is_time_sensitive(7).value());
-    EXPECT_FALSE(w.grt->is_time_sensitive(999).value());   // default false
+    EXPECT_TRUE(w.grt->set_time_sensitive(10, 7, true).ok());
+    EXPECT_TRUE(w.grt->is_time_sensitive(10, 7).value());
+    EXPECT_FALSE(w.grt->is_time_sensitive(20, 7).value());
+    EXPECT_TRUE(w.grt->set_time_sensitive(20, 7, true).ok());
+    EXPECT_TRUE(w.grt->is_time_sensitive(20, 7).value());
+    EXPECT_TRUE(w.grt->is_time_sensitive(10, 7).value());
+    EXPECT_TRUE(w.grt->set_time_sensitive(10, 7, false).ok());
+    EXPECT_FALSE(w.grt->is_time_sensitive(10, 7).value());
+    EXPECT_TRUE(w.grt->is_time_sensitive(20, 7).value());
+    EXPECT_FALSE(w.grt->set_time_sensitive(0, 7, true).ok());
+    EXPECT_FALSE(w.grt->is_time_sensitive(10, 0).ok());
+    w.grt->release_process(20);
+    EXPECT_FALSE(w.grt->is_time_sensitive(20, 7).value());
+    EXPECT_FALSE(w.grt->is_time_sensitive(10, 7).value());
+}
+
+TEST(GdkServiceTest, ThreadTimeSensitiveDispatchUsesCallingThreadIdentity) {
+    ApiWorld w;
+    ApiContext ctx;
+    ctx.process_id = 100;
+    ctx.thread_id = 7;
+    ctx.arg_count = 1;
+    ctx.args[0] = 1;
+    auto set = w.reg.dispatch("xgameruntime", "XThreadSetTimeSensitive", ctx);
+    ASSERT_TRUE(set.ok);
+    EXPECT_EQ(set.return_value, kSOk);
+    ctx.process_id = 200;
+    auto other_process = w.reg.dispatch("xgameruntime", "XThreadIsTimeSensitive", ctx);
+    ASSERT_TRUE(other_process.ok);
+    EXPECT_EQ(other_process.return_value, 0u);
+    ctx.process_id = 100;
+    auto same_thread = w.reg.dispatch("xgameruntime", "XThreadIsTimeSensitive", ctx);
+    ASSERT_TRUE(same_thread.ok);
+    EXPECT_EQ(same_thread.return_value, 1u);
+    ctx.thread_id = 0;
+    auto missing_identity = w.reg.dispatch("xgameruntime", "XThreadSetTimeSensitive", ctx);
+    EXPECT_FALSE(missing_identity.ok);
 }
 
 TEST(GdkServiceTest, ServiceInitializationOrderingAndRollback) {

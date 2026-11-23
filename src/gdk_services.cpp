@@ -174,13 +174,13 @@ public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
         if (ctx.arg_count != 1) return false;
         const bool on = ctx.args[0] != 0;
-        // The context's thread identity: M7 models the runtime's own
-        // threads (the documented API targets the CALLING thread; the
-        // dispatch context carries the thread id in process_id's companion
-        // slot via ctx.process_id high bits — see dispatcher notes).
-        const std::uint64_t tid = ctx.args[0] >> 32;  // not used; explicit
-        (void)tid;
-        const auto r = svc_.set_time_sensitive(ctx.process_id, on);
+        if (ctx.thread_id == 0) {
+            out.return_value = kEInvalidArg;
+            out.error = "calling thread identity is unavailable";
+            return false;
+        }
+        const auto r = svc_.set_time_sensitive(ctx.process_id,
+                                               ctx.thread_id, on);
         out.return_value = r.ok() ? kSOk : kEInvalidArg;
         out.note = "time-sensitive bit per runtime thread";
         return r.ok();
@@ -197,7 +197,12 @@ class ThreadIsTsImpl : public IApiImplementation {
 public:
     explicit ThreadIsTsImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        const auto r = svc_.is_time_sensitive(ctx.process_id);
+        if (ctx.thread_id == 0) {
+            out.return_value = 0;
+            out.error = "calling thread identity is unavailable";
+            return false;
+        }
+        const auto r = svc_.is_time_sensitive(ctx.process_id, ctx.thread_id);
         out.return_value = r.ok() && r.value() ? 1 : 0;
         return true;
     }
@@ -414,6 +419,11 @@ Result<void> GameRuntimeService::on_initialize() {
 
 Result<void> GameRuntimeService::on_shutdown() {
     const auto revoked = api_reg_.revoke_owner(id());
+    {
+        std::lock_guard lock(state_lock_);
+        procs_.clear();
+        ts_bits_.clear();
+    }
     owned_.clear();
     if (!revoked.ok()) {
         return Result<void>(revoked.errc(), revoked.context());
@@ -487,16 +497,35 @@ Result<std::string> GameRuntimeService::app_device_id(std::uint64_t size,
     return Result<std::string>(kDefault);
 }
 
-Result<void> GameRuntimeService::set_time_sensitive(std::uint64_t thread_id, bool on) {
+Result<void> GameRuntimeService::set_time_sensitive(
+    std::uint64_t process_id, std::uint64_t thread_id, bool on) {
+    if (process_id == 0 || thread_id == 0) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "process and thread identities must be nonzero");
+    }
     std::lock_guard lock(state_lock_);
-    ts_bits_[thread_id] = on;
+    ts_bits_[{process_id, thread_id}] = on;
     return Result<void>::ok_result();
 }
 
-Result<bool> GameRuntimeService::is_time_sensitive(std::uint64_t thread_id) const {
+Result<bool> GameRuntimeService::is_time_sensitive(
+    std::uint64_t process_id, std::uint64_t thread_id) const {
+    if (process_id == 0 || thread_id == 0) {
+        return Result<bool>(RuntimeErrc::InvalidArgument,
+                            "process and thread identities must be nonzero");
+    }
     std::lock_guard lock(state_lock_);
-    const auto it = ts_bits_.find(thread_id);
+    const auto it = ts_bits_.find({process_id, thread_id});
     return Result<bool>(it != ts_bits_.end() && it->second);
+}
+
+void GameRuntimeService::release_process(std::uint64_t process_id) {
+    std::lock_guard lock(state_lock_);
+    procs_.erase(process_id);
+    for (auto it = ts_bits_.begin(); it != ts_bits_.end();) {
+        if (it->first.first == process_id) it = ts_bits_.erase(it);
+        else ++it;
+    }
 }
 
 // ── TaskQueueService ─────────────────────────────────────────────────────

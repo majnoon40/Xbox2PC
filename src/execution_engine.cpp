@@ -319,7 +319,8 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
                                           const MarshalPlan& plan,
                                           std::uint64_t pid,
                                           std::uint32_t depth,
-                                          std::uint32_t max_depth) {
+                                          std::uint32_t max_depth,
+                                          std::uint64_t tid) {
     using Ret = Result<MarshalResult>;
     if (depth >= max_depth) {
         return Ret(RuntimeErrc::OutOfResources,
@@ -344,6 +345,7 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
     // 2. Build the M7 ApiContext from the values (validated pointers).
     api::ApiContext ctx;
     ctx.process_id = pid;
+    ctx.thread_id = tid;
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&
                             i < api::ApiContext::kMaxArgs;

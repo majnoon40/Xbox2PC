@@ -251,7 +251,8 @@ Result<MarshalResult> marshal_and_dispatch(cpu::CpuState& io_cpu,
                                            const MarshalPlan& plan,
                                            std::uint64_t pid,
                                            std::uint32_t depth,
-                                           std::uint32_t max_depth);
+                                           std::uint32_t max_depth,
+                                           std::uint64_t tid = 0);
 
 // ── completion sentinel + binding range ──────────────────────────────────
 

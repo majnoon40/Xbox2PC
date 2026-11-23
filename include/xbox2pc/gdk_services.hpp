@@ -97,9 +97,13 @@ public:
         std::uint32_t current_minor = 0;
     };
     RuntimeInfo runtime_info() const { return {}; }
-    // XThread time-sensitive bits per M4 thread (process-scoped).
-    Result<void> set_time_sensitive(std::uint64_t thread_id, bool on);
-    Result<bool> is_time_sensitive(std::uint64_t thread_id) const;
+    // XThread time-sensitive bits are scoped by (process, calling thread).
+    Result<void> set_time_sensitive(std::uint64_t process_id,
+                                    std::uint64_t thread_id, bool on);
+    Result<bool> is_time_sensitive(std::uint64_t process_id,
+                                   std::uint64_t thread_id) const;
+    // Remove process-owned GDK state during M4 process teardown.
+    void release_process(std::uint64_t process_id);
 
     // Registry back-reference (tests/introspection).
     ApiRegistry& registry() { return api_reg_; }
@@ -112,7 +116,7 @@ private:
     ApiRegistry& api_reg_;
     mutable std::mutex state_lock_;
     std::map<std::uint64_t, ProcState> procs_;
-    std::map<std::uint64_t, bool> ts_bits_;   // thread id -> bit
+    std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 
