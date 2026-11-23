@@ -126,6 +126,11 @@ public:
     Result<void> set_event(std::uint64_t process_id, std::uint64_t handle);
     Result<void> reset_event(std::uint64_t process_id, std::uint64_t handle);
     Result<std::uint32_t> wait_object(std::uint64_t process_id, std::uint64_t thread_id, std::uint64_t handle, std::uint32_t timeout_ms);
+    // Wait-any over 1..64 process-owned synchronization handles. Returns the
+    // Win32 WAIT_OBJECT_0/WAIT_ABANDONED_0 value plus the selected index.
+    Result<std::uint32_t> wait_objects_any(std::uint64_t process_id, std::uint64_t thread_id,
+                                           const std::vector<std::uint64_t>& handles,
+                                           std::uint32_t timeout_ms);
     Result<std::uint32_t> wait_event(std::uint64_t process_id, std::uint64_t handle, std::uint32_t timeout_ms);
     Result<void> close_sync_handle(std::uint64_t process_id, std::uint64_t handle);
     Result<void> close_event(std::uint64_t process_id, std::uint64_t handle);
