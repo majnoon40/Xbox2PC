@@ -254,6 +254,8 @@ private:
     std::map<std::string, Impl> impls_;
     // ordinal key: normalized library '\x1F' #ordinal (only verified ones)
     std::map<std::string, const ApiDescriptor*> ordinal_index_;
+    // Registry-wide monotonic ID prevents binding collisions across resolver instances.
+    std::uint32_t next_binding_id_ = 1;
 };
 
 // Convenience: the process-wide default registry (tests/CLI construct
