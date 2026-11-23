@@ -173,6 +173,10 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
                             "callee RSP invalid after frame push");
     }
     const std::uint64_t stack_args_base = callee_rsp + 8 + kShadowSpaceBytes;
+    // Stage register changes until all stack writes, including the return
+    // address, have succeeded. A failing writer must not leave a half-prepared
+    // guest call in the caller's architectural state.
+    CpuState staged_cpu = cpu;
     std::uint32_t stack_used = 0;
     // Varargs [MS-X64CC]: FP values duplicated into the GP register at
     // the same position.
@@ -197,7 +201,7 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
             if (pos < kMaxRegArgs) {
                 // XMM argument register is selected by the overall argument
                 // position, not by the count of preceding FP arguments.
-                cpu.xmm[pos].fill(0);
+                staged_cpu.xmm[pos].fill(0);
                 const std::size_t n = a.kind == ArgKind::F32 ? 4u : 8u;
                 for (std::size_t b = 0; b < n; ++b) {
                     cpu.xmm[pos][b] = static_cast<std::uint8_t>(bits >> (8u * b));
@@ -214,7 +218,7 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
             }
         } else if (i < kMaxRegArgs) {
             // GP register index is also the overall argument position.
-            cpu.set_reg(kGpArgRegs[i], v.int_v);
+            staged_cpu.set_reg(kGpArgRegs[i], v.int_v);
         } else {
             const std::uint64_t slot =
                 stack_args_base + (stack_used++) * 8;
@@ -226,7 +230,7 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
     if (spec.varargs) {
         for (std::size_t p = 0; p < kMaxRegArgs; ++p) {
             if (vararg_gp_used[p]) {
-                cpu.set_reg(kGpArgRegs[p], vararg_gp_shadow[p]);
+                staged_cpu.set_reg(kGpArgRegs[p], vararg_gp_shadow[p]);
             }
         }
     }
@@ -237,8 +241,9 @@ Result<void> prepare_call(CpuState& cpu, std::uint64_t callee_va,
     auto w = writer.write(writer.ctx, callee_rsp, &ret_to, 8);
     if (!w.ok()) return w;
 
-    cpu.set_reg(Gpr::Sp, callee_rsp);
-    cpu.rip = callee_va;
+    staged_cpu.set_reg(Gpr::Sp, callee_rsp);
+    staged_cpu.rip = callee_va;
+    cpu = staged_cpu;
     return Result<void>::ok_result();
 }
 
