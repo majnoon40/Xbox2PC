@@ -64,12 +64,15 @@ Both record state `Failed` + a distinct exit code
   This removes a separate manually supplied TID/control pair for managed
   execution contexts. The legacy explicit PID/TID constructor remains for
   synthetic tests and externally managed contexts.
-- `ExecutionContext::invoke` and `step` propagate the same gate to the
-  backend. TLS callback execution also attaches that gate, and it binds the
-  same PID/TID/address-space tuple as normal guest execution. Nested
-  task-queue callbacks inherit the active request's gate and execution
-  identity, so suspension and termination apply consistently at callback
-  instruction boundaries.
+- `ExecutionContext::prepare_entry` retains the image's assigned TLS
+  index in its per-thread context metadata. `invoke` and `step` propagate
+  the same gate to the backend. TLS callback execution attaches that gate
+  and binds the same PID/TID/address-space tuple as normal guest execution.
+  Nested task-queue callbacks inherit the active request's gate and
+  execution identity, so suspension and termination apply consistently at
+  callback instruction boundaries. Per-image TLS template materialization
+  remains the explicit `api::tls_init_thread` operation; this milestone
+  does not claim implicit loader-side TLS allocation.
 - `ProcessManager::suspend_process` and `resume_process` apply those
   distinct operations across owned live threads, with rollback if a thread
   transition fails. The Win32 event/mutex/semaphore wait path checks the
