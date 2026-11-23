@@ -141,21 +141,25 @@ public:
 
     // Queue handle ids (XTaskQueueHandle modeled as uint64 ids; the
     // runtime's own handle system is used for ownership).
-    Result<std::uint64_t> create_queue(std::uint32_t work_mode,
+    Result<std::uint64_t> create_queue(std::uint64_t process_id,
+                                        std::uint32_t work_mode,
                                         std::uint32_t completion_mode);
-    // Dispatch: returns whether a callback was dispatched (documented
-    // bool). No callbacks exist yet in M7's model, so dispatch returns
-    // false-on-empty semantics honestly (empty queue -> false).
-    Result<bool> dispatch(std::uint64_t queue_id, XTaskQueuePort port,
-                          std::uint32_t timeout_ms);
-    Result<void> close_queue(std::uint64_t queue_id);
-    Result<void> terminate_queue(std::uint64_t queue_id, bool wait);
+    // Dispatch is currently an empty-queue model: it validates ownership
+    // and port, then returns false because guest callback execution is not
+    // implemented yet.
+    Result<bool> dispatch(std::uint64_t process_id, std::uint64_t queue_id,
+                          XTaskQueuePort port, std::uint32_t timeout_ms);
+    Result<void> close_queue(std::uint64_t process_id, std::uint64_t queue_id);
+    Result<void> terminate_queue(std::uint64_t process_id,
+                                 std::uint64_t queue_id, bool wait);
+    // Remove all queue handles owned by a process after successful exit.
+    void release_process(std::uint64_t process_id);
 
     std::size_t live_queues() const;
 
 private:
     struct Queue {
-        std::uint64_t ref_count = 1;
+        std::uint64_t owner_process_id = 0;
         bool terminated = false;
         std::uint32_t work_mode = 0;
         std::uint32_t completion_mode = 0;
@@ -165,6 +169,7 @@ private:
     mutable std::mutex lock_;
     std::map<std::uint64_t, Queue> queues_;
     std::uint64_t next_id_ = 1;
+    std::uint64_t process_exit_observer_id_ = 0;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 

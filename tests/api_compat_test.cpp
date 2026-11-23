@@ -491,26 +491,67 @@ TEST(GdkServiceTest, DocumentedIdFallbacks) {
 
 TEST(GdkServiceTest, TaskQueueLifecycle) {
     ApiWorld w;
+    constexpr std::uint64_t owner_pid = 77;
     auto q = w.tq->create_queue(
+        owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
     ASSERT_TRUE(q.ok());
     const std::uint64_t id = q.value();
     // Dispatch on an empty manual queue: documented false.
-    auto d = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
+    auto d = w.tq->dispatch(owner_pid, id, XTaskQueuePort::Work, 0);
     ASSERT_TRUE(d.ok());
     EXPECT_FALSE(d.value());
     // Terminate: dispatch stays false (documented) — and submissions E_ABORT
     // (modeled: terminated flag).
-    EXPECT_TRUE(w.tq->terminate_queue(id, true).ok());
+    EXPECT_TRUE(w.tq->terminate_queue(owner_pid, id, true).ok());
     d = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
     EXPECT_FALSE(d.value());
     // Close drops the queue.
-    EXPECT_TRUE(w.tq->close_queue(id).ok());
+    EXPECT_TRUE(w.tq->close_queue(owner_pid, id).ok());
     auto gone = w.tq->dispatch(id, XTaskQueuePort::Work, 0);
     EXPECT_FALSE(gone.ok());   // unknown handle now
     // Unknown mode values rejected.
-    EXPECT_FALSE(w.tq->create_queue(99, 2).ok());
+    EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
+}
+
+TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
+    ApiWorld w;
+    constexpr std::uint64_t owner_pid = 101;
+    constexpr std::uint64_t foreign_pid = 202;
+    auto q = w.tq->create_queue(
+        owner_pid,
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(q.ok());
+    EXPECT_FALSE(w.tq->dispatch(foreign_pid, q.value(),
+                                XTaskQueuePort::Work, 0).ok());
+    EXPECT_FALSE(w.tq->terminate_queue(foreign_pid, q.value(), false).ok());
+    EXPECT_FALSE(w.tq->close_queue(foreign_pid, q.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+    EXPECT_TRUE(w.tq->dispatch(owner_pid, q.value(),
+                               XTaskQueuePort::Work, 0).ok());
+    EXPECT_FALSE(w.tq->dispatch(owner_pid, q.value(),
+                                static_cast<XTaskQueuePort>(99), 0).ok());
+    EXPECT_TRUE(w.tq->close_queue(owner_pid, q.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+}
+
+TEST(GdkServiceTest, ProcessExitReleasesOwnedTaskQueues) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-exit.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    auto q = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(q.ok());
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(w.tq->dispatch(pid.value(), q.value(),
+                                XTaskQueuePort::Work, 0).ok());
 }
 
 TEST(GdkServiceTest, TimingNativeEquivalents) {

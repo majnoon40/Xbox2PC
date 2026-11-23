@@ -222,6 +222,7 @@ public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
         if (ctx.arg_count != 3) return false;
         const auto r = svc_.create_queue(
+            ctx.process_id,
             static_cast<std::uint32_t>(ctx.args[0]),
             static_cast<std::uint32_t>(ctx.args[1]));
         if (!r.ok()) {
@@ -247,7 +248,7 @@ public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
         if (ctx.arg_count != 3) return false;
         const auto r = svc_.dispatch(
-            ctx.args[0],
+            ctx.process_id, ctx.args[0],
             static_cast<XTaskQueuePort>(ctx.args[1]),
             static_cast<std::uint32_t>(ctx.args[2]));
         out.return_value = r.ok() && r.value() ? 1 : 0;   // documented bool
@@ -267,7 +268,7 @@ public:
     explicit TqCloseImpl(TaskQueueService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
         if (ctx.arg_count != 1) return false;
-        const auto r = svc_.close_queue(ctx.args[0]);
+        const auto r = svc_.close_queue(ctx.process_id, ctx.args[0]);
         out.return_value = kSOk;   // documented: void
         out.note = r.ok() ? "ref-count decremented"
                           : "unknown handle (typed error reported)";
@@ -286,7 +287,7 @@ public:
     explicit TqTerminateImpl(TaskQueueService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
         if (ctx.arg_count != 4) return false;
-        const auto r = svc_.terminate_queue(ctx.args[0], ctx.args[1] != 0);
+        const auto r = svc_.terminate_queue(ctx.process_id, ctx.args[0], ctx.args[1] != 0);
         out.return_value = r.ok() ? kSOk : kEInvalidArg;
         out.note = "cancel + E_ABORT submissions (documented); callbacks "
                    "option ignored in M7 (none exist)";
@@ -574,79 +575,123 @@ Result<void> TaskQueueService::on_initialize() {
     const auto r3 = reg("XTaskQueueCloseHandle", keep(std::make_shared<TqCloseImpl>(*this)));
     const auto r4 = reg("XTaskQueueTerminate", keep(std::make_shared<TqTerminateImpl>(*this)));
     for (const auto* r : {&r1, &r2, &r3, &r4}) {
-        if (!r->ok()) return Result<void>(r->errc(), r->context());
+        if (!r->ok()) {
+            (void)api_reg_.revoke_owner(owner);
+            owned_.clear();
+            return Result<void>(r->errc(), r->context());
+        }
     }
-    (void)pm_;   // M4 manager wiring retained for queue->thread mapping
+    auto observer = pm_.add_process_exit_observer(
+        [this](std::uint64_t process_id) { release_process(process_id); });
+    if (!observer.ok()) {
+        (void)api_reg_.revoke_owner(owner);
+        owned_.clear();
+        return Result<void>(observer.errc(), observer.context());
+    }
+    process_exit_observer_id_ = observer.value();
     return Result<void>::ok_result();
 }
 
 Result<void> TaskQueueService::on_shutdown() {
-    const auto revoked = api_reg_.revoke_owner(id());
-    owned_.clear();
-    if (!revoked.ok()) {
-        return Result<void>(revoked.errc(), revoked.context());
+    Result<void> observer_removed = Result<void>::ok_result();
+    if (process_exit_observer_id_ != 0) {
+        observer_removed = pm_.remove_process_exit_observer(process_exit_observer_id_);
+        process_exit_observer_id_ = 0;
     }
+    const auto revoked = api_reg_.revoke_owner(id());
+    {
+        std::lock_guard lock(lock_);
+        queues_.clear();
+    }
+    owned_.clear();
+    if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
+        return Result<void>(observer_removed.errc(), observer_removed.context());
+    }
+    if (!revoked.ok()) return Result<void>(revoked.errc(), revoked.context());
     return Result<void>::ok_result();
 }
 
-Result<std::uint64_t> TaskQueueService::create_queue(std::uint32_t work_mode,
-                                                    std::uint32_t completion_mode) {
-    const auto mode_ok = [](std::uint32_t m) {
-        const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
-        const auto immediate = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Immediate);
-        const auto pool = static_cast<std::uint32_t>(XTaskQueueDispatchMode::ThreadPool);
-        return m == manual || m == immediate || m == pool;
-    };
-    if (!mode_ok(work_mode) || !mode_ok(completion_mode)) {
-        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
-                                     "unknown XTaskQueueDispatchMode value");
+Result<std::uint64_t> TaskQueueService::create_queue(
+    std::uint64_t process_id, std::uint32_t work_mode,
+    std::uint32_t completion_mode) {
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    if (work_mode != manual || completion_mode != manual) {
+        return Result<std::uint64_t>(
+            RuntimeErrc::InvalidArgument,
+            "only manual dispatch mode is implemented; other modes require callback scheduling");
     }
     std::lock_guard lock(lock_);
-    const std::uint64_t id = next_id_++;
+    if (next_id_ == 0 || next_id_ == UINT64_MAX) {
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "task queue handle space exhausted");
+    }
+    const std::uint64_t queue_id = next_id_++;
     Queue q;
+    q.owner_process_id = process_id;
     q.work_mode = work_mode;
     q.completion_mode = completion_mode;
-    queues_[id] = q;
-    return Result<std::uint64_t>(id);
+    queues_.emplace(queue_id, q);
+    return Result<std::uint64_t>(queue_id);
 }
 
-Result<bool> TaskQueueService::dispatch(std::uint64_t queue_id,
-                                        XTaskQueuePort port,
-                                        std::uint32_t timeout_ms) {
+Result<bool> TaskQueueService::dispatch(
+    std::uint64_t process_id, std::uint64_t queue_id,
+    XTaskQueuePort port, std::uint32_t timeout_ms) {
     std::lock_guard lock(lock_);
     const auto it = queues_.find(queue_id);
     if (it == queues_.end()) {
         return Result<bool>(RuntimeErrc::NotFound, "unknown queue handle");
     }
-    if (it->second.terminated) {
-        return Result<bool>(false);   // documented: false when terminated
+    if (it->second.owner_process_id != process_id) {
+        return Result<bool>(RuntimeErrc::InvalidHandle,
+                            "task queue handle belongs to another process");
     }
-    (void)port;
-    (void)timeout_ms;   // no callbacks exist to wait for: honest false
+    if (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion) {
+        return Result<bool>(RuntimeErrc::InvalidArgument,
+                            "unknown XTaskQueuePort value");
+    }
+    if (it->second.terminated) return Result<bool>(false);
+    (void)timeout_ms;  // no callback submissions exist in this compatibility slice
     return Result<bool>(false);
 }
 
-Result<void> TaskQueueService::close_queue(std::uint64_t queue_id) {
+Result<void> TaskQueueService::close_queue(
+    std::uint64_t process_id, std::uint64_t queue_id) {
     std::lock_guard lock(lock_);
     const auto it = queues_.find(queue_id);
     if (it == queues_.end()) {
         return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
     }
-    if (--it->second.ref_count == 0) {
-        queues_.erase(it);
+    if (it->second.owner_process_id != process_id) {
+        return Result<void>(RuntimeErrc::InvalidHandle,
+                            "task queue handle belongs to another process");
     }
+    queues_.erase(it);
     return Result<void>::ok_result();
 }
 
-Result<void> TaskQueueService::terminate_queue(std::uint64_t queue_id, bool wait) {
+Result<void> TaskQueueService::terminate_queue(
+    std::uint64_t process_id, std::uint64_t queue_id, bool wait) {
     std::lock_guard lock(lock_);
     const auto it = queues_.find(queue_id);
     if (it == queues_.end()) {
         return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
     }
-    it->second.terminated = true;   // documented: submissions fail E_ABORT
-    (void)wait;   // no callbacks to drain: termination is immediate here
+    if (it->second.owner_process_id != process_id) {
+        return Result<void>(RuntimeErrc::InvalidHandle,
+                            "task queue handle belongs to another process");
+    }
+    it->second.terminated = true;
+    (void)wait;  // no callback work exists to drain in this partial model
     return Result<void>::ok_result();
+}
+
+void TaskQueueService::release_process(std::uint64_t process_id) {
+    std::lock_guard lock(lock_);
+    for (auto it = queues_.begin(); it != queues_.end();) {
+        if (it->second.owner_process_id == process_id) it = queues_.erase(it);
+        else ++it;
+    }
 }
 
 std::size_t TaskQueueService::live_queues() const {

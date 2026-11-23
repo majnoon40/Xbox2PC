@@ -78,3 +78,24 @@ Process-exit callbacks execute while the manager lock is held. Unregistration
 therefore waits for any active callback before returning, preventing a service
 from being destroyed while its callback is in flight. Callbacks must be short,
 non-throwing, and must not re-enter `ProcessManager`.
+
+
+## M10.3 implementation slice — task-queue ownership and teardown
+
+- Task-queue handles are now scoped to the creating process identity; dispatch,
+  termination, and close reject a handle presented by another process.
+- Only manual/manual queues are accepted. Immediate and thread-pool modes are
+  explicitly rejected rather than represented by a queue that cannot schedule
+  callbacks.
+- Dispatch validates the Work/Completion port enum. It still reports an empty
+  queue because guest callback submission/execution is not implemented.
+- Process-exit observation removes all queues owned by a successfully
+  terminated process. Service shutdown unregisters the observer and clears
+  remaining queues.
+- Partial service initialization revokes any API registrations already made.
+- Tests cover cross-process handle misuse, invalid ports, close behavior, and
+  automatic queue cleanup after process termination.
+
+This is not full XTaskQueue compatibility: callback submission, callback
+execution, duplicate handles, and real wait/dispatch scheduling remain outside
+this slice and must stay reported as partial.
