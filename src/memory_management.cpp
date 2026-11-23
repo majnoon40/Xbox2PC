@@ -295,7 +295,8 @@ Result<void> AddressSpace::commit_region(std::uint64_t xbox_va) {
 }
 
 Result<void> AddressSpace::commit_range(std::uint64_t xbox_va,
-                                        std::uint64_t size) {
+                                        std::uint64_t size,
+                                        MemProtect protection) {
     if (size == 0 || !is_page_aligned(xbox_va) || size % page_size_ != 0 ||
         xbox_va > (~0ull) - size)
         return Result<void>(RuntimeErrc::InvalidArgument,
@@ -308,17 +309,27 @@ Result<void> AddressSpace::commit_range(std::uint64_t xbox_va,
     --it;
     const auto allocation = it->second.allocation_base;
     std::uint64_t cursor = xbox_va;
+    struct Range { std::uint64_t start; std::uint64_t size; };
+    std::vector<Range> to_commit;
     for (; cursor < end; ++it) {
         if (it == impl_->regions.end() || it->first > cursor ||
             cursor - it->first >= it->second.size ||
-            it->second.allocation_base != allocation ||
-            it->second.state != RegionState::Reserved)
+            it->second.allocation_base != allocation)
             return Result<void>(RuntimeErrc::InvalidState,
-                                "commit range must lie in one reserved allocation");
-        cursor = std::min(end, it->first + it->second.size);
+                                "commit range must lie in one reservation");
+        const auto segment_end = it->first + it->second.size;
+        const auto covered_end = std::min(end, segment_end);
+        if (it->second.state == RegionState::Reserved)
+            to_commit.push_back({cursor, covered_end - cursor});
+        cursor = covered_end;
     }
+    if (to_commit.empty()) return Result<void>::ok_result();
     if (impl_->host == nullptr)
         return Result<void>(RuntimeErrc::OutOfResources, "no backing mapping");
+    std::uint64_t new_bytes = 0;
+    for (const auto& range : to_commit)
+        new_bytes = range.size > (~0ull) - new_bytes
+            ? ~0ull : new_bytes + range.size;
     if (limits_.max_committed_bytes != 0) {
         std::uint64_t used = 0;
         for (const auto& [va, region] : impl_->regions) {
@@ -327,19 +338,41 @@ Result<void> AddressSpace::commit_range(std::uint64_t xbox_va,
                 used = region.size > (~0ull) - used ? ~0ull : used + region.size;
         }
         if (used > limits_.max_committed_bytes ||
-            size > limits_.max_committed_bytes - used)
+            new_bytes > limits_.max_committed_bytes - used)
             return Result<void>(RuntimeErrc::OutOfResources,
                                 "committed-bytes limit exceeded");
     }
-    const auto host_ok = impl_->host->commit_subrange(xbox_va - xbox_base_, size);
-    if (!host_ok.ok()) return Result<void>(host_ok.errc(), host_ok.context());
+
+    std::vector<Range> committed;
+    for (const auto& range : to_commit) {
+        const auto host_ok = impl_->host->commit_subrange(
+            range.start - xbox_base_, range.size);
+        if (!host_ok.ok()) {
+            for (const auto& done : committed)
+                (void)impl_->host->decommit_subrange(done.start - xbox_base_, done.size);
+            return Result<void>(host_ok.errc(), host_ok.context());
+        }
+        const auto protected_ok = apply_subrange_protect(
+            *impl_->host, range.start - xbox_base_, range.size, protection);
+        if (!protected_ok.ok()) {
+            (void)impl_->host->decommit_subrange(range.start - xbox_base_, range.size);
+            for (const auto& done : committed)
+                (void)impl_->host->decommit_subrange(done.start - xbox_base_, done.size);
+            return Result<void>(protected_ok.errc(), protected_ok.context());
+        }
+        committed.push_back(range);
+    }
+
     if (!split_region_at(impl_->regions, xbox_va) ||
         !split_region_at(impl_->regions, end))
-        return Result<void>(RuntimeErrc::InvalidState, "failed to split committed range metadata");
+        return Result<void>(RuntimeErrc::InvalidState,
+                            "failed to split committed range metadata");
     for (auto page = impl_->regions.lower_bound(xbox_va);
          page != impl_->regions.end() && page->first < end; ++page) {
-        page->second.state = RegionState::Committed;
-        page->second.protection = MemProtect::ReadWrite;
+        if (page->second.state == RegionState::Reserved) {
+            page->second.state = RegionState::Committed;
+            page->second.protection = protection;
+        }
     }
     return Result<void>::ok_result();
 }
