@@ -1307,7 +1307,11 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
     const auto cancelled = [&guest_thread]() {
         auto* object = guest_thread.get();
         auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
-        return thread != nullptr && thread->stop_requested();
+        if (thread == nullptr) return false;
+        // A wait is a cooperative safe point too: process suspension parks
+        // here without converting it into terminal cancellation.
+        if (!thread->suspension_point()) return true;
+        return thread->stop_requested();
     };
 
     auto* value = object.value().get();
