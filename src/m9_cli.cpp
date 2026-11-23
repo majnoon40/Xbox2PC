@@ -382,8 +382,17 @@ int run_m9_binary_cli(int argc, char** argv) {
 
     const auto validation =
         xbox2pc::validation::validate_pe(bytes->data(), bytes->size(), path);
-    const auto analysis =
-        xbox2pc::analysis::analyze_pe(bytes->data(), bytes->size(), path);
+    // Only commands that emit instruction analysis or compatibility data need
+    // the potentially expensive linear scan. Metadata-only commands must not
+    // scan every executable byte as a side effect.
+    const bool needs_analysis =
+        command == "binary-analyze" || command == "binary-instructions" ||
+        command == "binary-compat" || command == "binary-report";
+    xbox2pc::analysis::AnalysisReport analysis;
+    if (needs_analysis) {
+        analysis = xbox2pc::analysis::analyze_pe(
+            bytes->data(), bytes->size(), path);
+    }
 
     Json result = Json::object();
     result.set("tool", "xbox2pc");
