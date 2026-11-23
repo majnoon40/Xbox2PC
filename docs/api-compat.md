@@ -288,4 +288,4 @@ mirrored).
 
 ## Current execution boundary
 
-The M8 execution-context foundation is present: guest CPU state, ABI marshalling, a bounded interpreter, TLS callback execution, and controlled entry-point invocation. M10 expands selected Game OS services but still lacks scheduler-aware waits, complete guest-thread lifecycle integration, full task-queue callback execution, broad system-service coverage, and full virtual-memory subrange semantics. A successful import resolution or partial guest execution does not establish that a retail Xbox game can boot.
+The M8 execution-context foundation is present: guest CPU state, ABI marshalling, a bounded interpreter, TLS callback execution, and controlled entry-point invocation. M10 expands selected Game OS services but still lacks scheduler-aware waits, complete guest-thread lifecycle integration, full task-queue callback execution, broad system-service coverage, and full Win32 virtual-memory semantics. A successful import resolution or partial guest execution does not establish that a retail Xbox game can boot.
