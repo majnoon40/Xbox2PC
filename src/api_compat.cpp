@@ -427,7 +427,42 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         add(a);
     }
 
-    // — kernel32 (Win32 timing; evidence: MS-QPC pages) —
+        // Callback submission is described and resolvable as metadata, but
+    // guest callback execution and queue scheduling are not implemented.
+    {
+        ApiDescriptor a;
+        a.library = "xgameruntime";
+        a.export_name = "XTaskQueueSubmitCallback";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT XTaskQueueSubmitCallback(XTaskQueueHandle queue, XTaskQueuePort port, void* callbackContext, XTaskQueueCallback* callback)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::Unsupported;
+        a.evidence = "[GDK-TQ]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/xtaskqueue_members?view=gdk-2604";
+        a.notes = "documented callback submission API; guest callback invocation, queue-held callback references, cancellation delivery, and dispatch scheduling are not implemented";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "xgameruntime";
+        a.export_name = "XTaskQueueSubmitDelayedCallback";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 5;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT XTaskQueueSubmitDelayedCallback(XTaskQueueHandle queue, XTaskQueuePort port, uint32_t delayMs, void* callbackContext, XTaskQueueCallback* callback)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::Unsupported;
+        a.evidence = "[GDK-TQ]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xtaskqueue/xtaskqueue_members?view=gdk-2604";
+        a.notes = "documented delayed callback API; timer scheduling and guest callback invocation are not implemented";
+        add(a);
+    }
+
+// — kernel32 (Win32 timing; evidence: MS-QPC pages) —
     {
         ApiDescriptor a;
         a.library = "kernel32";
