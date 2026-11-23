@@ -975,6 +975,14 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
             "VirtualAlloc supports MEM_RESERVE, MEM_COMMIT on an exact reserved region, and MEM_RESERVE|MEM_COMMIT");
     auto decoded = decode_win32_page_protection(protection);
     if (!decoded.ok()) return Result<std::uint64_t>(decoded.errc(), decoded.context());
+    // Enforce W^X before changing reservation or commit state. This applies
+    // equally to MEM_COMMIT and MEM_RESERVE|MEM_COMMIT; otherwise the combined
+    // form could bypass the policy used by the separate reserve/commit paths.
+    if (decoded.value() == MemProtect::Full &&
+        !process_manager_.limits().allow_wx_pages) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "RWX protection requires allow_wx_pages");
+    }
     if (allocation_type == kCommit) {
         if (address == 0)
             return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
@@ -994,10 +1002,6 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
     auto reserved = process_manager_.reserve_region_by_pid(pid, size, "VirtualAlloc");
     if (!reserved.ok()) return reserved;
     if (allocation_type == kReserve) {
-        if (decoded.value() == MemProtect::Full && !process_manager_.limits().allow_wx_pages) {
-            (void)process_manager_.release_region_by_pid(pid, reserved.value());
-            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "RWX protection requires allow_wx_pages");
-        }
         return reserved;
     }
     auto committed = process_manager_.commit_region_by_pid(pid, reserved.value(), size);

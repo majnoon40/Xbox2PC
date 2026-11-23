@@ -115,3 +115,14 @@ Inferred (xbox2pc design decisions — no Xbox documentation consulted):
 ## Guest decommit model
 
 AddressSpace now supports decommitting one complete tracked region: it protects the host subrange as inaccessible and transitions the descriptor from Committed back to Reserved. This is the runtime's current MEM_DECOMMIT model; partial-page-range decommit and physical-page discard/recommit fidelity are not claimed.
+
+
+## M10 VirtualAlloc W^X enforcement
+
+The Win32 VirtualAlloc adapter applies the runtime's W^X policy before
+mutating address-space state. PAGE_EXECUTE_READWRITE is rejected for
+MEM_RESERVE, MEM_COMMIT, and MEM_RESERVE | MEM_COMMIT unless the runtime's
+explicit allow_wx_pages policy is enabled. In particular, the combined
+reserve-and-commit form must not bypass the same protection gate used by the
+separate reserve/commit paths. Regression coverage verifies that a rejected
+commit leaves the existing reservation intact and uncommitted.

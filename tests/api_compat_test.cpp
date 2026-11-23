@@ -843,6 +843,56 @@ TEST(GdkServiceTest, Win32VirtualMemoryLifecycle) {
     EXPECT_EQ(stats.reserved_bytes, 0u); EXPECT_EQ(stats.committed_bytes, 0u);
 }
 
+TEST(GdkServiceTest, VirtualAllocEnforcesWxPolicyForEveryAllocationForm) {
+    ApiWorld w;
+    (void)w.new_process("virtual-memory-wx.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "virtual-memory-wx.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.arg_count = 4;
+    ctx.args[0] = 0;
+    ctx.args[1] = 0x2000;
+    ctx.args[2] = 0x3000;  // MEM_RESERVE | MEM_COMMIT
+    ctx.args[3] = 0x40;    // PAGE_EXECUTE_READWRITE
+    const auto combined = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(combined.ok);
+    EXPECT_EQ(combined.return_value, 0u);
+
+    ctx.args[2] = 0x2000;  // MEM_RESERVE only
+    ctx.args[3] = 0x04;    // PAGE_READWRITE
+    const auto reserved = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(reserved.ok);
+    ASSERT_NE(reserved.return_value, 0u);
+    const auto base = reserved.return_value;
+
+    ctx.args[0] = base;
+    ctx.args[2] = 0x1000;  // MEM_COMMIT into the existing reservation
+    ctx.args[3] = 0x40;    // PAGE_EXECUTE_READWRITE
+    const auto commit = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(commit.ok);
+    EXPECT_EQ(commit.return_value, 0u);
+
+    const auto stats = w.pm.process_stats(w.last_handle);
+    EXPECT_EQ(stats.reserved_bytes, 0x2000u);
+    EXPECT_EQ(stats.committed_bytes, 0u);
+
+    ctx.arg_count = 3;
+    ctx.args[0] = base;
+    ctx.args[1] = 0;
+    ctx.args[2] = 0x8000;  // MEM_RELEASE
+    const auto released = w.reg.dispatch("kernel32", "VirtualFree", ctx);
+    ASSERT_TRUE(released.ok);
+    EXPECT_EQ(released.return_value, 1u);
+}
+
 TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     ApiWorld w;
     (void)w.new_process("virtual-memory-reserve.exe");
