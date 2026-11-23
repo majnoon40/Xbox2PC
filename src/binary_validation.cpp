@@ -222,24 +222,22 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
     if (!directory_pair_valid(xbox2pc::pe::kDirReloc)) {
         relocations.status = StageStatus::Failed;
         relocations.findings.push_back("relocation directory has an inconsistent RVA/size pair");
-    }
-    const auto relocation_blocks = xbox2pc::rt::loader::decode_relocations(
-        image, data, size, xbox2pc::rt::loader::kMaxRelocEntries);
-    if (!directory_pair_valid(xbox2pc::pe::kDirReloc)) {
-        // The directory-pair failure above is authoritative; do not reinterpret
-        // the zero-sized directory as a valid empty relocation table.
-    } else if (!relocation_blocks.ok()) {
-        relocations.status = StageStatus::Failed;
-        relocations.findings.push_back(relocation_blocks.error_string());
     } else {
-        std::uint64_t entries = 0;
-        for (const auto& block : relocation_blocks.value()) {
-            entries += block.entries.size();
+        const auto relocation_blocks = xbox2pc::rt::loader::decode_relocations(
+            image, data, size, xbox2pc::rt::loader::kMaxRelocEntries);
+        if (!relocation_blocks.ok()) {
+            relocations.status = StageStatus::Failed;
+            relocations.findings.push_back(relocation_blocks.error_string());
+        } else {
+            std::uint64_t entries = 0;
+            for (const auto& block : relocation_blocks.value()) {
+                entries += block.entries.size();
+            }
+            relocations.findings.push_back(
+                std::to_string(relocation_blocks.value().size()) +
+                " relocation block(s), " + std::to_string(entries) +
+                " entry/entries decoded; no relocations applied");
         }
-        relocations.findings.push_back(
-            std::to_string(relocation_blocks.value().size()) +
-            " relocation block(s), " + std::to_string(entries) +
-            " entry/entries decoded; no relocations applied");
     }
     report.stages.push_back(std::move(relocations));
 
@@ -250,23 +248,22 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
     if (!directory_pair_valid(xbox2pc::pe::kDirTls)) {
         tls.status = StageStatus::Failed;
         tls.findings.push_back("TLS directory has an inconsistent RVA/size pair");
-    }
-    const auto tls_info = xbox2pc::rt::loader::decode_tls(
-        image, data, size, tls_diagnostics);
-    if (!directory_pair_valid(xbox2pc::pe::kDirTls)) {
-        // Do not reinterpret a malformed zero-sized directory as absent TLS.
-    } else if (!tls_info.ok()) {
-        tls.status = StageStatus::Failed;
-        tls.findings.push_back(tls_info.error_string());
-    } else if (!tls_info.value().has_value()) {
-        tls.findings.push_back("no TLS directory");
     } else {
-        tls.findings.push_back(
-            std::to_string(tls_info.value()->callback_count) +
-            " TLS callback(s) validated; execution not tested");
-        tls.findings.push_back(
-            "TLS template size " +
-            std::to_string(tls_info.value()->template_size) + " bytes");
+        const auto tls_info = xbox2pc::rt::loader::decode_tls(
+            image, data, size, tls_diagnostics);
+        if (!tls_info.ok()) {
+            tls.status = StageStatus::Failed;
+            tls.findings.push_back(tls_info.error_string());
+        } else if (!tls_info.value().has_value()) {
+            tls.findings.push_back("no TLS directory");
+        } else {
+            tls.findings.push_back(
+                std::to_string(tls_info.value()->callback_count) +
+                " TLS callback(s) validated; execution not tested");
+            tls.findings.push_back(
+                "TLS template size " +
+                std::to_string(tls_info.value()->template_size) + " bytes");
+        }
     }
     report.stages.push_back(std::move(tls));
 
