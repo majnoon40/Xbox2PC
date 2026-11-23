@@ -698,14 +698,26 @@ public:
 
     Result<std::uint64_t> read(void* buf, std::uint64_t len) override {
         if (fd_ < 0) return Result<std::uint64_t>(RuntimeErrc::InvalidState, "closed");
-        const ssize_t n = ::read(fd_, buf, static_cast<std::size_t>(len));
+        if (len == 0) return Result<std::uint64_t>(0);
+        if (buf == nullptr) {
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "null read buffer");
+        }
+        const std::uint64_t bounded =
+            std::min<std::uint64_t>(len, static_cast<std::uint64_t>(SSIZE_MAX));
+        const ssize_t n = ::read(fd_, buf, static_cast<std::size_t>(bounded));
         if (n < 0) return Result<std::uint64_t>(RuntimeErrc::IoError, errno_string("read"));
         return Result<std::uint64_t>(static_cast<std::uint64_t>(n));
     }
 
     Result<std::uint64_t> write(const void* buf, std::uint64_t len) override {
         if (fd_ < 0) return Result<std::uint64_t>(RuntimeErrc::InvalidState, "closed");
-        const ssize_t n = ::write(fd_, buf, static_cast<std::size_t>(len));
+        if (len == 0) return Result<std::uint64_t>(0);
+        if (buf == nullptr) {
+            return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "null write buffer");
+        }
+        const std::uint64_t bounded =
+            std::min<std::uint64_t>(len, static_cast<std::uint64_t>(SSIZE_MAX));
+        const ssize_t n = ::write(fd_, buf, static_cast<std::size_t>(bounded));
         if (n < 0) return Result<std::uint64_t>(RuntimeErrc::IoError, errno_string("write"));
         return Result<std::uint64_t>(static_cast<std::uint64_t>(n));
     }
