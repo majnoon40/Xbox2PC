@@ -140,22 +140,22 @@ core never leaks or hangs at teardown.
 ## Build and test
 
 ```
-cmake -S xbox2pc -B xbox2pc/build -G Ninja
-cmake --build xbox2pc/build
-ctest --test-dir xbox2pc/build            # 129 tests, 3 suites
+cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build               # 19 targets, 296 gtest cases
 
 # sanitizers
-cmake -S xbox2pc -B xbox2pc/build-asan -G Ninja \
+cmake -S . -B build-asan -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
-cmake --build xbox2pc/build-asan --target runtime_test
-xbox2pc/build-asan/tests/runtime_test
+cmake --build build-asan --target runtime_test
+build-asan/tests/runtime_test
 
-cmake -S xbox2pc -B xbox2pc/build-tsan -G Ninja \
+cmake -S . -B build-tsan -G Ninja \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g"
-cmake --build xbox2pc/build-tsan --target runtime_test
-xbox2pc/build-tsan/tests/runtime_test
+cmake --build build-tsan --target runtime_test
+build-tsan/tests/runtime_test
 ```
 
 Toolchain: C++20, CMake ≥ 3.20, g++ 14.2 (Linux host backend).

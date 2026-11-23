@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.build_type }} · ${{ matrix.compiler }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        build_type: [Release, Debug]
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler == 'gcc' && 'gcc' || 'clang' }}
+      CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            sudo apt-get install -y clang
+          else
+            sudo apt-get install -y g++
+          fi
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_INSTALL_PREFIX=/usr/local
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  sanitize:
+    name: ASan + UBSan
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      - name: Configure (AddressSanitizer + UndefinedBehaviorSanitizer)
+        run: cmake -S . -B build-asan -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build (test binaries)
+        run: cmake --build build-asan
+
+      - name: Test
+        run: ctest --test-dir build-asan --output-on-failure
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
