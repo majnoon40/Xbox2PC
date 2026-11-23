@@ -951,6 +951,7 @@ TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
     context.cpu_mut().set_reg(cpu::Gpr::Sp, context.info().stack_top - 0x20);
     context.cpu_mut().rip = request.entry_va;
     std::atomic<bool> interrupted{false};
+    std::atomic<bool> entered_invoke{false};
     std::atomic<bool> finished{false};
     std::atomic<int> outcome{static_cast<int>(Outcome::Faulted)};
     struct RunnerState {
@@ -958,13 +959,16 @@ TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
         DeterministicBackend* backend;
         ExecutionRequest* request;
         std::atomic<bool>* interrupted;
+        std::atomic<bool>* entered_invoke;
         std::atomic<bool>* finished;
         std::atomic<int>* outcome;
-    } runner{&context, &backend, &request, &interrupted, &finished, &outcome};
+    } runner{&context, &backend, &request, &interrupted, &entered_invoke,
+             &finished, &outcome};
 
     auto handle = world.core.create_thread(
         [](RtThread&, void* raw) -> void* {
             auto& run = *static_cast<RunnerState*>(raw);
+            run.entered_invoke->store(true, std::memory_order_release);
             const auto result = run.context->invoke(*run.request, *run.backend,
                                                      *run.interrupted);
             run.outcome->store(result.ok()
@@ -981,6 +985,13 @@ TEST(ExecutionControlTest, ManagedThreadSuspendResumeControlsGuestBackend) {
     ASSERT_NE(thread, nullptr);
     ASSERT_TRUE(context.bind_thread_control(thread->execution_control()).ok());
     ASSERT_TRUE(thread->start().ok());
+    const auto entry_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::seconds(2);
+    while (!entered_invoke.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < entry_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(entered_invoke.load(std::memory_order_acquire));
     ASSERT_TRUE(thread->suspend().ok());
 
     const auto deadline = std::chrono::steady_clock::now() +
@@ -1572,7 +1583,9 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
     LoadedGuest guest(w, code, "import-map.exe", true);
     ASSERT_TRUE(guest.load_ok) << guest.load_error;
 
-    auto loaded_ref = w.core.objects().lookup_handle(guest.image);
+    // Loaded images are owned by the process handle table, not the
+    // global object-manager handle table.
+    auto loaded_ref = guest.proc->handle_table().lookup(guest.image);
     ASSERT_TRUE(loaded_ref.ok());
     auto* loaded = loaded_ref.value().get()->as<loader::LoadedImageObject>();
     ASSERT_NE(loaded, nullptr);
