@@ -1476,58 +1476,6 @@ Result<Handle> ImageLoader::load_image(ProcessManager& pm, ObjectManager& mgr,
         // when the directory is present and the raw walker yields no entries.
         // This keeps a structurally parsed import table from being silently
         // treated as an image with no imports.
-        std::optional<pe::PeImage> reparsed_import_image;
-        const pe::PeImage* import_metadata = &img;
-        if (bindings.empty()) {
-            // Reparse the immutable source buffer for the fallback rather
-            // than relying on possibly stale/mismatched cached table views.
-            // The caller's parsed image remains authoritative for mapping;
-            // this pass is only a consistency recovery for import metadata.
-            diag::Diagnostics import_parse_diagnostics;
-            try {
-                reparsed_import_image.emplace(pe::parse(
-                    file, file_size, img.source_name, import_parse_diagnostics));
-                import_metadata = &*reparsed_import_image;
-            } catch (const pe::ParseError&) {
-                // Preserve the primary loader result; malformed metadata
-                // simply means there is no safe fallback to apply.
-            }
-        }
-        if (bindings.empty() && import_metadata->imports.present &&
-            !import_metadata->imports.entries.empty()) {
-            for (const auto& entry : import_metadata->imports.entries) {
-                std::uint64_t slot = 0;
-                const auto append_binding = [&](ImportLookup lookup) {
-                    ImportBinding binding = resolver->resolve(lookup);
-                    std::uint64_t slot_offset = 0;
-                    if (slot > UINT64_MAX / 8 ||
-                        !add_ok(entry.iat_rva, slot * 8, slot_offset) ||
-                        slot_offset > img.opt.size_of_image ||
-                        img.opt.size_of_image - slot_offset < 8 ||
-                        out.layout.actual_base > UINT64_MAX - slot_offset) {
-                        binding.status = ImportStatus::Invalid;
-                        binding.note = "parsed import IAT slot is outside the image";
-                    } else {
-                        binding.iat_va = out.layout.actual_base + slot_offset;
-                    }
-                    bindings.push_back(std::move(binding));
-                    ++slot;
-                };
-                for (const auto& function : entry.functions) {
-                    ImportLookup lookup;
-                    lookup.dll = entry.dll_name;
-                    lookup.symbol = function;
-                    append_binding(std::move(lookup));
-                }
-                for (const auto ordinal : entry.ordinal_only) {
-                    ImportLookup lookup;
-                    lookup.dll = entry.dll_name;
-                    lookup.by_ordinal = true;
-                    lookup.ordinal = ordinal;
-                    append_binding(std::move(lookup));
-                }
-            }
-        }
     } else if (img.imports.present) {
         // No resolver: enumerate via M1 metadata as Unresolved (explicit;
         // loading then fails below when imports exist — never a silent 0).
