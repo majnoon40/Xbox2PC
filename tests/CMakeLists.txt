@@ -229,6 +229,22 @@ target_link_libraries(binary_validation_test PRIVATE
 target_compile_features(binary_validation_test PRIVATE cxx_std_20)
 add_test(NAME binary_validation_test COMMAND binary_validation_test)
 
+
+# M9: deterministic decoder/PE/static-analysis mutation fuzzing.
+add_executable(m9_fuzz_test m9_fuzz_test.cpp)
+target_link_libraries(m9_fuzz_test PRIVATE
+    xbox2pc_rt_x64_decoder xbox2pc_rt_binary_validation
+    xbox2pc_rt_static_analysis xbox2pc_pe_builder gtest)
+target_compile_features(m9_fuzz_test PRIVATE cxx_std_20)
+add_test(NAME m9_fuzz_test COMMAND m9_fuzz_test)
+
+# M9: synthetic decoder/validation/static-analysis benchmarks (manual).
+add_executable(m9_bench m9_bench.cpp)
+target_link_libraries(m9_bench PRIVATE
+    xbox2pc_rt_x64_decoder xbox2pc_rt_binary_validation
+    xbox2pc_rt_static_analysis xbox2pc_pe_builder)
+target_compile_features(m9_bench PRIVATE cxx_std_20)
+
 # M9: conservative static instruction analysis.
 add_executable(static_analysis_test static_analysis_test.cpp)
 target_link_libraries(static_analysis_test PRIVATE
