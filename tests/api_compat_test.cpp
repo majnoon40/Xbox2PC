@@ -1364,6 +1364,89 @@ TEST(GdkServiceTest, Win32VirtualMemoryReserveAndFlagValidation) {
     EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
 }
 
+TEST(GdkServiceTest, Win32VirtualMemorySupportsPartialPageRanges) {
+    ApiWorld w;
+    (void)w.new_process("virtual-memory-partial.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "virtual-memory-partial.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module, xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.arg_count = 4;
+    ctx.args[0] = 0;
+    ctx.args[1] = 4 * 4096;
+    ctx.args[2] = 0x2000; // MEM_RESERVE
+    ctx.args[3] = 0x04;   // PAGE_READWRITE
+    const auto reserved = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(reserved.ok);
+    ASSERT_NE(reserved.return_value, 0u);
+    const auto base = reserved.return_value;
+
+    // Commit a two-page subrange beginning one page into the reservation.
+    ctx.args[0] = base + 4096;
+    ctx.args[1] = 2 * 4096;
+    ctx.args[2] = 0x1000; // MEM_COMMIT
+    const auto committed = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(committed.ok);
+    EXPECT_EQ(committed.return_value, base + 4096);
+
+    // Change protection on just the first committed page.
+    ctx.arg_count = 4;
+    ctx.args[0] = base + 4096;
+    ctx.args[1] = 4096;
+    ctx.args[2] = 0x02; // PAGE_READONLY
+    ctx.args[3] = 0x1000; // old protection output pointer
+    const auto protected_range = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(protected_range.ok);
+    EXPECT_EQ(protected_range.return_value, 1u);
+    ASSERT_EQ(protected_range.out_bytes_size, 4u);
+    EXPECT_EQ(protected_range.out_bytes[0], 0x04u); // previous PAGE_READWRITE
+
+    // Decommit the second page only, preserving the first page's protection.
+    ctx.arg_count = 3;
+    ctx.args[0] = base + 2 * 4096;
+    ctx.args[1] = 4096;
+    ctx.args[2] = 0x4000; // MEM_DECOMMIT
+    const auto decommitted = w.reg.dispatch("kernel32", "VirtualFree", ctx);
+    ASSERT_TRUE(decommitted.ok);
+    EXPECT_EQ(decommitted.return_value, 1u);
+
+    // Query all three segments independently.
+    ctx.arg_count = 3;
+    ctx.args[0] = base;
+    ctx.args[1] = 0x100000;
+    ctx.args[2] = 48;
+    auto q = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(q.ok);
+    EXPECT_EQ(q.out_bytes[32], 0x00u);
+    EXPECT_EQ(q.out_bytes[33], 0x20u); // MEM_RESERVE
+    ctx.args[0] = base + 4096;
+    q = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(q.ok);
+    EXPECT_EQ(q.out_bytes[32], 0x00u);
+    EXPECT_EQ(q.out_bytes[33], 0x10u); // MEM_COMMIT
+    EXPECT_EQ(q.out_bytes[36], 0x02u); // PAGE_READONLY
+    ctx.args[0] = base + 2 * 4096;
+    q = w.reg.dispatch("kernel32", "VirtualQuery", ctx);
+    ASSERT_TRUE(q.ok);
+    EXPECT_EQ(q.out_bytes[32], 0x00u);
+    EXPECT_EQ(q.out_bytes[33], 0x20u); // MEM_RESERVE
+
+    // MEM_RELEASE still accepts only the original allocation base and frees
+    // every metadata segment produced by partial operations.
+    ctx.args[0] = base + 4096;
+    ctx.args[1] = 0;
+    ctx.args[2] = 0x8000;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 0u);
+    ctx.args[0] = base;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "VirtualFree", ctx).return_value, 1u);
+}
+
 TEST(GdkServiceTest, VirtualQueryPreservesReservedAllocationProtection) {
     ApiWorld w;
     (void)w.new_process("virtual-query-allocation-protect.exe");
