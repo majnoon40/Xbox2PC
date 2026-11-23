@@ -497,6 +497,7 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     //   XTaskQueueTerminate(queue, bool, ptr, ptr)     -> int, int, ptr, ptr
     //   QueryPerformanceCounter(ptr)                   -> ptr out, BOOL
     //   QueryPerformanceFrequency(ptr)                 -> ptr out, BOOL
+    //   WaitForMultipleObjects(count, handles, waitAll, timeout) -> wait-any subset
     const std::string id = d.export_name;
     auto int_arg = [&] { abi::ArgSpec a; a.kind = abi::ArgKind::Int; return a; };
     auto ptr_in = [&](std::uint64_t sz) {
