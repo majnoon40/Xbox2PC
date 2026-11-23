@@ -898,7 +898,7 @@ Result<std::vector<PalDirEntry>> list_host_directory(const std::string& host_pat
         } else if (de->d_type == DT_UNKNOWN || de->d_type == DT_REG) {
             struct stat st {};
             const std::string full = host_path + "/" + name;
-            if (::stat(full.c_str(), &st) == 0) {
+            if (::lstat(full.c_str(), &st) == 0) {
                 e.is_directory = S_ISDIR(st.st_mode);
             } else {
                 e.is_directory = false;  // unstatable entry: report as file
@@ -920,12 +920,13 @@ Result<std::vector<PalDirEntry>> list_host_directory(const std::string& host_pat
 }
 
 Result<void> remove_host_tree(const std::string& host_path) {
-    auto st = stat_host_path(host_path);
-    if (!st.ok()) {
-        auto r = Result<void>(st.errc(), st.context());
-        return r;
+    // lstat, not stat: a symlink to a directory must be unlinked, never
+    // recursively traversed outside the requested tree.
+    struct stat root_st {};
+    if (::lstat(host_path.c_str(), &root_st) != 0) {
+        return errno_dir_result("lstat", errno);
     }
-    if (!st.value().is_directory) {
+    if (S_ISLNK(root_st.st_mode) || !S_ISDIR(root_st.st_mode)) {
         return remove_host_file(host_path);
     }
     auto listing = list_host_directory(host_path);
