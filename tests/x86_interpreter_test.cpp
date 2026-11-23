@@ -182,29 +182,27 @@ TEST_F(X86SemanticsTest, RclOverflowUsesCarryFlag) {
     EXPECT_TRUE(of());
 }
 
-TEST_F(X86SemanticsTest, MemoryXchgIsRejectedAsImplicitlyAtomic) {
+TEST_F(X86SemanticsTest, MemoryXchgIsAtomicAndExchangesBothOperands) {
     const std::uint64_t slot = kDataBase + 0x40;
     ASSERT_TRUE(mem().write_u64(slot, 0x1122334455667788ull).ok());
     cpu().set_reg(Gpr::Rax, 0xAABBCCDD);
     cpu().set_reg(Gpr::Rbx, slot);
     cpu().rip = code_at(0, {0x48, 0x87, 0x03}); // xchg [rbx], rax
-    auto r = interp().step_at_rip();
-    ASSERT_FALSE(r.ok());
-    EXPECT_EQ(r.fault().fault, rt::exec::GuestFault::UnsupportedInstruction);
-    EXPECT_EQ(mem().read_u64(slot).value(), 0x1122334455667788ull);
-    EXPECT_EQ(cpu().reg(Gpr::Rax), 0xAABBCCDDu);
+    ASSERT_TRUE(interp().step_at_rip().ok());
+    EXPECT_EQ(mem().read_u64(slot).value(), 0xAABBCCDDu);
+    EXPECT_EQ(cpu().reg(Gpr::Rax), 0x1122334455667788ull);
 }
 
-TEST_F(X86SemanticsTest, MemoryBitStringRegisterOffsetIsRejected) {
+TEST_F(X86SemanticsTest, MemoryBitStringRegisterOffsetSelectsAdjacentWord) {
     const std::uint64_t slot = kDataBase + 0x40;
     ASSERT_TRUE(mem().write_u64(slot, 0).ok());
-    cpu().set_reg(Gpr::Rax, 64);
+    ASSERT_TRUE(mem().write_u64(slot + 8, 0).ok());
+    cpu().set_reg(Gpr::Rax, 64);  // bit 64 = bit 0 of the next qword
     cpu().set_reg(Gpr::Rbx, slot);
     cpu().rip = code_at(0, {0x48, 0x0F, 0xAB, 0x03}); // bts [rbx], rax
-    auto r = interp().step_at_rip();
-    ASSERT_FALSE(r.ok());
-    EXPECT_EQ(r.fault().fault, rt::exec::GuestFault::UnsupportedInstruction);
+    ASSERT_TRUE(interp().step_at_rip().ok());
     EXPECT_EQ(mem().read_u64(slot).value(), 0u);
+    EXPECT_EQ(mem().read_u64(slot + 8).value(), 1u);
 }
 
 TEST_F(X86SemanticsTest, PopMemoryFaultRestoresRsp) {
