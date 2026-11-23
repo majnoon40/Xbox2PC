@@ -312,8 +312,8 @@ Result<void> AddressSpace::protect_region(std::uint64_t xbox_va, MemProtect p) {
     VmRegion& r = it->second;
     // Protection transitions: Reserved regions have no storage — the
     // only legal change while reserved is (NoAccess -> NoAccess), i.e.
-    // none. Committed regions may move among R/RW/RX/RWX; NoAccess on a
-    // committed region is a decommit (use release_region).
+    // none. Committed regions may move among NoAccess/R/RW/RX/RWX without
+    // changing their committed state.
     if (r.state == RegionState::Reserved) {
         return Result<void>(RuntimeErrc::InvalidState,
                             "cannot protect a reserved region (commit first)");

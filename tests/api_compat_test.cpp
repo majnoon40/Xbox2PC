@@ -800,6 +800,10 @@ TEST(GdkServiceTest, Win32VirtualMemoryLifecycle) {
     ASSERT_TRUE(changed.ok); ASSERT_EQ(changed.return_value, 1u);
     ASSERT_TRUE(changed.has_out); ASSERT_EQ(changed.out_bytes_size, 4u);
     EXPECT_EQ(changed.out_bytes[0], 0x04u);
+    ctx.args[0] = base; ctx.args[1] = 0x3000; ctx.args[2] = 0x01; ctx.args[3] = 0x10000;
+    const auto no_access = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(no_access.ok); ASSERT_EQ(no_access.return_value, 1u);
+    EXPECT_EQ(no_access.out_bytes[0], 0x02u); // previous PAGE_READONLY
     ctx.arg_count = 3; ctx.args[0] = base; ctx.args[1] = 0; ctx.args[2] = 0x8000;
     const auto released = w.reg.dispatch("kernel32", "VirtualFree", ctx);
     ASSERT_TRUE(released.ok); EXPECT_EQ(released.return_value, 1u);
