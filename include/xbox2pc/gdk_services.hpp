@@ -39,7 +39,7 @@ namespace xbox2pc::rt::api {
 // pattern; the values below are the standard HRESULT layout).
 inline constexpr std::uint64_t kSOk = 0x00000000ull;
 inline constexpr std::uint64_t kEGameruntimeDllNotFound = 0x80073D0Full;
-inline constexpr std::uint64_t kEAbort = 0x8000000ABull;  // E_ABORT raw
+inline constexpr std::uint64_t kEAbort = 0x80004004ull;  // E_ABORT
 inline constexpr std::uint64_t kEInsufficientBuffer = 0x8007007Aull; // HRESULT_FROM_WIN32(122)
 inline constexpr std::uint64_t kEInvalidArg = 0x80070057ull;
 
