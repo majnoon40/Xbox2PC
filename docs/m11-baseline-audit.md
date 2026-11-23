@@ -6,8 +6,8 @@
 
 **Method:** Findings below are based on the implementation and tests present
 at that revision. This is a source audit, not a fresh local build or a
-benchmark run. File/line references identify the relevant implementation
-areas; line numbers may move as M11 changes the source.
+benchmark run. Source pointers below identify the relevant implementation areas at this
+baseline commit; line numbers may move as M11 changes the source.
 
 ## Executive summary
 
@@ -359,3 +359,22 @@ space is an abstraction over a separate host mapping.
 No feature-code or native-execution architecture decision is made by this
 audit. Phase 1 test binaries and measurements should expose the remaining
 behavioral gaps before the native execution design is finalized.
+
+
+## Source map (line numbers at the audited M10 commit)
+
+| Audit question | Primary source locations |
+|---|---|
+| PE load and execution | `src/image_loader.cpp:1399–1535`; `src/execution_context.cpp:144–235, 253–330`; `src/execution_engine.cpp:132–325` |
+| API shims and ABI | `src/execution_engine.cpp:180–325, 444–560`; `src/xbox_abi.cpp:131–243, 245–310`; `src/guest_memory.cpp:1–160` |
+| TEB/PEB and TLS | `src/gdk_services.cpp:2103–2185`; `docs/thread-execution.md:67–80`; the audit found no TEB/PEB or GS-base implementation |
+| Handle representation | `include/xbox2pc/handle_manager.hpp:1–70`; `src/handle_manager.cpp:68–245`; `src/gdk_services.cpp:1199–1259, 1657–1698, 1795–1838` |
+| Locks and observers | `include/xbox2pc/process_management.hpp:145–160`; `src/process_management.cpp:305–405, 844–850`; `include/xbox2pc/gdk_services.hpp:152–164, 220–240` |
+| Wait termination | `src/gdk_services.cpp:1331–1650, 1868–1975, 1996–2023`; `src/process_management.cpp:305–368`; `src/thread_model.cpp:442–456` |
+| Loader scale and memory | `src/image_loader.cpp:433–555, 867–950, 1399–1535`; `src/memory_management.cpp:117–315, 709–755`; `src/pal_linux.cpp:577–650` |
+
+The absence findings are repository-wide source searches at the audited commit,
+not claims inferred from a single missing declaration. In particular, searches
+for `ARCH_SET_GS`, `wrgsbase`, `RtlLookupFunctionEntry`,
+`RtlVirtualUnwind`, `SetLastError`, `GetLastError`, and `ExitProcess`
+found no runtime implementations at this baseline.
