@@ -24,3 +24,7 @@ M10 synchronization marshalling covers `CreateEventW`, `SetEvent`,
 No host function pointers are exposed to guest code; nested dispatch
 depth is capped. Tests cover integer/pointer/out-buffer/error/
 invalid-pointer/depth paths.
+
+## Bounded guest handle-array marshalling
+
+The M10 `WaitForMultipleObjects` subset uses an explicit pointer-array plan: the handle count is taken from the documented scalar parameter, capped at 64, and each 64-bit handle is read through `GuestMemory`. The bridge validates the complete guest array range before reading any element. The Win32 wrapper currently implements wait-any only; `bWaitAll=TRUE` fails closed. This does not provide scheduler-aware parking.
