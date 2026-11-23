@@ -980,14 +980,18 @@ TEST(GdkServiceTest, GuestWaitAllAcquiresAtomicallyAndRollsBackOnTimeout) {
     xbox2pc::rt::abandon_guest_mutexes_for_thread(701);
     const std::vector<std::uint64_t> abandoned_and_unavailable{
         abandoned_mutex.value(), unavailable.value()};
+    const std::vector<std::uint64_t> duplicate_wait_all{
+        abandoned_mutex.value(), abandoned_mutex.value()};
+    EXPECT_FALSE(w.grt->wait_objects_all(pid.value(), 702, duplicate_wait_all, 0).ok());
     auto abandoned_timeout = w.grt->wait_objects_all(
         pid.value(), 702, abandoned_and_unavailable, 0);
     ASSERT_TRUE(abandoned_timeout.ok());
     EXPECT_EQ(abandoned_timeout.value(), 0x102u);
-    auto still_abandoned = w.grt->wait_object(pid.value(), 702,
-                                               abandoned_mutex.value(), 0);
-    ASSERT_TRUE(still_abandoned.ok());
-    EXPECT_EQ(still_abandoned.value(), 0x80u);
+    ASSERT_TRUE(w.grt->release_semaphore(pid.value(), unavailable.value(), 1).ok());
+    auto abandoned_success = w.grt->wait_objects_all(
+        pid.value(), 702, abandoned_and_unavailable, 0);
+    ASSERT_TRUE(abandoned_success.ok());
+    EXPECT_EQ(abandoned_success.value(), 0x80u); // WAIT_ABANDONED_0 for the set
     ASSERT_TRUE(w.grt->release_mutex(pid.value(), abandoned_mutex.value(), 702).ok());
 
     // Guest ABI dispatch reaches the wait-all path as well.
