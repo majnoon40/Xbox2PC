@@ -4,6 +4,7 @@
 #include "xbox2pc/sync_objects.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <thread>
 #include <utility>
