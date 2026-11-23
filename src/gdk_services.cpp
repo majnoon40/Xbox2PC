@@ -513,6 +513,74 @@ public:
     std::string describe() const override { return "Win32: CreateEventW (unnamed process-scoped event)"; }
 private: GameRuntimeService& svc_;
 };
+class CreateMutexWImpl : public IApiImplementation {
+public:
+    explicit CreateMutexWImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3 || ctx.args[0] != 0 || ctx.args[2] != 0) {
+            out.return_value = 0;
+            out.note = "CreateMutexW supports null security attributes and unnamed mutexes only";
+            return true;
+        }
+        auto r = svc_.create_mutex(ctx.process_id, ctx.thread_id, ctx.args[1] != 0);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: CreateMutexW (unnamed guest-owned mutex)"; }
+private: GameRuntimeService& svc_;
+};
+class ReleaseMutexImpl : public IApiImplementation {
+public:
+    explicit ReleaseMutexImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        auto r = svc_.release_mutex(ctx.process_id, ctx.args[0], ctx.thread_id);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: ReleaseMutex (guest thread ownership)"; }
+private: GameRuntimeService& svc_;
+};
+class CreateSemaphoreWImpl : public IApiImplementation {
+public:
+    explicit CreateSemaphoreWImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4 || ctx.args[0] != 0 || ctx.args[3] != 0 ||
+            ctx.args[1] > INT32_MAX || ctx.args[2] > INT32_MAX) {
+            out.return_value = 0;
+            out.note = "CreateSemaphoreW supports unnamed objects, null security attributes, and nonnegative LONG counts";
+            return true;
+        }
+        auto r = svc_.create_semaphore(ctx.process_id,
+            static_cast<std::int64_t>(ctx.args[1]),
+            static_cast<std::int64_t>(ctx.args[2]));
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: CreateSemaphoreW (unnamed process-scoped semaphore)"; }
+private: GameRuntimeService& svc_;
+};
+class ReleaseSemaphoreImpl : public IApiImplementation {
+public:
+    explicit ReleaseSemaphoreImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3 || ctx.args[2] != 0 || ctx.args[1] == 0 ||
+            ctx.args[1] > INT32_MAX) {
+            out.return_value = 0;
+            out.note = "ReleaseSemaphore currently requires a null previous-count pointer and positive LONG release count";
+            return true;
+        }
+        auto r = svc_.release_semaphore(ctx.process_id, ctx.args[0],
+                                        static_cast<std::uint32_t>(ctx.args[1]));
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: ReleaseSemaphore (null previous-count output only)"; }
+private: GameRuntimeService& svc_;
+};
 class SetEventImpl : public IApiImplementation {
 public:
     explicit SetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -542,21 +610,21 @@ public:
             out.note = "WaitForSingleObject timeout exceeds DWORD";
             return true;
         }
-        auto r=svc_.wait_event(ctx.process_id,ctx.args[0],static_cast<std::uint32_t>(ctx.args[1]));
+        auto r=svc_.wait_object(ctx.process_id,ctx.thread_id,ctx.args[0],static_cast<std::uint32_t>(ctx.args[1]));
         out.return_value=r.ok()?r.value():0xFFFFFFFFu;
         if(!r.ok())out.note=r.error_string(); return true;
     }
-    std::string describe() const override { return "Win32: WaitForSingleObject (event handles only)"; }
+    std::string describe() const override { return "Win32: WaitForSingleObject (event, mutex, semaphore handles)"; }
 private: GameRuntimeService& svc_;
 };
 class CloseEventHandleImpl : public IApiImplementation {
 public:
     explicit CloseEventHandleImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.close_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
+        auto r=svc_.close_sync_handle(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
         if(!r.ok())out.note=r.error_string(); return true;
     }
-    std::string describe() const override { return "Win32: CloseHandle (event handles only)"; }
+    std::string describe() const override { return "Win32: CloseHandle (supported synchronization handles)"; }
 private: GameRuntimeService& svc_;
 };
 
@@ -628,7 +696,11 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r14 = api_reg_.register_implementation("kernel32", "ResetEvent", keep(std::make_shared<ResetEventImpl>(*this)), owner);
     auto r15 = api_reg_.register_implementation("kernel32", "WaitForSingleObject", keep(std::make_shared<WaitForSingleObjectImpl>(*this)), owner);
     auto r16 = api_reg_.register_implementation("kernel32", "CloseHandle", keep(std::make_shared<CloseEventHandleImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16}) {
+    auto r17 = api_reg_.register_implementation("kernel32", "CreateMutexW", keep(std::make_shared<CreateMutexWImpl>(*this)), owner);
+    auto r18 = api_reg_.register_implementation("kernel32", "ReleaseMutex", keep(std::make_shared<ReleaseMutexImpl>(*this)), owner);
+    auto r19 = api_reg_.register_implementation("kernel32", "CreateSemaphoreW", keep(std::make_shared<CreateSemaphoreWImpl>(*this)), owner);
+    auto r20 = api_reg_.register_implementation("kernel32", "ReleaseSemaphore", keep(std::make_shared<ReleaseSemaphoreImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -663,12 +735,12 @@ Result<void> GameRuntimeService::on_shutdown() {
             active_handles.push_back(key);
             objects_to_destroy.push_back(object_id);
         }
-        events_.clear();
+        sync_objects_.clear();
         for (const auto& [pid, ids] : retired_sync_objects_) {
             (void)pid;
             objects_to_destroy.insert(objects_to_destroy.end(), ids.begin(), ids.end());
         }
-        retired_event_objects_.clear();
+        retired_sync_objects_.clear();
     }
     for (const auto& [pid, raw] : active_handles) {
         auto process = process_manager_.find_process_by_pid(pid);
@@ -924,7 +996,7 @@ Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t hand
 }
 
 Result<void> GameRuntimeService::reset_event(std::uint64_t pid, std::uint64_t handle) {
-    auto object = lookup_event(pid, handle);
+    auto object = lookup_sync_object(pid, handle);
     if (!object.ok()) return Result<void>(object.errc(), object.context());
     auto* event = object.value().get()->as<RtEvent>();
     if (event == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not an event");
@@ -1005,19 +1077,19 @@ void GameRuntimeService::release_process(std::uint64_t process_id) {
             if (it->first.first == process_id) it = ts_bits_.erase(it);
             else ++it;
         }
-        for (auto it = events_.begin(); it != events_.end();) {
+        for (auto it = sync_objects_.begin(); it != sync_objects_.end();) {
             if (it->first.first == process_id) {
                 objects_to_destroy.push_back(it->second);
-                it = events_.erase(it);
+                it = sync_objects_.erase(it);
             } else {
                 ++it;
             }
         }
-        const auto retired = retired_event_objects_.find(process_id);
-        if (retired != retired_event_objects_.end()) {
+        const auto retired = retired_sync_objects_.find(process_id);
+        if (retired != retired_sync_objects_.end()) {
             objects_to_destroy.insert(objects_to_destroy.end(),
                                       retired->second.begin(), retired->second.end());
-            retired_event_objects_.erase(retired);
+            retired_sync_objects_.erase(retired);
         }
     }
     // ProcessManager invokes this only after guest threads and their handle

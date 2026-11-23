@@ -529,6 +529,18 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "GetCurrentProcessId" || id == "GetCurrentThreadId") {
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateMutexW") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(ptr_in(0)); plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "ReleaseMutex") {
+        plan.call.args.push_back(int_arg()); plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateSemaphoreW") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(ptr_in(0));
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "ReleaseSemaphore") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(ptr_in(0)); plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "CreateEventW") {
         plan.call.args.push_back(ptr_in(0));
         plan.call.args.push_back(int_arg());

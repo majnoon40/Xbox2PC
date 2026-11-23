@@ -144,6 +144,10 @@ const char* kSetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/
 const char* kResetEventUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-resetevent";
 const char* kWaitForSingleObjectUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject";
 const char* kCloseHandleUrl = "https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle";
+const char* kCreateMutexWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw";
+const char* kReleaseMutexUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasemutex";
+const char* kCreateSemaphoreWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createsemaphorew";
+const char* kReleaseSemaphoreUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasesemaphore";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
@@ -499,6 +503,38 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.evidence = "[MS-VIRTUAL-QUERY]"; a.evidence_url = kVirtualQueryUrl;
         a.notes = "x64 MEMORY_BASIC_INFORMATION for tracked M4 regions; free gaps and original allocation protection are not modeled";
         add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CreateMutexW";
+        a.convention=Convention::X64Microsoft; a.param_count=3; a.ret=ReturnKind::Pointer;
+        a.signature="HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES, BOOL, LPCWSTR)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-MUTEX]"; a.evidence_url=kCreateMutexWUrl;
+        a.notes="unnamed mutexes only; null security attributes/name; ownership is keyed by guest thread id; recursive acquisition and abandoned-owner result modeled"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="ReleaseMutex";
+        a.convention=Convention::X64Microsoft; a.param_count=1; a.ret=ReturnKind::Bool;
+        a.signature="BOOL ReleaseMutex(HANDLE)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-MUTEX]"; a.evidence_url=kReleaseMutexUrl;
+        a.notes="only the owning guest thread may release the mutex"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="CreateSemaphoreW";
+        a.convention=Convention::X64Microsoft; a.param_count=4; a.ret=ReturnKind::Pointer;
+        a.signature="HANDLE CreateSemaphoreW(LPSECURITY_ATTRIBUTES, LONG, LONG, LPCWSTR)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-SEMAPHORE]"; a.evidence_url=kCreateSemaphoreWUrl;
+        a.notes="unnamed semaphores only; null security attributes/name; count bounds validated"; add(a);
+    }
+    {
+        ApiDescriptor a; a.library="kernel32"; a.export_name="ReleaseSemaphore";
+        a.convention=Convention::X64Microsoft; a.param_count=3; a.ret=ReturnKind::Bool;
+        a.signature="BOOL ReleaseSemaphore(HANDLE, LONG, LPLONG)";
+        a.category=registry::ApiCategory::WindowsWin32; a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
+        a.evidence="[MS-SYNC-SEMAPHORE]"; a.evidence_url=kReleaseSemaphoreUrl;
+        a.notes="positive release count; lpPreviousCount must be null in this implementation"; add(a);
     }
     // Partial Win32 event synchronization: no names/security descriptors,
     // duplicate handles, or non-event waitable objects are modeled.

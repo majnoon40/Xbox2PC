@@ -534,6 +534,66 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     ASSERT_TRUE(stale.ok); EXPECT_EQ(stale.return_value,0u);
 }
 
+
+TEST(GdkServiceTest, Win32GuestMutexAndSemaphoreLifecycle) {
+    ApiWorld w;
+    auto* process = w.new_process("sync-objects.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "sync-objects.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.thread_id = 101;
+    ctx.arg_count = 3;
+    ctx.args[0] = 0; ctx.args[1] = 1; ctx.args[2] = 0;
+    auto created_mutex = w.reg.dispatch("kernel32", "CreateMutexW", ctx);
+    ASSERT_TRUE(created_mutex.ok); ASSERT_NE(created_mutex.return_value, 0u);
+    const auto mutex_handle = created_mutex.return_value;
+
+    ctx.arg_count = 2; ctx.args[0] = mutex_handle; ctx.args[1] = 0;
+    auto recursive = w.reg.dispatch("kernel32", "WaitForSingleObject", ctx);
+    ASSERT_TRUE(recursive.ok); EXPECT_EQ(recursive.return_value, 0u);
+    ctx.arg_count = 1; ctx.args[0] = mutex_handle;
+    auto release_once = w.reg.dispatch("kernel32", "ReleaseMutex", ctx);
+    ASSERT_TRUE(release_once.ok); EXPECT_EQ(release_once.return_value, 1u);
+    auto release_twice = w.reg.dispatch("kernel32", "ReleaseMutex", ctx);
+    ASSERT_TRUE(release_twice.ok); EXPECT_EQ(release_twice.return_value, 1u);
+    ctx.thread_id = 202; ctx.arg_count = 2; ctx.args[0] = mutex_handle; ctx.args[1] = 0;
+    auto acquired_other = w.reg.dispatch("kernel32", "WaitForSingleObject", ctx);
+    ASSERT_TRUE(acquired_other.ok); EXPECT_EQ(acquired_other.return_value, 0u);
+    ctx.arg_count = 1; ctx.args[0] = mutex_handle;
+    auto released_other = w.reg.dispatch("kernel32", "ReleaseMutex", ctx);
+    ASSERT_TRUE(released_other.ok); EXPECT_EQ(released_other.return_value, 1u);
+
+    ctx.arg_count = 4; ctx.args[0] = 0; ctx.args[1] = 1; ctx.args[2] = 2; ctx.args[3] = 0;
+    auto created_semaphore = w.reg.dispatch("kernel32", "CreateSemaphoreW", ctx);
+    ASSERT_TRUE(created_semaphore.ok); ASSERT_NE(created_semaphore.return_value, 0u);
+    const auto semaphore_handle = created_semaphore.return_value;
+    ctx.arg_count = 2; ctx.args[0] = semaphore_handle; ctx.args[1] = 0;
+    auto consumed = w.reg.dispatch("kernel32", "WaitForSingleObject", ctx);
+    ASSERT_TRUE(consumed.ok); EXPECT_EQ(consumed.return_value, 0u);
+    auto timed_out = w.reg.dispatch("kernel32", "WaitForSingleObject", ctx);
+    ASSERT_TRUE(timed_out.ok); EXPECT_EQ(timed_out.return_value, 0x102u);
+    ctx.arg_count = 3; ctx.args[0] = semaphore_handle; ctx.args[1] = 1; ctx.args[2] = 0;
+    auto released = w.reg.dispatch("kernel32", "ReleaseSemaphore", ctx);
+    ASSERT_TRUE(released.ok); EXPECT_EQ(released.return_value, 1u);
+    ctx.arg_count = 2; ctx.args[0] = semaphore_handle; ctx.args[1] = 0;
+    auto consumed_again = w.reg.dispatch("kernel32", "WaitForSingleObject", ctx);
+    ASSERT_TRUE(consumed_again.ok); EXPECT_EQ(consumed_again.return_value, 0u);
+
+    ctx.arg_count = 1; ctx.args[0] = mutex_handle;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "CloseHandle", ctx).return_value, 1u);
+    ctx.args[0] = semaphore_handle;
+    EXPECT_EQ(w.reg.dispatch("kernel32", "CloseHandle", ctx).return_value, 1u);
+}
+
 TEST(GdkServiceTest, Win32EventHandlesAreReleasedOnProcessExit) {
     ApiWorld w; auto* p=w.new_process("event-exit.exe"); ASSERT_NE(p,nullptr);
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
