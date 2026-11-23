@@ -36,12 +36,25 @@ The loader's `LoadDiagnostics::imports` records each resolved import's synthetic
 The engine integration is covered by a synthetic guest test that calls `XGameRuntimeInitialize` through a resolved binding and returns to guest code. This validates the API-call bridge path only; it does not imply broad Xbox API or retail-game compatibility.
 
 
+## Manual task-queue callback execution
+
+`XTaskQueueSubmitCallback` has an explicit four-argument x64 marshalling
+plan. The service stores the guest callback address and context in the
+selected manual work/completion port. `XTaskQueueDispatch` invokes one
+queued callback on the calling guest thread using the deterministic backend;
+the callback receives `context` in RCX and `canceled` in RDX. The nested
+callback uses a separate frame carved below the suspended caller stack,
+shares the parent request's resolved API bindings, instruction budget, and
+cooperative execution gate, and returns without modifying the caller CPU
+state. Termination marks pending callbacks canceled for later manual dispatch.
+
+Each port is bounded to 4096 pending callbacks. Delayed submission, automatic
+dispatch, monitor/waiter callbacks, and termination callbacks remain
+unsupported. This is a manual-mode subset, not a full GDK scheduler.
+
 ## Delayed task-queue callback ABI boundary
 
 `XTaskQueueSubmitDelayedCallback` has an explicit five-argument x64
 marshalling plan (queue handle, port, delay in milliseconds, guest context,
-guest callback address). This permits deterministic ABI decoding and import
-inspection only. The API implementation remains unsupported: no timer,
-queue-owned callback lifetime, cancellation delivery, or guest callback
-invocation is provided. The descriptor must not be interpreted as evidence
-that delayed callbacks execute.
+guest callback address). The implementation remains unsupported: no timer
+scheduling, callback retention, or invocation is provided.
