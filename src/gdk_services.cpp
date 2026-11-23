@@ -537,6 +537,11 @@ class WaitForSingleObjectImpl : public IApiImplementation {
 public:
     explicit WaitForSingleObjectImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.args[1] > UINT32_MAX) {
+            out.return_value = 0xFFFFFFFFu;
+            out.note = "WaitForSingleObject timeout exceeds DWORD";
+            return true;
+        }
         auto r=svc_.wait_event(ctx.process_id,ctx.args[0],static_cast<std::uint32_t>(ctx.args[1]));
         out.return_value=r.ok()?r.value():0xFFFFFFFFu;
         if(!r.ok())out.note=r.error_string(); return true;
@@ -782,12 +787,32 @@ Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
     if (pid == 0) return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "event requires guest process identity");
     auto process = process_manager_.find_process_by_pid(pid);
     if (!process.ok()) return Result<std::uint64_t>(RuntimeErrc::NotFound, "event owner process does not exist");
-    const auto handle = next_event_handle_.fetch_add(1, std::memory_order_relaxed);
-    if (handle == 0 || handle == UINT64_MAX)
-        return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "event handle space exhausted");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr || owner->state() == ProcessState::Terminating ||
+        owner->state() == ProcessState::Terminated || owner->state() == ProcessState::Failed)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "event owner process is not active");
+
+    std::uint64_t handle = next_event_handle_.load(std::memory_order_relaxed);
+    for (;;) {
+        if (handle == 0 || handle == UINT64_MAX)
+            return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "event handle space exhausted");
+        if (next_event_handle_.compare_exchange_weak(handle, handle + 1,
+                std::memory_order_relaxed, std::memory_order_relaxed)) break;
+    }
     auto event = std::make_shared<RtEvent>(!manual_reset, initially_set);
-    std::lock_guard lock(state_lock_);
-    events_.emplace(std::make_pair(pid, handle), std::move(event));
+    {
+        std::lock_guard lock(state_lock_);
+        events_.emplace(std::make_pair(pid, handle), std::move(event));
+    }
+    // Close the race where process-exit cleanup ran between the initial
+    // lookup and insertion: either this check rejects and erases, or the
+    // later process-exit observer erases the inserted handle.
+    if (owner->state() == ProcessState::Terminating ||
+        owner->state() == ProcessState::Terminated || owner->state() == ProcessState::Failed) {
+        std::lock_guard lock(state_lock_);
+        events_.erase({pid, handle});
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "event owner process exited during creation");
+    }
     return Result<std::uint64_t>(handle);
 }
 Result<void> GameRuntimeService::set_event(std::uint64_t pid, std::uint64_t handle) {

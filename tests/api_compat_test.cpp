@@ -502,6 +502,19 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     c.process_id=pid.value()+1; c.arg_count=1; c.args[0]=h;
     auto foreign=w.reg.dispatch("kernel32","SetEvent",c);
     ASSERT_TRUE(foreign.ok); EXPECT_EQ(foreign.return_value,0u);
+    // Auto-reset consumes the initial signal after exactly one successful wait.
+    c.arg_count=4; c.args[0]=0; c.args[1]=0; c.args[2]=1; c.args[3]=0;
+    auto auto_event=w.reg.dispatch("kernel32","CreateEventW",c);
+    ASSERT_TRUE(auto_event.ok); ASSERT_NE(auto_event.return_value,0u);
+    c.arg_count=2; c.args[0]=auto_event.return_value; c.args[1]=0;
+    auto first_auto=w.reg.dispatch("kernel32","WaitForSingleObject",c);
+    ASSERT_TRUE(first_auto.ok); EXPECT_EQ(first_auto.return_value,0u);
+    auto second_auto=w.reg.dispatch("kernel32","WaitForSingleObject",c);
+    ASSERT_TRUE(second_auto.ok); EXPECT_EQ(second_auto.return_value,0x102u);
+    c.arg_count=1; c.args[0]=auto_event.return_value;
+    auto close_auto=w.reg.dispatch("kernel32","CloseHandle",c);
+    ASSERT_TRUE(close_auto.ok); EXPECT_EQ(close_auto.return_value,1u);
+
     c.process_id=pid.value();
     auto closed=w.reg.dispatch("kernel32","CloseHandle",c);
     ASSERT_TRUE(closed.ok); EXPECT_EQ(closed.return_value,1u);
