@@ -339,6 +339,32 @@ TEST(AbiTest, PrepareAndExtractRoundTrip) {
     EXPECT_EQ(got.value()[5].int_v, 105u);
 }
 
+TEST(AbiTest, FailedStackWriterLeavesCallerCpuStateUnchanged) {
+    rt::abi::CallSpec spec;
+    for (int i = 0; i < 5; ++i) spec.args.push_back({});
+    cpu::CpuState c;
+    c.reset();
+    c.set_reg(cpu::Gpr::Sp, 0x20040000);
+    c.set_reg(cpu::Gpr::Rcx, 0x1111);
+    c.set_reg(cpu::Gpr::Rdx, 0x2222);
+    c.rip = 0x12345678;
+    const cpu::CpuState before = c;
+
+    std::vector<rt::abi::ArgValue> values(5);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i].int_v = 100 + i;
+    }
+    HostStack too_small(0x1000, 0x100);
+    const auto prepared = rt::abi::prepare_call(
+        c, 0x30001000, spec, values, HostStack::writer(&too_small));
+
+    EXPECT_FALSE(prepared.ok());
+    EXPECT_EQ(c.gprs, before.gprs);
+    EXPECT_EQ(c.xmm, before.xmm);
+    EXPECT_EQ(c.rip, before.rip);
+    EXPECT_EQ(c.rflags, before.rflags);
+}
+
 TEST(AbiTest, ExtractRejectsOverflowingCalleeStackFrameBeforeReading) {
     rt::abi::CallSpec spec;
     for (int i = 0; i < 5; ++i) spec.args.push_back({});
