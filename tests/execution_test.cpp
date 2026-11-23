@@ -915,6 +915,7 @@ struct LoadedGuest {
     ManagedProcess* proc;
     Handle image;
     loader::LoadResult out;
+    loader::LoadDiagnostics diagnostics;
     std::vector<std::uint8_t> bytes;
     loader::ImageLoader loader;
     api::ApiResolver resolver;
@@ -936,10 +937,9 @@ struct LoadedGuest {
         bytes = test::PeBuilder(spec).build();
         diag::Diagnostics pd;
         auto img = pe::parse(bytes.data(), bytes.size(), name, pd);
-        loader::LoadDiagnostics ld;
         auto h = loader.load_image(w.pm, w.core.objects(), ph, img,
                                    bytes.data(), bytes.size(), &resolver,
-                                   ld, out);
+                                   diagnostics, out);
         load_ok = h.ok();
         load_error = out.error;
         image = load_ok ? h.value() : Handle{};
@@ -1610,7 +1610,12 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
     ASSERT_TRUE(loaded_ref.ok());
     auto* loaded = loaded_ref.value().get()->as<loader::LoadedImageObject>();
     ASSERT_NE(loaded, nullptr);
-    ASSERT_EQ(loaded->diagnostics().imports.size(), 1u);
+    ASSERT_EQ(guest.diagnostics.imports.size(), 1u)
+        << "loader diagnostic imports; resolved count="
+        << guest.out.exec.imports_resolved << ", unresolved="
+        << guest.out.exec.imports_unresolved;
+    ASSERT_EQ(loaded->diagnostics().imports.size(), 1u)
+        << "loaded-image object did not retain loader import diagnostics";
     ASSERT_EQ(loaded->diagnostics().imports[0].status, loader::ImportStatus::Resolved);
 
     const auto pid = w.pm.resolve_pid(guest.ph);
