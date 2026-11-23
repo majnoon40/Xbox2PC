@@ -14,12 +14,25 @@ namespace xbox2pc::rt {
 
 PackageFileHandle::PackageFileHandle(std::shared_ptr<std::vector<std::uint8_t>> buffer,
                                      std::uint64_t offset, std::uint64_t size)
-    : buf_(std::move(buffer)), offset_(offset), size_(size) {}
+    : buf_(std::move(buffer)), offset_(offset), size_(size) {
+    valid_ = buf_ && offset_ <= buf_->size() &&
+             size_ <= static_cast<std::uint64_t>(buf_->size()) - offset_;
+}
 
 Result<std::uint64_t> PackageFileHandle::read(void* buf, std::uint64_t len) {
+    if (!valid_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "package file range is invalid");
+    }
+    if (len == 0) return Result<std::uint64_t>(0);
+    if (buf == nullptr) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "null read buffer");
+    }
+    std::lock_guard lock(lock_);
     if (pos_ >= size_) return Result<std::uint64_t>(0);
     const std::uint64_t avail = std::min<std::uint64_t>(len, size_ - pos_);
-    std::memcpy(buf, buf_->data() + offset_ + pos_,
+    std::memcpy(buf, buf_->data() + static_cast<std::size_t>(offset_ + pos_),
                 static_cast<std::size_t>(avail));
     pos_ += avail;
     return Result<std::uint64_t>(avail);
@@ -31,12 +44,22 @@ Result<std::uint64_t> PackageFileHandle::write(const void*, std::uint64_t) {
 }
 
 Result<std::uint64_t> PackageFileHandle::seek(std::uint64_t position) {
+    if (!valid_) {
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "package file range is invalid");
+    }
+    std::lock_guard lock(lock_);
     if (position > size_) {
         return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
                                      "seek beyond entry size");
     }
     pos_ = position;
     return Result<std::uint64_t>(pos_);
+}
+
+std::uint64_t PackageFileHandle::position() const {
+    std::lock_guard lock(lock_);
+    return pos_;
 }
 
 // ── PackageVfsBackend ──────────────────────────────────────────────────────
