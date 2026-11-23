@@ -45,6 +45,10 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      - name: Run M9 synthetic benchmarks
+        if: matrix.build_type == 'Release' && matrix.compiler == 'gcc'
+        run: ./build/tests/m9_bench
+
   sanitize:
     name: ASan + UBSan
     runs-on: ubuntu-24.04
@@ -72,3 +76,30 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+  thread-sanitize:
+    name: TSan
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++
+
+      - name: Configure (ThreadSanitizer)
+        run: cmake -S . -B build-tsan -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build
+        run: cmake --build build-tsan
+
+      - name: Test
+        run: ctest --test-dir build-tsan --output-on-failure
+        env:
+          TSAN_OPTIONS: halt_on_error=1
