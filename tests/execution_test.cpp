@@ -1386,6 +1386,13 @@ TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
     };
     const auto port = static_cast<std::uint32_t>(api::XTaskQueuePort::Work);
 
+    // Reject a non-executable callback pointer before storing it in the queue.
+    const auto invalid_callback = run_guest_api(
+        submit_binding, queue.value(), port, output_va, 0x7FFF00000000ull);
+    EXPECT_EQ(invalid_callback.outcome, Outcome::Faulted);
+    ASSERT_TRUE(invalid_callback.exception.has_value());
+    EXPECT_EQ(invalid_callback.exception->fault, GuestFault::MarshalFailure);
+
     // Submit through the real guest ABI bridge (RCX/RDX/R8/R9).
     const auto submitted = run_guest_api(
         submit_binding, queue.value(), port, output_va, callback_va);
