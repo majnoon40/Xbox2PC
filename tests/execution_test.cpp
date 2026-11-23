@@ -1343,14 +1343,11 @@ TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
     ASSERT_TRUE(process->address_space().protect_region(
         code_va, MemProtect::ReadExecute).ok());
     ASSERT_TRUE(mem.write_u64(output_va, 0).ok());
-    ASSERT_TRUE(w.tq->submit_callback(
-        pid, queue.value(), api::XTaskQueuePort::Work, output_va, callback_va).ok());
 
-    constexpr std::uint64_t binding = 0x51000021ull;
+    constexpr std::uint64_t submit_binding = 0x51000020ull;
+    constexpr std::uint64_t dispatch_binding = 0x51000021ull;
     constexpr std::uint64_t tid = 0xA5;
     const std::uint64_t rsp = stack_va + 0x808; // x64 function-entry alignment
-    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
-    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
 
     auto config = ExecutionConfig::default_validated();
     ASSERT_TRUE(config.ok());
@@ -1358,27 +1355,50 @@ TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
     ASSERT_TRUE(backend.bind_execution_context(
         pid, tid, process->address_space()).ok());
     ExecutionRequest request;
-    request.entry_va = binding;
+    request.entry_va = submit_binding;
     request.stack_top_va = stack_va + 0x1000;
     request.stack_size = 0x1000;
     request.completion_va = kCompletionSentinel;
-    request.api_binding_values.push_back(binding);
+    request.api_binding_values = {submit_binding, dispatch_binding};
     request.api_bindings.push_back(ApiBindingInfo{
-        binding, "xgameruntime", "XTaskQueueDispatch", false, 0});
+        submit_binding, "xgameruntime", "XTaskQueueSubmitCallback", false, 0});
+    request.api_bindings.push_back(ApiBindingInfo{
+        dispatch_binding, "xgameruntime", "XTaskQueueDispatch", false, 0});
 
-    cpu::CpuState state;
-    state.reset();
-    state.set_reg(cpu::Gpr::Sp, rsp);
-    state.set_reg(cpu::Gpr::Rcx, queue.value());
-    state.set_reg(cpu::Gpr::Rdx,
-                  static_cast<std::uint32_t>(api::XTaskQueuePort::Work));
-    state.set_reg(cpu::Gpr::R8, 0);
-    state.rip = binding;
+    // Exercise the real guest ABI bridge for callback submission (RCX/RDX/R8/R9).
+    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu::CpuState submit_state;
+    submit_state.reset();
+    submit_state.set_reg(cpu::Gpr::Sp, rsp);
+    submit_state.set_reg(cpu::Gpr::Rcx, queue.value());
+    submit_state.set_reg(cpu::Gpr::Rdx,
+        static_cast<std::uint32_t>(api::XTaskQueuePort::Work));
+    submit_state.set_reg(cpu::Gpr::R8, output_va);
+    submit_state.set_reg(cpu::Gpr::R9, callback_va);
+    submit_state.rip = submit_binding;
     std::atomic<bool> interrupted{false};
-    const auto result = backend.run(request, state, interrupted);
-    ASSERT_EQ(result.outcome, Outcome::Returned)
-        << (result.exception.has_value() ? format_exception(*result.exception) : "");
-    EXPECT_EQ(result.return_value, 1u);
+    const auto submitted = backend.run(request, submit_state, interrupted);
+    ASSERT_EQ(submitted.outcome, Outcome::Returned)
+        << (submitted.exception.has_value() ? format_exception(*submitted.exception) : "");
+    EXPECT_EQ(submitted.return_value, 0u); // S_OK
+
+    // Dispatch is a second guest API call. The nested callback must run on the
+    // same guest thread, receive context in RCX, and leave the caller resumable.
+    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu::CpuState dispatch_state;
+    dispatch_state.reset();
+    dispatch_state.set_reg(cpu::Gpr::Sp, rsp);
+    dispatch_state.set_reg(cpu::Gpr::Rcx, queue.value());
+    dispatch_state.set_reg(cpu::Gpr::Rdx,
+        static_cast<std::uint32_t>(api::XTaskQueuePort::Work));
+    dispatch_state.set_reg(cpu::Gpr::R8, 0);
+    dispatch_state.rip = dispatch_binding;
+    const auto dispatched = backend.run(request, dispatch_state, interrupted);
+    ASSERT_EQ(dispatched.outcome, Outcome::Returned)
+        << (dispatched.exception.has_value() ? format_exception(*dispatched.exception) : "");
+    EXPECT_EQ(dispatched.return_value, 1u);
     const auto callback_value = mem.read_u64(output_va);
     ASSERT_TRUE(callback_value.ok());
     EXPECT_EQ(callback_value.value(), 42u);
