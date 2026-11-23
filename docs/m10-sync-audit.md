@@ -1,6 +1,6 @@
 # M10 synchronization and execution audit
 
-Audit target: `feature/m10-game-os-compatibility` at `e9d2b41186ef59bcce025b33e0ff62a33ff7d4a9`.
+Audit target: `feature/m10-game-os-compatibility` (continuously updated; see the M10 pull request head for the exact audited revision).
 
 This document records implementation constraints found while selecting the next M10 synchronization slice. It is not a claim of Xbox kernel equivalence.
 
@@ -38,8 +38,8 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 - Added `RtGuestSemaphore` with validated initial/maximum counts, timed/cancellable acquisition, bounded release, previous-count reporting, and close wake-up.
 - Added process-scoped handle-backed `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`, and `ReleaseSemaphore` support. `WaitForSingleObject` now accepts events, mutexes, and semaphores; mutex waits return `WAIT_ABANDONED_0` when ownership was abandoned.
 - Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. These waits still block the host execution thread in short bounded intervals; they are not scheduler-aware park/resume.
-- The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer and the descriptor metadata now reflects that behavior. Named objects, security descriptors, duplicate handles, and guest-facing wait-multiple APIs remain unsupported.
-- `CloseHandle` closes service-created event, guest mutex, and guest semaphore handles. An internal guest wait-any primitive polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). Tests cover manual/auto-reset events, semaphore consumption, timeout, duplicate/oversized handle rejection, and abandoned-mutex results. The Win32 `WaitForMultipleObjects` wait-any subset is now exposed through the guest marshalling bridge; wait-all semantics remain unimplemented.
+- The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer and the descriptor metadata now reflects that behavior. Named objects, security descriptors, and DuplicateHandle-style duplication for Win32 synchronization objects remain unsupported. Task-queue handle duplication is implemented separately; see the task-queue section below.
+- `CloseHandle` closes service-created event, guest mutex, and guest semaphore handles. An internal guest wait-any primitive polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). Tests cover manual/auto-reset events, semaphore consumption, timeout, duplicate/oversized handle rejection, and abandoned-mutex results. The Win32 `WaitForMultipleObjects` wait-any subset is exposed through the guest marshalling bridge; wait-all semantics remain unimplemented.
 
 ## Remaining implementation order
 
@@ -51,7 +51,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 
 ## Validation boundary
 
-The M10 tests cover the implemented event, mutex, and semaphore slices, including service-level wait-any consumption and abandoned-mutex results. They do not establish scheduler-aware guest blocking, guest-facing wait-multiple APIs, or full wait-all semantics. Those remain M10 work; no unsupported behavior should be marked implemented in the compatibility report.
+The M10 tests cover the implemented event, mutex, and semaphore slices, including service-level wait-any consumption and abandoned-mutex results. They do not establish scheduler-aware guest blocking or full wait-all semantics. Those remain M10 work; no unsupported behavior should be marked implemented in the compatibility report.
 
 
 ## M10 virtual-memory API slice
@@ -74,3 +74,11 @@ VmRegion keeps allocation_protection independently from current protection. Win3
 - `WaitForMultipleObjects` is registered as partially implemented. The bridge reads a bounded 1–64 element `HANDLE` array from guest memory and passes the decoded handles to the process-scoped wait-any service.
 - `bWaitAll=FALSE` returns `WAIT_OBJECT_0 + index` or `WAIT_ABANDONED_0 + index` as applicable, and supports finite/infinite timeouts through the existing service.
 - `bWaitAll=TRUE` returns `WAIT_FAILED` with an explicit unsupported note. Correct wait-all atomic consumption/rollback semantics and scheduler-aware waits remain unimplemented.
+
+
+## Task-queue handle lifetime
+
+- `XTaskQueueDuplicateHandle` is registered as partially implemented and exposed through the guest marshalling bridge. It creates a distinct same-process handle ID referencing the same queue object and writes the duplicated 64-bit handle through the documented output pointer.
+- Closing one alias removes only that handle. Active dispatch waits retain the underlying queue while any duplicate alias remains; closing the final alias wakes blocked dispatch. Process exit removes every alias owned by that process.
+- `live_queues()` counts unique queue objects rather than aliases. Tests cover alias lifetime, process isolation, duplicate API output, closing the original handle while dispatch is blocked, and waking dispatch when the final alias closes.
+- Callback submission, callback invocation, callback-reference lifetime, automatic dispatch modes, and actual work/completion scheduling remain unsupported. Manual dispatch on an empty queue returns false after the requested timeout or when terminated/closed.
