@@ -958,18 +958,29 @@ TEST(ProcessMgmtTest, ProcessResumePreservesPreexistingManualSuspension) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_TRUE(second->execution_control()->is_parked());
+    const auto first_paused_progress = progress_a.load(std::memory_order_relaxed);
+    const auto second_paused_progress = progress_b.load(std::memory_order_relaxed);
     ASSERT_TRUE(pm.resume_process(process.value()).ok());
     EXPECT_TRUE(first->execution_control()->is_parked());
     EXPECT_FALSE(second->execution_control()->is_parked());
 
-    ASSERT_TRUE(first->resume().ok());
-    const auto resumed_deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::seconds(2);
-    while ((progress_a.load(std::memory_order_relaxed) == 0 ||
-            progress_b.load(std::memory_order_relaxed) == 0) &&
-           std::chrono::steady_clock::now() < resumed_deadline) {
+    const auto second_resume_deadline = std::chrono::steady_clock::now() +
+                                        std::chrono::seconds(2);
+    while (progress_b.load(std::memory_order_relaxed) == second_paused_progress &&
+           std::chrono::steady_clock::now() < second_resume_deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    EXPECT_GT(progress_b.load(std::memory_order_relaxed), second_paused_progress);
+    EXPECT_EQ(progress_a.load(std::memory_order_relaxed), first_paused_progress);
+
+    ASSERT_TRUE(first->resume().ok());
+    const auto first_resume_deadline = std::chrono::steady_clock::now() +
+                                       std::chrono::seconds(2);
+    while (progress_a.load(std::memory_order_relaxed) == first_paused_progress &&
+           std::chrono::steady_clock::now() < first_resume_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_GT(progress_a.load(std::memory_order_relaxed), first_paused_progress);
     ASSERT_TRUE(pm.terminate_process(process.value(), 0).ok());
     ASSERT_TRUE(core.shutdown().ok());
 }
