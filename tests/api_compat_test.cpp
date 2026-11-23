@@ -1165,6 +1165,45 @@ TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) 
     EXPECT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueCallbackInvokerExceptionDoesNotLeakActiveDispatch) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-callback-exception.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    const auto queue = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(queue.ok());
+
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0x11, 0x140001000).ok());
+    ASSERT_TRUE(w.tq->submit_callback(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0x22, 0x140002000).ok());
+
+    const auto failed = w.tq->dispatch(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0,
+        [](std::uint64_t, std::uint64_t, bool) -> xbox2pc::rt::Result<void> {
+            throw 7;
+        });
+    EXPECT_FALSE(failed.ok());
+    EXPECT_NE(failed.error_string().find("unknown exception"), std::string::npos);
+
+    std::uint64_t dispatched_context = 0;
+    const auto next = w.tq->dispatch(
+        pid.value(), queue.value(), XTaskQueuePort::Work, 0,
+        [&](std::uint64_t, std::uint64_t context, bool) {
+            dispatched_context = context;
+            return xbox2pc::rt::Result<void>::ok_result();
+        });
+    ASSERT_TRUE(next.ok()) << next.error_string();
+    EXPECT_TRUE(next.value());
+    EXPECT_EQ(dispatched_context, 0x22u);
+
+    ASSERT_TRUE(w.tq->close_queue(pid.value(), queue.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+}
+
 TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     ApiWorld w;
     constexpr std::uint64_t owner_pid = 303;
