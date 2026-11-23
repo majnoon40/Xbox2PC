@@ -995,6 +995,37 @@ TEST(GdkServiceTest, TaskQueueDuplicateHandleApiWritesOutHandle) {
     ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
+    ApiWorld w;
+    constexpr std::uint64_t owner_pid = 404;
+    auto created = w.tq->create_queue(
+        owner_pid,
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(created.ok());
+    auto duplicate = w.tq->duplicate_queue(owner_pid, created.value());
+    ASSERT_TRUE(duplicate.ok());
+
+    std::atomic<bool> done{false};
+    std::atomic<bool> ok{false};
+    std::thread waiter([&] {
+        const auto result = w.tq->dispatch(
+            owner_pid, duplicate.value(), XTaskQueuePort::Completion, 0xFFFFFFFFu);
+        ok.store(result.ok(), std::memory_order_release);
+        done.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(done.load(std::memory_order_acquire));
+
+    ASSERT_TRUE(w.tq->close_queue(owner_pid, created.value()).ok());
+    EXPECT_FALSE(done.load(std::memory_order_acquire));
+    ASSERT_TRUE(w.tq->close_queue(owner_pid, duplicate.value()).ok());
+    waiter.join();
+    EXPECT_TRUE(done.load(std::memory_order_acquire));
+    EXPECT_TRUE(ok.load(std::memory_order_acquire));
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+}
+
 TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ApiWorld w;
     constexpr std::uint64_t owner_pid = 101;
