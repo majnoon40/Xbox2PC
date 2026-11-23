@@ -114,7 +114,7 @@ Inferred (xbox2pc design decisions — no Xbox documentation consulted):
 
 ## Guest decommit model
 
-AddressSpace now supports decommitting one complete tracked region: it protects the host subrange as inaccessible and transitions the descriptor from Committed back to Reserved. This is the runtime's current MEM_DECOMMIT model; partial-page-range decommit and physical-page discard/recommit fidelity are not claimed.
+AddressSpace supports page-aligned partial commit, decommit, and protection operations. Range changes split region metadata while retaining the original allocation base, so VirtualFree(MEM_RELEASE) still releases the complete reservation. On Linux, decommit also uses MADV_DONTNEED after making the range inaccessible, discarding the anonymous backing pages; this is a host PAL behavior, not a claim of Xbox physical-memory fidelity.
 
 
 ## M10 VirtualAlloc W^X enforcement
@@ -154,3 +154,13 @@ Tracked guest regions retain the initial allocation protection separately from t
 ## Region memory type
 
 Address-space regions retain a memory type independently from their state and page protection. Generic reservations are MEM_PRIVATE. The PE image loader tags its headers and each mapped section as MEM_IMAGE before commit. VirtualQuery reports MEM_PRIVATE, MEM_MAPPED, or MEM_IMAGE from this metadata; MEM_MAPPED is representable for future file-mapping support but is not currently created by the runtime.
+
+
+## M10 page-range virtual memory
+
+- `VirtualAlloc(MEM_COMMIT)` commits page-rounded ranges inside one existing reservation. The address is rounded down to the containing page and the size is rounded up.
+- `VirtualFree(MEM_DECOMMIT)` decommits a page range while retaining the reservation. The address must be page-aligned and the size is rounded up.
+- `VirtualProtect` applies protection to the page range containing the requested address; the prior protection reported is the protection of the first page.
+- Range metadata is split at boundaries. Every segment retains the original allocation base, and `MEM_RELEASE` is accepted only at that original base and releases all segments.
+- A range may not cross reservation boundaries or include pages in an incompatible state. Partial operations are validated before host mapping changes.
+- Linux decommit marks the range PROT_NONE and uses MADV_DONTNEED to discard anonymous backing pages. The PAL currently exposes this operation for the Linux host backend only.
