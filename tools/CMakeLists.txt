@@ -8,7 +8,14 @@ target_link_libraries(xbox2pc PRIVATE
     xbox2pc_rt_cpu
     xbox2pc_rt_guestmem
     xbox2pc_rt_exceptions
-    xbox2pc_pe_builder)
+    xbox2pc_pe_builder
+    xbox2pc_rt_m9_cli)
 target_compile_features(xbox2pc PRIVATE cxx_std_20)
+
+
+if(XBOX2PC_BUILD_TESTS)
+    add_test(NAME m9_interpreter_info_cli COMMAND xbox2pc interpreter-info)
+    add_test(NAME m9_interpreter_test_cli COMMAND xbox2pc interpreter-test)
+endif()
 
 install(TARGETS xbox2pc RUNTIME DESTINATION bin)

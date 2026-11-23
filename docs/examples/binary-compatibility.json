@@ -1,0 +1,65 @@
+{
+  "schema": "xbox2pc.binary-compatibility",
+  "schema_version": 1,
+  "source": "synthetic-amd64-pe.exe",
+  "file_size": 4096,
+  "architecture": {
+    "status": "SUPPORTED",
+    "machine": "AMD64",
+    "pe32_plus": true
+  },
+  "xbox_platform": {
+    "status": "UNKNOWN",
+    "evidence": "No Xbox target-platform provenance has been established by these checks."
+  },
+  "imports": {
+    "status": "UNKNOWN",
+    "regular_descriptor_count": 0,
+    "delay_descriptor_count": 0,
+    "resolution": "NOT_TESTED"
+  },
+  "relocations": {
+    "present": false,
+    "status": "NOT_TESTED",
+    "note": "Directory-specific application is not performed."
+  },
+  "tls": {
+    "present": false,
+    "status": "NOT_TESTED",
+    "note": "TLS callback execution is not performed."
+  },
+  "exception_metadata": {
+    "present": false,
+    "status": "NOT_TESTED"
+  },
+  "instruction_support": {
+    "status": "UNKNOWN",
+    "confirmed_decode_count": 0,
+    "unsupported_region_count": 0,
+    "interpreter_unsupported_count": 0,
+    "uncertain_region_count": 0,
+    "embedded_data_candidates": 0,
+    "model": "linear heuristic decode; not reachability or CFG proof",
+    "limitations": [
+      "No Xbox-specific platform provenance verified",
+      "No complete control-flow graph recovered"
+    ]
+  },
+  "execution": {
+    "status": "NOT_TESTED",
+    "note": "Static inspection does not execute this image."
+  },
+  "overall": {
+    "status": "UNKNOWN",
+    "note": "No overall Xbox compatibility verdict is inferred from partial static evidence.",
+    "structural_validation_passed": true
+  },
+  "limitations": [
+    "No Xbox-specific platform provenance verified",
+    "Import resolution and runtime API behavior not tested",
+    "Relocation application not tested",
+    "TLS callback validation or execution not tested",
+    "Static instruction scan is linear and does not recover a complete control-flow graph",
+    "No real Xbox executable has been tested"
+  ]
+}

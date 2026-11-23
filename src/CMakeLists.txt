@@ -17,6 +17,21 @@ target_include_directories(xbox2pc_pe_parser PUBLIC
 target_link_libraries(xbox2pc_pe_parser PUBLIC xbox2pc_diagnostics)
 target_compile_features(xbox2pc_pe_parser PUBLIC cxx_std_20)
 
+# ── M9: structural PE validation (inspection only; never maps or executes) ──
+add_library(xbox2pc_rt_binary_validation STATIC binary_validation.cpp)
+target_include_directories(xbox2pc_rt_binary_validation PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_binary_validation PUBLIC
+    xbox2pc_pe_parser xbox2pc_rt_loader)
+target_compile_features(xbox2pc_rt_binary_validation PUBLIC cxx_std_20)
+
+# ── M9: binary CLI/reporting support ──
+add_library(xbox2pc_rt_m9_cli STATIC m9_cli.cpp)
+target_include_directories(xbox2pc_rt_m9_cli PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_m9_cli PUBLIC
+    xbox2pc_rt_binary_validation xbox2pc_rt_static_analysis
+    xbox2pc_pe_parser xbox2pc_json xbox2pc_diagnostics)
+target_compile_features(xbox2pc_rt_m9_cli PUBLIC cxx_std_20)
+
 # ── json_writer (M2: strict JSON serialization) ──
 add_library(xbox2pc_json STATIC json_writer.cpp)
 target_include_directories(xbox2pc_json PUBLIC ${PROJECT_SOURCE_DIR}/include)
@@ -84,7 +99,8 @@ target_compile_features(xbox2pc_rt_sync PUBLIC cxx_std_20)
 
 add_library(xbox2pc_rt_thread STATIC thread_model.cpp)
 target_include_directories(xbox2pc_rt_thread PUBLIC ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(xbox2pc_rt_thread PUBLIC xbox2pc_rt_handles xbox2pc_rt_pal)
+target_link_libraries(xbox2pc_rt_thread PUBLIC
+    xbox2pc_rt_handles xbox2pc_rt_pal xbox2pc_rt_sync)
 target_compile_features(xbox2pc_rt_thread PUBLIC cxx_std_20)
 
 add_library(xbox2pc_rt_io STATIC io_objects.cpp)
@@ -203,6 +219,13 @@ target_compile_features(xbox2pc_rt_guestmem PUBLIC cxx_std_20)
 add_library(xbox2pc_rt_x64_decoder STATIC x64_decoder.cpp)
 target_include_directories(xbox2pc_rt_x64_decoder PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(xbox2pc_rt_x64_decoder PUBLIC cxx_std_20)
+
+# ── M9: conservative static instruction analysis ──
+add_library(xbox2pc_rt_static_analysis STATIC static_analysis.cpp)
+target_include_directories(xbox2pc_rt_static_analysis PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_static_analysis PUBLIC
+    xbox2pc_pe_parser xbox2pc_rt_x64_decoder xbox2pc_rt_x86_interpreter)
+target_compile_features(xbox2pc_rt_static_analysis PUBLIC cxx_std_20)
 
 # ── M9: instruction semantics engine (arithmetic/logic first) ───────────────
 #
