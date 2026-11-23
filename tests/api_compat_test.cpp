@@ -708,7 +708,7 @@ TEST(GdkServiceTest, ProcessSuspendResumesBlockedWin32EventWait) {
     }
     EXPECT_TRUE(args.completed.load(std::memory_order_acquire));
     EXPECT_EQ(args.wait_result.load(std::memory_order_acquire), 0u);
-    ASSERT_TRUE(thread->join_ns(pal::kInfiniteTimeout).ok());
+    ASSERT_TRUE(thread->join_ns(xbox2pc::rt::pal::kInfiniteTimeout).ok());
     ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
 }
 
