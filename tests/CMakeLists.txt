@@ -228,3 +228,10 @@ target_link_libraries(binary_validation_test PRIVATE
     xbox2pc_rt_binary_validation xbox2pc_pe_builder gtest)
 target_compile_features(binary_validation_test PRIVATE cxx_std_20)
 add_test(NAME binary_validation_test COMMAND binary_validation_test)
+
+# M9: conservative static instruction analysis.
+add_executable(static_analysis_test static_analysis_test.cpp)
+target_link_libraries(static_analysis_test PRIVATE
+    xbox2pc_rt_static_analysis xbox2pc_pe_builder gtest)
+target_compile_features(static_analysis_test PRIVATE cxx_std_20)
+add_test(NAME static_analysis_test COMMAND static_analysis_test)
