@@ -124,6 +124,10 @@ Result<void> RtThread::start() {
         return Result<void>(RuntimeErrc::ObjectDestroyed,
                             "start() on a destroying thread object");
     }
+    if (stop_flag_.load(std::memory_order_acquire)) {
+        return Result<void>(RuntimeErrc::ProcessTerminated,
+                            "thread start cancelled by process shutdown");
+    }
     host_ = pal::make_host_thread();
     if (host_ == nullptr) {
         return Result<void>(RuntimeErrc::OutOfResources,
