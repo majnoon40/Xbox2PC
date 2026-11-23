@@ -38,7 +38,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 - Added `RtGuestSemaphore` with validated initial/maximum counts, timed/cancellable acquisition, bounded release, previous-count reporting, and close wake-up.
 - Added process-scoped handle-backed `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`, and `ReleaseSemaphore` support. `WaitForSingleObject` now accepts events, mutexes, and semaphores; mutex waits return `WAIT_ABANDONED_0` when ownership was abandoned.
 - Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. These waits still block the host execution thread in short bounded intervals; they are not scheduler-aware park/resume.
-- The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer. Named objects, security descriptors, duplicate handles, and wait-multiple APIs remain unsupported.
+- The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer and the descriptor metadata now reflects that behavior. Named objects, security descriptors, duplicate handles, and guest-facing wait-multiple APIs remain unsupported.
 - An internal guest wait-any primitive now polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). It is tested at the service layer but is not yet exposed as the Win32 `WaitForMultipleObjects` API; wait-all semantics remain unimplemented.
 
 ## Remaining implementation order
