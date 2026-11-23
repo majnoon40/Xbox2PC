@@ -1070,14 +1070,9 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
         const auto commit_size =
             ((address_offset + size + page - 1) / page) * page;
         auto committed = process_manager_.commit_region_by_pid(
-            pid, page_address, commit_size);
-        if (!committed.ok()) return Result<std::uint64_t>(committed.errc(), committed.context());
-        auto changed = process_manager_.protect_region_by_pid(
             pid, page_address, commit_size, decoded.value());
-        if (!changed.ok()) {
-            (void)process_manager_.decommit_region_by_pid(pid, page_address, commit_size);
-            return Result<std::uint64_t>(changed.errc(), changed.context());
-        }
+        if (!committed.ok())
+            return Result<std::uint64_t>(committed.errc(), committed.context());
         return Result<std::uint64_t>(page_address);
     }
     Result<std::uint64_t> reserved =
@@ -1104,16 +1099,10 @@ Result<std::uint64_t> GameRuntimeService::virtual_alloc(
     }
     if (allocation_type == kReserve) return reserved;
     auto committed = process_manager_.commit_region_by_pid(
-        pid, reserved.value(), aligned_size);
+        pid, reserved.value(), aligned_size, decoded.value());
     if (!committed.ok()) {
         (void)process_manager_.release_region_by_pid(pid, reserved.value());
         return Result<std::uint64_t>(committed.errc(), committed.context());
-    }
-    auto changed = process_manager_.protect_region_by_pid(
-        pid, reserved.value(), aligned_size, decoded.value());
-    if (!changed.ok()) {
-        (void)process_manager_.release_region_by_pid(pid, reserved.value());
-        return Result<std::uint64_t>(changed.errc(), changed.context());
     }
     return reserved;
 }
