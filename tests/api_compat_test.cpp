@@ -961,6 +961,40 @@ TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     EXPECT_EQ(w.tq->live_queues(), 0u);
 }
 
+TEST(GdkServiceTest, TaskQueueDuplicateHandleApiWritesOutHandle) {
+    ApiWorld w;
+    (void)w.new_process("task-queue-duplicate-api.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+
+    auto created = w.tq->create_queue(
+        pid.value(),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(created.ok());
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.arg_count = 2;
+    ctx.args[0] = created.value();
+    ctx.args[1] = 0x10000; // bridge validates/writes this guest output pointer
+    const auto result = w.reg.dispatch("xgameruntime",
+                                       "XTaskQueueDuplicateHandle", ctx);
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.return_value, 0u); // S_OK
+    ASSERT_TRUE(result.has_out);
+    EXPECT_EQ(result.out_size, 8u);
+    EXPECT_NE(result.out_value, 0u);
+    EXPECT_NE(result.out_value, created.value());
+
+    EXPECT_TRUE(w.tq->close_queue(pid.value(), created.value()).ok());
+    EXPECT_TRUE(w.tq->dispatch(pid.value(), result.out_value,
+                               XTaskQueuePort::Work, 0).ok());
+    EXPECT_TRUE(w.tq->close_queue(pid.value(), result.out_value).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    ASSERT_TRUE(w.pm.terminate_process(w.last_handle, 0).ok());
+}
+
 TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ApiWorld w;
     constexpr std::uint64_t owner_pid = 101;
