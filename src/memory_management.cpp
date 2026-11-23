@@ -198,6 +198,7 @@ Result<std::uint64_t> AddressSpace::reserve_region(std::uint64_t xbox_va,
     VmRegion r;
     r.xbox_va = xbox_va;
     r.size = aligned_size;
+    r.allocation_base = xbox_va;
     r.state = RegionState::Reserved;
     r.protection = MemProtect::NoAccess;
     r.name = std::move(name);
@@ -273,6 +274,7 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
     VmRegion r;
     r.xbox_va = candidate;
     r.size = aligned;
+    r.allocation_base = candidate;
     r.state = RegionState::Reserved;
     r.protection = MemProtect::NoAccess;
     r.name = std::move(name);
