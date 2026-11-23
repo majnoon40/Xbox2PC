@@ -932,12 +932,31 @@ TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     EXPECT_NE(duplicated.value(), original);
     EXPECT_EQ(w.tq->live_queues(), 1u); // one queue object, two handles
 
+    std::atomic<bool> dispatch_done{false};
+    std::atomic<bool> dispatch_ok{false};
+    std::thread blocked_dispatch([&] {
+        const auto result = w.tq->dispatch(
+            owner_pid, original, XTaskQueuePort::Work, 0xFFFFFFFFu);
+        dispatch_ok.store(result.ok(), std::memory_order_release);
+        dispatch_done.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(dispatch_done.load(std::memory_order_acquire));
+
+    // Closing the original handle cannot cancel a wait whose duplicated
+    // handle still retains the same queue object.
     EXPECT_TRUE(w.tq->close_queue(owner_pid, original).ok());
     EXPECT_EQ(w.tq->live_queues(), 1u);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(dispatch_done.load(std::memory_order_acquire));
+
+    EXPECT_TRUE(w.tq->terminate_queue(owner_pid, duplicated.value(), true).ok());
+    blocked_dispatch.join();
+    EXPECT_TRUE(dispatch_done.load(std::memory_order_acquire));
+    EXPECT_TRUE(dispatch_ok.load(std::memory_order_acquire));
     EXPECT_TRUE(w.tq->dispatch(owner_pid, duplicated.value(),
                                XTaskQueuePort::Work, 0).ok());
 
-    EXPECT_TRUE(w.tq->terminate_queue(owner_pid, duplicated.value(), true).ok());
     EXPECT_TRUE(w.tq->close_queue(owner_pid, duplicated.value()).ok());
     EXPECT_EQ(w.tq->live_queues(), 0u);
 }
