@@ -2,7 +2,9 @@
 
 #include "xbox2pc/sync_objects.hpp"
 
-#include <chrono>\n#include <algorithm>\n#include <climits>
+#include <chrono>
+#include <algorithm>
+#include <climits>
 #include <thread>
 #include <utility>
 
@@ -192,7 +194,8 @@ Result<std::int64_t> RtGuestSemaphore::release(std::uint32_t count) {
 std::int64_t RtGuestSemaphore::value() const { std::lock_guard guard(lock_); return count_; }
 void RtGuestSemaphore::close() { std::lock_guard guard(lock_); closed_ = true; changed_.notify_all(); }
 bool RtGuestSemaphore::is_closed() const { std::lock_guard guard(lock_); return closed_; }
-\n// ── RtCondvar ──────────────────────────────────────────────────────────────
+
+// ── RtCondvar ──────────────────────────────────────────────────────────────
 
 RtCondvar::RtCondvar(RtMutex& partner)
     : RuntimeObject(static_type_id()), partner_(partner) {

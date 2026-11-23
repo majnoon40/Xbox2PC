@@ -22,7 +22,9 @@
 // are undocumented — see docs for confirmed-vs-inferred framing).
 
 #include <atomic>
-#include <chrono>\n#include <condition_variable>\n#include <functional>
+#include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -151,7 +153,8 @@ private:
     const bool valid_initialization_;
     bool closed_ = false;
 };
-\n// ── condition variable ────────────────────────────────────────────────────
+
+// ── condition variable ────────────────────────────────────────────────────
 
 class RtCondvar : public RuntimeObject {
 public:

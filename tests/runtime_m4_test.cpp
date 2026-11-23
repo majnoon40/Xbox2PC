@@ -993,7 +993,8 @@ TEST(GuestSyncTest, SemaphoreRejectsInvalidConstruction) {
     EXPECT_EQ(a.acquire(0).errc(),RuntimeErrc::InvalidArgument);
     EXPECT_EQ(b.release().errc(),RuntimeErrc::InvalidArgument);
 }
-\nint main(int argc, char** argv) {
+
+int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
