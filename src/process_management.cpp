@@ -23,6 +23,11 @@ ManagedProcess::~ManagedProcess() = default;
 
 Result<void> ManagedProcess::add_module_descriptor(const ModuleDescriptor& mod) {
     std::lock_guard lock(detail_lock_);
+    const ProcessState cur = state();
+    if (cur == ProcessState::Terminating || cur == ProcessState::Terminated ||
+        cur == ProcessState::Failed) {
+        return Result<void>(RuntimeErrc::ProcessTerminated, "process is terminating");
+    }
     modules_.push_back(mod);
     return Result<void>::ok_result();
 }
@@ -32,8 +37,23 @@ std::vector<ModuleDescriptor> ManagedProcess::module_descriptors() const {
     return modules_;
 }
 
+Result<void> ManagedProcess::begin_termination() {
+    std::lock_guard lock(detail_lock_);
+    return RtProcess::begin_termination();
+}
+
+Result<void> ManagedProcess::finish_termination(std::uint64_t exit_code) {
+    std::lock_guard lock(detail_lock_);
+    return RtProcess::finish_termination(exit_code);
+}
+
 Result<void> ManagedProcess::attach_thread(std::uint64_t thread_obj_id) {
     std::lock_guard lock(detail_lock_);
+    const ProcessState cur = state();
+    if (cur == ProcessState::Terminating || cur == ProcessState::Terminated ||
+        cur == ProcessState::Failed) {
+        return Result<void>(RuntimeErrc::ProcessTerminated, "process is terminating");
+    }
     for (std::uint64_t t : threads_) {
         if (t == thread_obj_id) {
             return Result<void>(RuntimeErrc::AlreadyExists, "thread already attached");
@@ -251,6 +271,9 @@ Result<void> ProcessManager::terminate_process(Handle process,
     // Stop all threads first, then join them before touching process-owned
     // handles or guest memory. A timeout leaves the process resources intact;
     // callers can retry termination after the cooperative thread exits.
+    auto begun = proc->begin_termination();
+    if (!begun.ok()) return begun;
+    if (proc->state() == ProcessState::Terminated) return Result<void>::ok_result();
     const auto tids = proc->thread_ids();
     for (const std::uint64_t tid : tids) {
         auto t = objects_.lookup_id(tid);
@@ -283,7 +306,7 @@ Result<void> ProcessManager::terminate_process(Handle process,
             return detached;
         }
     }
-    return proc->terminate(exit_code);
+    return proc->finish_termination(exit_code);
 }
 
 Result<Handle> ProcessManager::spawn_thread(Handle process,
