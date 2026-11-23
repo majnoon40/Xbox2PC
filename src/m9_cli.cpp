@@ -10,6 +10,7 @@
 
 #include "xbox2pc/binary_validation.hpp"
 #include "xbox2pc/diagnostics.hpp"
+#include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
 #include "xbox2pc/static_analysis.hpp"
@@ -371,9 +372,57 @@ int run_m9_binary_cli(int argc, char** argv) {
     } else if (command == "binary-imports") {
         result = imports_json(image);
     } else if (command == "binary-relocations") {
-        result = directory_json(image, xbox2pc::pe::kDirReloc);
+        result = Json::object();
+        auto decoded = xbox2pc::rt::loader::decode_relocations(
+            image, bytes->data(), bytes->size(),
+            xbox2pc::rt::loader::kMaxRelocEntries);
+        result.set("status", decoded.ok() ? "PASSED" : "FAILED");
+        if (!decoded.ok()) {
+            result.set("error", decoded.error_string());
+        } else {
+            Json blocks = Json::array();
+            std::uint64_t entry_count = 0;
+            for (const auto& block : decoded.value()) {
+                Json row = Json::object();
+                row.set("page_rva", block.page_rva);
+                row.set("block_size", block.block_size);
+                Json entries = Json::array();
+                for (const auto& entry : block.entries) {
+                    Json item = Json::object();
+                    item.set("type", xbox2pc::rt::loader::reloc_type_to_name(entry.type));
+                    item.set("page_rva", entry.page_rva);
+                    item.set("target_rva", entry.target_rva);
+                    entries.push_back(std::move(item));
+                    ++entry_count;
+                }
+                row.set("entries", std::move(entries));
+                blocks.push_back(std::move(row));
+            }
+            result.set("blocks", std::move(blocks));
+            result.set("entry_count", entry_count);
+            result.set("application", "NOT_TESTED");
+        }
     } else if (command == "binary-tls") {
-        result = directory_json(image, xbox2pc::pe::kDirTls);
+        result = Json::object();
+        xbox2pc::rt::loader::LoadDiagnostics tls_diagnostics;
+        auto decoded = xbox2pc::rt::loader::decode_tls(
+            image, bytes->data(), bytes->size(), tls_diagnostics);
+        result.set("status", decoded.ok() ? "PASSED" : "FAILED");
+        if (!decoded.ok()) {
+            result.set("error", decoded.error_string());
+        } else if (!decoded.value().has_value()) {
+            result.set("present", false);
+        } else {
+            const auto& tls = *decoded.value();
+            result.set("present", true);
+            result.set("template_rva", tls.template_rva);
+            result.set("template_size", tls.template_size);
+            result.set("zero_fill_size", tls.zero_fill_size);
+            result.set("index_slot_rva", tls.index_slot_rva);
+            result.set("callbacks_va", tls.callbacks_va);
+            result.set("callback_count", tls.callback_count);
+            result.set("callback_execution", "NOT_TESTED");
+        }
     } else if (command == "binary-instructions") {
         result = analysis_json(analysis);
     } else if (command == "binary-compat") {
