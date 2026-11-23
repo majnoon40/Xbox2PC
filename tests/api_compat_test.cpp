@@ -171,6 +171,16 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     const auto* semaphore = reg.find("kernel32", "ReleaseSemaphore");
     ASSERT_NE(semaphore, nullptr);
     EXPECT_NE(semaphore->notes.find("optional lpPreviousCount output"), std::string::npos);
+    const auto* submit = reg.find("xgameruntime", "XTaskQueueSubmitCallback");
+    const auto* delayed = reg.find("xgameruntime", "XTaskQueueSubmitDelayedCallback");
+    ASSERT_NE(submit, nullptr);
+    ASSERT_NE(delayed, nullptr);
+    EXPECT_EQ(submit->compat, ApiStatus::PartiallyImplemented);
+    EXPECT_EQ(submit->impl, ApiStatus::Unsupported);
+    EXPECT_NE(submit->notes.find("guest callback invocation"), std::string::npos);
+    EXPECT_EQ(delayed->compat, ApiStatus::PartiallyImplemented);
+    EXPECT_EQ(delayed->impl, ApiStatus::Unsupported);
+    EXPECT_NE(delayed->notes.find("timer scheduling"), std::string::npos);
     const auto* close = reg.find("kernel32", "CloseHandle");
     ASSERT_NE(close, nullptr);
     EXPECT_NE(close->notes.find("guest mutex"), std::string::npos);
