@@ -1307,11 +1307,7 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
     const auto cancelled = [&guest_thread]() {
         auto* object = guest_thread.get();
         auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
-        if (thread == nullptr) return false;
-        // A wait is a cooperative safe point too: process suspension parks
-        // here without converting it into terminal cancellation.
-        if (!thread->suspension_point()) return true;
-        return thread->stop_requested();
+        return thread != nullptr && thread->stop_requested();
     };
 
     auto* value = object.value().get();
@@ -1320,6 +1316,10 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
         const auto deadline = timeout_ns < 0 || timeout_ns > INT64_MAX - start_ns
             ? INT64_MAX : start_ns + timeout_ns;
         for (;;) {
+            if (guest_runtime_thread != nullptr &&
+                !guest_runtime_thread->suspension_point())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "event wait cancelled by guest thread stop");
             if (cancelled())
                 return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
                                              "event wait cancelled by guest thread stop");
@@ -1337,16 +1337,48 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
         }
     }
     if (auto* mutex = value->as<RtGuestMutex>()) {
-        auto waited = mutex->acquire(tid, timeout_ns, cancelled);
-        if (waited.ok()) return Result<std::uint32_t>(waited.value() ? 0x80u : 0u);
-        if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
-        return Result<std::uint32_t>(waited.errc(), waited.context());
+        for (;;) {
+            if (guest_runtime_thread != nullptr &&
+                !guest_runtime_thread->suspension_point())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "mutex wait cancelled by guest thread stop");
+            if (cancelled())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "mutex wait cancelled by guest thread stop");
+            const auto now = pal::now_ns();
+            if (deadline != INT64_MAX && now >= deadline)
+                return Result<std::uint32_t>(0x102u);
+            const auto remaining = deadline == INT64_MAX
+                ? pal::MonotonicNs(2'000'000)
+                : std::max<pal::MonotonicNs>(0, deadline - now);
+            const auto slice = std::min<pal::MonotonicNs>(2'000'000, remaining);
+            auto waited = mutex->acquire(tid, slice, cancelled);
+            if (waited.ok()) return Result<std::uint32_t>(waited.value() ? 0x80u : 0u);
+            if (waited.errc() != RuntimeErrc::Timeout)
+                return Result<std::uint32_t>(waited.errc(), waited.context());
+        }
     }
     if (auto* semaphore = value->as<RtGuestSemaphore>()) {
-        auto waited = semaphore->acquire(timeout_ns, cancelled);
-        if (waited.ok()) return Result<std::uint32_t>(0u);
-        if (waited.errc() == RuntimeErrc::Timeout) return Result<std::uint32_t>(0x102u);
-        return Result<std::uint32_t>(waited.errc(), waited.context());
+        for (;;) {
+            if (guest_runtime_thread != nullptr &&
+                !guest_runtime_thread->suspension_point())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "semaphore wait cancelled by guest thread stop");
+            if (cancelled())
+                return Result<std::uint32_t>(RuntimeErrc::ThreadTerminated,
+                                             "semaphore wait cancelled by guest thread stop");
+            const auto now = pal::now_ns();
+            if (deadline != INT64_MAX && now >= deadline)
+                return Result<std::uint32_t>(0x102u);
+            const auto remaining = deadline == INT64_MAX
+                ? pal::MonotonicNs(2'000'000)
+                : std::max<pal::MonotonicNs>(0, deadline - now);
+            const auto slice = std::min<pal::MonotonicNs>(2'000'000, remaining);
+            auto waited = semaphore->acquire(slice, cancelled);
+            if (waited.ok()) return Result<std::uint32_t>(0u);
+            if (waited.errc() != RuntimeErrc::Timeout)
+                return Result<std::uint32_t>(waited.errc(), waited.context());
+        }
     }
     return Result<std::uint32_t>(RuntimeErrc::ObjectTypeMismatch,
                                  "unsupported waitable object");
