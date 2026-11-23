@@ -911,8 +911,8 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
                      ") but no implementation is registered: " + d->evidence;
             return b;
         }
-        // The GDK and Win32 subranges each have 65,534 usable IDs. The
-        // completion sentinel 0x5100FFFF is deliberately never allocated.
+        // Both subranges share one registry-wide 65,534-ID budget.
+        // The completion sentinel 0x5100FFFF is deliberately never allocated.
         if (reg_.next_binding_id_ > 0xFFFEu) {
             b.status = loader::ImportStatus::Unsupported;
             b.note = "registry-wide API binding address space exhausted";
