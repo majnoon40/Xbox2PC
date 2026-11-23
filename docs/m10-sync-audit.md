@@ -39,14 +39,14 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 - Added process-scoped handle-backed `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`, and `ReleaseSemaphore` support. `WaitForSingleObject` now accepts events, mutexes, and semaphores; mutex waits return `WAIT_ABANDONED_0` when ownership was abandoned.
 - Guest-thread stop is polled during event, mutex, and semaphore waits when the calling guest thread can be resolved to a managed runtime thread. The same wait safe point now checks the managed thread's shared cooperative suspension gate, so process suspend/resume parks and releases those waits without setting terminal stop. The wait implementation still uses bounded host-thread polling; this is not a guest scheduler, async preemption, or scheduler-owned park queue.
 - The Win32 wrappers currently support unnamed mutexes/semaphores with null security attributes and names. `ReleaseSemaphore` supports an optional previous-count output pointer and the descriptor metadata now reflects that behavior. Named objects, security descriptors, and DuplicateHandle-style duplication for Win32 synchronization objects remain unsupported. Task-queue handle duplication is implemented separately; see the task-queue section below.
-- `CloseHandle` closes service-created event, guest mutex, and guest semaphore handles. An internal guest wait-any primitive polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). Tests cover manual/auto-reset events, semaphore consumption, timeout, duplicate/oversized handle rejection, and abandoned-mutex results. The Win32 `WaitForMultipleObjects` wait-any subset is exposed through the guest marshalling bridge; wait-all semantics remain unimplemented.
+- `CloseHandle` closes service-created event, guest mutex, and guest semaphore handles. An internal guest wait-any primitive polls 1–64 unique process-owned synchronization handles and returns the selected object index (including abandoned-mutex status). Tests cover manual/auto-reset events, semaphore consumption, timeout, duplicate/oversized handle rejection, and abandoned-mutex results. The Win32 `WaitForMultipleObjects` wait-any and transactional wait-all subsets are exposed through the guest marshalling bridge; scheduler-aware parking remains unimplemented.
 
 ## Remaining implementation order
 
 1. Add deterministic tests for cancellation during a blocked wait, wake-on-release, abandonment, and object-close races; run all sanitizer configurations.
 2. Connect guest wait parking to the execution engine only after a backend-level park/resume contract exists.
 3. Automatic mutex abandonment is now invoked by the managed guest-thread exit trampoline; continue testing this path under sanitizers.
-4. Expand wait-multiple semantics with correct auto-reset consumption and rollback behavior.
+4. Replace bounded host-thread polling with scheduler-owned park/resume queues once every supported execution backend exposes a safe wait integration contract.
 5. Continue virtual memory, task queue, I/O, and final compatibility audit work.
 
 ## Validation boundary
