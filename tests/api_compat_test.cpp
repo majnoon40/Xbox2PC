@@ -35,6 +35,7 @@
 #include "xbox2pc/pe_builder.hpp"
 #include "xbox2pc/pe_parser.hpp"
 #include "xbox2pc/runtime_core.hpp"
+#include "xbox2pc/sync_objects.hpp"
 
 using namespace xbox2pc::rt::api;
 using namespace xbox2pc::rt::loader;
@@ -753,6 +754,17 @@ TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
     auto semaphore_consumed = w.grt->wait_object(pid.value(), 0, semaphore.value(), 0);
     ASSERT_TRUE(semaphore_consumed.ok());
     EXPECT_EQ(semaphore_consumed.value(), 0x102u); // wait-any consumes semaphore count
+
+    auto mutex = w.grt->create_mutex(pid.value(), 501, false);
+    ASSERT_TRUE(mutex.ok());
+    auto acquired_mutex = w.grt->wait_object(pid.value(), 501, mutex.value(), 0);
+    ASSERT_TRUE(acquired_mutex.ok());
+    EXPECT_EQ(acquired_mutex.value(), 0u);
+    xbox2pc::rt::abandon_guest_mutexes_for_thread(501);
+    const std::vector<std::uint64_t> abandoned_only{mutex.value()};
+    auto abandoned = w.grt->wait_objects_any(pid.value(), 502, abandoned_only, 0);
+    ASSERT_TRUE(abandoned.ok());
+    EXPECT_EQ(abandoned.value(), 0x80u); // WAIT_ABANDONED_0 for selected mutex
 
     const std::vector<std::uint64_t> duplicate{first.value(), first.value()};
     EXPECT_FALSE(w.grt->wait_objects_any(pid.value(), 0, duplicate, 0).ok());
