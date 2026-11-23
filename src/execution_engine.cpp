@@ -373,6 +373,32 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
         }
     }
 
+    // Decode explicitly planned, bounded guest pointer arrays through GuestMemory.
+    for (const auto& array : plan.pointer_array_args) {
+        if (array.pointer_arg >= args.value().size() ||
+            array.count_arg >= ctx.arg_count || array.element_size != sizeof(std::uint64_t) ||
+            array.max_count == 0 || array.max_count > 64) {
+            return Ret(RuntimeErrc::InvalidArgument, "invalid pointer-array marshalling plan");
+        }
+        const auto count = ctx.args[array.count_arg];
+        if (count == 0 || count > array.max_count) {
+            return Ret(RuntimeErrc::InvalidArgument, "guest pointer-array count is outside the supported bound");
+        }
+        const auto ptr = args.value()[array.pointer_arg].ptr_va;
+        const auto bytes = count * array.element_size;
+        const auto valid = mem.validate(ptr, bytes, false, false);
+        if (!valid.ok()) return Ret(RuntimeErrc::NotFound, "guest pointer array is not readable");
+        auto& values = ctx.pointer_arrays[array.pointer_arg];
+        values.reserve(static_cast<std::size_t>(count));
+        for (std::uint64_t i = 0; i < count; ++i) {
+            if (i > (UINT64_MAX - ptr) / array.element_size)
+                return Ret(RuntimeErrc::InvalidArgument, "guest pointer-array address overflow");
+            auto value = mem.read_u64(ptr + i * array.element_size);
+            if (!value.ok()) return Ret(RuntimeErrc::NotFound, "guest pointer-array element is unreadable");
+            values.push_back(value.value());
+        }
+    }
+
     // 3. Dispatch through M7.
     api::ApiCallResult api_res =
         registry.dispatch(plan.library, plan.export_name, ctx);
@@ -554,6 +580,13 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     } else if (id == "WaitForSingleObject") {
         plan.call.args.push_back(int_arg());
         plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "WaitForMultipleObjects") {
+        plan.call.args.push_back(int_arg()); // nCount
+        plan.call.args.push_back(ptr_in(0)); // lpHandles
+        plan.call.args.push_back(int_arg()); // bWaitAll
+        plan.call.args.push_back(int_arg()); // dwMilliseconds
+        plan.pointer_array_args.push_back({1, 0, 64, 8});
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "VirtualQuery") {
         plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(ptr_out(48));
