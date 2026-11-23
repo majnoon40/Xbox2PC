@@ -144,6 +144,17 @@ jobs:
               if "DLL Name:" in line
           ]
           assert imports == ["kernel32.dll"], imports
+          required_imports = {
+              "GetCurrentProcessId", "GetCurrentThreadId",
+              "VirtualAlloc", "VirtualQuery", "VirtualProtect", "VirtualFree",
+              "CreateEventW", "SetEvent", "WaitForSingleObject", "CloseHandle",
+              "SetLastError", "GetLastError", "ExitProcess",
+          }
+          assert required_imports.issubset(set(basic_text.split())), required_imports
+
+          disassembly = subprocess.check_output(
+              ["llvm-objdump", "-d", basic], text=True)
+          assert "%gs:0x58" in disassembly, "compiler-generated TLS read missing"
 
           def directory(text, label):
               line = next(
