@@ -28,3 +28,9 @@ invalid-pointer/depth paths.
 ## Bounded guest handle-array marshalling
 
 The M10 `WaitForMultipleObjects` subset uses an explicit pointer-array plan: the handle count is taken from the documented scalar parameter, capped at 64, and each 64-bit handle is read through `GuestMemory`. The bridge validates the complete guest array range before reading any element. The Win32 wrapper currently implements wait-any only; `bWaitAll=TRUE` fails closed. This does not provide scheduler-aware parking.
+
+## Import-to-dispatch identity
+
+The loader's `LoadDiagnostics::imports` records each resolved import's synthetic IAT value and original DLL/name-or-ordinal lookup. `ExecutionContext::prepare_entry` copies only resolved bindings into `ExecutionRequest::api_bindings`; the execution engine matches the exact landing value, looks up the verified descriptor, builds the whitelisted `MarshalPlan`, validates the guest return address, marshals through `GuestMemory`, and resumes at the saved guest return address. Binding-range values without a matching resolved import identity fail closed. GDK and Win32 bindings use separate bounded synthetic subranges; the completion sentinel is reserved and binding allocation stops before it can collide.
+
+The engine integration is covered by a synthetic guest test that calls `XGameRuntimeInitialize` through a resolved binding and returns to guest code. This validates the API-call bridge path only; it does not imply broad Xbox API or retail-game compatibility.
