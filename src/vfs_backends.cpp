@@ -96,8 +96,6 @@ Result<VfsStat> HostDirBackend::stat(const VfsPath& rel) {
     std::lock_guard lock(io_lock_);
     auto safe = reject_symlink_components(rel, "stat");
     if (!safe.ok()) return Result<VfsStat>(safe.errc(), safe.context());
-    auto safe = reject_symlink_components(rel, "delete_file");
-    if (!safe.ok()) return safe;
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
@@ -227,10 +225,8 @@ Result<void> HostDirBackend::delete_file(const VfsPath& rel) {
     }
     if (read_only_) return Result<void>(RuntimeErrc::LockNotOwned, "backend is read-only");
     std::lock_guard lock(io_lock_);
-    auto safe = reject_symlink_components(rel, "list");
-    if (!safe.ok()) {
-        return Result<std::vector<VfsDirEntry>>(safe.errc(), safe.context());
-    }
+    auto safe = reject_symlink_components(rel, "delete_file");
+    if (!safe.ok()) return Result<void>(safe.errc(), safe.context());
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) return Result<void>(st.errc(), st.context());
@@ -280,6 +276,10 @@ Result<std::vector<VfsDirEntry>> HostDirBackend::list(const VfsPath& rel) {
             RuntimeErrc::NotInitialized, "backend root invalid: " + root_error_);
     }
     std::lock_guard lock(io_lock_);
+    auto safe = reject_symlink_components(rel, "list");
+    if (!safe.ok()) {
+        return Result<std::vector<VfsDirEntry>>(safe.errc(), safe.context());
+    }
     const std::string hp = host_path_for(rel);
     auto st = pal::stat_host_path(hp);
     if (!st.ok()) {
