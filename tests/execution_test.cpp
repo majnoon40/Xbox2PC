@@ -917,6 +917,7 @@ struct LoadedGuest {
     loader::LoadResult out;
     loader::LoadDiagnostics diagnostics;
     std::vector<std::uint8_t> bytes;
+    std::vector<std::uint8_t> original_bytes;
     loader::ImageLoader loader;
     api::ApiResolver resolver;
     bool load_ok = false;
@@ -935,6 +936,7 @@ struct LoadedGuest {
             spec.imports = {{"xgameruntime", {{"XGameRuntimeInitialize", 1}}}};
         }
         bytes = test::PeBuilder(spec).build();
+        original_bytes = bytes;
         diag::Diagnostics pd;
         auto img = pe::parse(bytes.data(), bytes.size(), name, pd);
         auto h = loader.load_image(w.pm, w.core.objects(), ph, img,
@@ -1604,8 +1606,11 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
     LoadedGuest guest(w, code, "import-map.exe", true);
     ASSERT_TRUE(guest.load_ok) << guest.load_error;
 
+    EXPECT_EQ(guest.bytes, guest.original_bytes)
+        << "ImageLoader must not modify the caller-owned PE file buffer";
     diag::Diagnostics parsed_diags;
-    const auto parsed = pe::parse(guest.bytes.data(), guest.bytes.size(),
+    const auto parsed = pe::parse(guest.original_bytes.data(),
+                                  guest.original_bytes.size(),
                                   "import-map.exe", parsed_diags);
     ASSERT_GT(parsed.directories.size(), pe::kDirImport);
     ASSERT_NE(parsed.directories[pe::kDirImport].rva, 0u);
@@ -1615,7 +1620,8 @@ TEST(ContextTest, CarriesResolvedLoaderImportsIntoExecutionRequest) {
     loader::LoadDiagnostics probe_diagnostics;
     auto probed_imports = guest.loader.resolve_imports(
         guest.proc->address_space(), guest.out.layout, parsed,
-        guest.bytes.data(), guest.bytes.size(), guest.resolver, probe_diagnostics);
+        guest.original_bytes.data(), guest.original_bytes.size(),
+        guest.resolver, probe_diagnostics);
     ASSERT_TRUE(probed_imports.ok()) << probed_imports.error_string();
     // The raw thunk walk may be empty for this mapped fixture; load_image
     // must still preserve the parser's validated import metadata through its
