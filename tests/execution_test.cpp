@@ -89,6 +89,39 @@ Handle scratch_region(ManagedProcess& proc, std::uint64_t size,
     return {};
 }
 
+class ContextBindingProbe final : public IExecutionEngine {
+public:
+    const char* engine_kind() const override { return "context-binding-probe"; }
+    const char* engine_description() const override { return "test probe"; }
+    Result<void> bind_execution_context(std::uint64_t pid, std::uint64_t tid,
+                                        AddressSpace& space) override {
+        bound_pid = pid;
+        bound_tid = tid;
+        bound_space = &space;
+        ++bind_count;
+        return Result<void>::ok_result();
+    }
+    ExecutionResult run(const ExecutionRequest&, cpu::CpuState& state,
+                        const std::atomic<bool>&) override {
+        run_called = true;
+        ExecutionResult result;
+        result.outcome = Outcome::Returned;
+        result.cpu.state = state;
+        return result;
+    }
+    bool supports_single_step() const override { return true; }
+    Result<std::uint64_t> single_step(cpu::CpuState&, const ExecutionRequest&) override {
+        step_called = true;
+        return Result<std::uint64_t>(0x1234u);
+    }
+    std::uint64_t bound_pid = 0;
+    std::uint64_t bound_tid = 0;
+    AddressSpace* bound_space = nullptr;
+    unsigned bind_count = 0;
+    bool run_called = false;
+    bool step_called = false;
+};
+
 // Code emitter helpers (subset).
 std::vector<std::uint8_t> mov_rax_imm(std::uint64_t v) {
     std::vector<std::uint8_t> b{0x48, 0xB8};
@@ -733,6 +766,42 @@ struct LoadedGuest {
     }
 };
 }  // namespace
+
+TEST(ContextTest, AutomaticallyBindsProcessThreadAndAddressSpaceToEngine) {
+    ExecWorld w;
+    auto [handle, process] = w.new_process("context-binding.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = w.pm.resolve_pid(handle);
+    ASSERT_TRUE(pid.ok());
+
+    auto cfg = ExecutionConfig::default_validated().value();
+    ExecutionContext ctx(pid.value(), 0x5678, process->address_space(),
+                         w.reg, cfg, "context-binding");
+    ASSERT_TRUE(ctx.initialize().ok());
+
+    ExecutionRequest req;
+    req.stack_top_va = ctx.info().stack_top;
+    req.stack_size = ctx.info().stack_size;
+    ContextBindingProbe engine;
+    std::atomic<bool> stop{false};
+
+    const auto invoked = ctx.invoke(req, engine, stop);
+    ASSERT_TRUE(invoked.ok()) << invoked.error_string();
+    EXPECT_TRUE(engine.run_called);
+    EXPECT_EQ(engine.bound_pid, pid.value());
+    EXPECT_EQ(engine.bound_tid, 0x5678u);
+    EXPECT_EQ(engine.bound_space, &process->address_space());
+
+    const auto stepped = ctx.step(req, engine);
+    ASSERT_TRUE(stepped.ok()) << stepped.error_string();
+    EXPECT_TRUE(engine.step_called);
+    EXPECT_EQ(engine.bind_count, 2u);
+    EXPECT_EQ(engine.bound_pid, pid.value());
+    EXPECT_EQ(engine.bound_tid, 0x5678u);
+
+    EXPECT_TRUE(ctx.destroy().ok());
+    EXPECT_TRUE(w.pm.terminate_process(handle, 0).ok());
+}
 
 TEST(EngineTest, ExecutesSubsetProgram) {
     ExecWorld w;

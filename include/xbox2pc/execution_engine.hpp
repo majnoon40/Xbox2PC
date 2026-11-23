@@ -158,6 +158,19 @@ public:
     // Run one request to completion / fault / budget. `interrupted`
     // is polled between instructions: setting it yields Outcome::
     // Interrupted (cancellation is observable).
+    // Bind the identity and address space of the guest context before each
+    // run/step. Backends that dispatch guest APIs must override this hook.
+    // The default preserves compatibility for backends that do not yet
+    // consume runtime context.
+    virtual Result<void> bind_execution_context(std::uint64_t process_id,
+                                                std::uint64_t thread_id,
+                                                AddressSpace& space) {
+        (void)process_id;
+        (void)thread_id;
+        (void)space;
+        return Result<void>::ok_result();
+    }
+
     virtual ExecutionResult run(const ExecutionRequest& req,
                                 cpu::CpuState& io_cpu,
                                 const std::atomic<bool>& interrupted) = 0;
@@ -186,11 +199,23 @@ public:
     }
 
     // NOTE: guest memory access is provided per-run via the context's
-    // process address space; run() takes the space reference here.
+    // process address space. ExecutionContext invokes bind_execution_context
+    // automatically before run/step/callback execution.
     void bind_space(AddressSpace& space) { mem_ = std::make_unique<guest::GuestMemory>(space); }
     void bind_process(std::uint64_t pid, std::uint64_t tid) {
         pid_ = pid;
         tid_ = tid;
+    }
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space) override {
+        if (process_id == 0 || thread_id == 0) {
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "guest process and thread identities must be nonzero");
+        }
+        bind_space(space);
+        bind_process(process_id, thread_id);
+        return Result<void>::ok_result();
     }
 
     ExecutionResult run(const ExecutionRequest& req,

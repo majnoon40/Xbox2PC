@@ -124,3 +124,18 @@ Added the documented Win32 VirtualQuery descriptor and x64 marshalling plan. Pro
 Partial behavior: free gaps are not enumerated as MEM_FREE; original allocation protection is not retained, so current protection is reported; memory type is reported as MEM_PRIVATE. This is not complete Win32 or Xbox memory-query behavior.
 
 Evidence: https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualquery and https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-memory_basic_information
+
+
+## M10.5 — automatic execution-context identity binding
+
+The M8 `ExecutionContext` now binds its process ID, guest thread ID, and
+authoritative M4 address space to an execution backend before invoke and
+single-step operations. TLS callback execution uses the same binding path.
+The deterministic backend rejects zero identities and binds its guest memory
+and fault/API identity together. A test probe verifies that invoke and step
+receive the exact context identities and address-space reference.
+
+Other execution backends retain a default no-op hook for source compatibility;
+a backend that dispatches guest APIs must override it before it can claim
+process/thread-aware API dispatch. This does not itself implement a general
+x86-64 emulator or prove automatic OS thread scheduling.
