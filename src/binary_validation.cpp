@@ -79,6 +79,14 @@ BinaryReport validate_pe(const std::uint8_t* data, std::size_t size,
         "identification", StageStatus::Passed, "PE signature and headers parsed"));
 
     Stage structure = make_stage("pe-structure", StageStatus::Passed);
+    if (diagnostics.has_warnings()) {
+        if (structure.status != StageStatus::Failed) {
+            structure.status = StageStatus::Warning;
+        }
+        for (const auto& line : diagnostics.lines()) {
+            structure.findings.push_back(line);
+        }
+    }
     if (!image.opt.is_pe32plus) {
         structure.status = StageStatus::Failed;
         structure.findings.push_back("image is not PE32+");
