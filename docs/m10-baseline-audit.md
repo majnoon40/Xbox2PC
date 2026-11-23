@@ -188,3 +188,8 @@ Regression tests cover reserve-only protection metadata, protection changes with
 ## M10.8 — VirtualQuery image memory type
 
 Tracked regions now retain a Windows memory type. Generic guest allocations remain MEM_PRIVATE; the PE image loader tags image headers and sections as MEM_IMAGE before commit. VirtualQuery reports the tracked type instead of incorrectly labeling every mapped PE image as MEM_PRIVATE. MEM_MAPPED is reserved in the metadata model for future file-mapping support and is not currently produced.
+
+
+## M10.9 — compatibility report summaries
+
+The text and JSON compatibility reports now include aggregate counts for every stable CompatCode, total imports, and verified descriptors. Per-import rows remain present, so summaries do not hide individual unresolved/unsupported imports. This improves triage of large real-world import tables without treating import coverage as proof of game compatibility.

@@ -1284,6 +1284,9 @@ TEST(CompatReportTest, CodesAndHonestVerdict) {
     EXPECT_EQ(rep.rows[0].code, CompatCode::OkImplemented);
     EXPECT_EQ(rep.rows[1].code, CompatCode::OkNative);
     EXPECT_EQ(rep.rows[2].code, CompatCode::UnknownImport);
+    EXPECT_EQ(rep.counts[static_cast<std::size_t>(CompatCode::OkImplemented)], 1u);
+    EXPECT_EQ(rep.counts[static_cast<std::size_t>(CompatCode::OkNative)], 1u);
+    EXPECT_EQ(rep.counts[static_cast<std::size_t>(CompatCode::UnknownImport)], 1u);
     EXPECT_EQ(rep.verdict, "imports partially covered (see codes)");
     // Evidence citations ride along on verified rows.
     EXPECT_EQ(rep.rows[0].evidence.rfind("[GDK-INIT] https://", 0), 0u);

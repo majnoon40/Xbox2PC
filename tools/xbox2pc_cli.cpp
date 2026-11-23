@@ -2464,6 +2464,17 @@ int cmd_compat_report(const std::string& path,
             arr.push_back(std::move(rj));
         }
         j.set("imports", std::move(arr));
+        Json summary = Json::object();
+        summary.set("total", static_cast<std::uint64_t>(rep.rows.size()));
+        std::uint64_t verified_count = 0;
+        for (const auto& row : rep.rows) if (row.verified) ++verified_count;
+        summary.set("verified", verified_count);
+        for (std::size_t i = 0; i < 11; ++i) {
+            const auto code = static_cast<xbox2pc::rt::api::CompatCode>(i);
+            summary.set(xbox2pc::rt::api::compat_code_to_name(code),
+                        static_cast<std::uint64_t>(rep.counts[i]));
+        }
+        j.set("summary", std::move(summary));
         j.set("delay_entries", static_cast<std::uint64_t>(rep.delay_entries));
         j.set("delay_resolved", static_cast<std::uint64_t>(rep.delay_resolved));
         j.set("verdict", rep.verdict);
@@ -2485,6 +2496,15 @@ int cmd_compat_report(const std::string& path,
         } else if (!row.note.empty()) {
             std::printf("      %s\n", row.note.c_str());
         }
+    }
+    std::size_t verified_count = 0;
+    for (const auto& row : rep.rows) if (row.verified) ++verified_count;
+    std::printf("summary: %zu imports, %zu verified descriptors\n",
+                rep.rows.size(), verified_count);
+    for (std::size_t i = 0; i < 11; ++i) {
+        const auto code = static_cast<xbox2pc::rt::api::CompatCode>(i);
+        std::printf("  %-22s %zu\n",
+                    xbox2pc::rt::api::compat_code_to_name(code), rep.counts[i]);
     }
     std::printf("delay-load: %zu entries, %zu resolved\n", rep.delay_entries,
                 rep.delay_resolved);
