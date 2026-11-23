@@ -175,14 +175,18 @@ TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     EXPECT_NE(semaphore->notes.find("optional lpPreviousCount output"), std::string::npos);
     const auto* submit = reg.find("xgameruntime", "XTaskQueueSubmitCallback");
     const auto* delayed = reg.find("xgameruntime", "XTaskQueueSubmitDelayedCallback");
+    const auto* duplicate_queue = reg.find("xgameruntime", "XTaskQueueDuplicateHandle");
     ASSERT_NE(submit, nullptr);
     ASSERT_NE(delayed, nullptr);
+    ASSERT_NE(duplicate_queue, nullptr);
     EXPECT_EQ(submit->compat, ApiStatus::PartiallyImplemented);
     EXPECT_EQ(submit->impl, ApiStatus::Unsupported);
     EXPECT_NE(submit->notes.find("guest callback invocation"), std::string::npos);
     EXPECT_EQ(delayed->compat, ApiStatus::PartiallyImplemented);
     EXPECT_EQ(delayed->impl, ApiStatus::Unsupported);
     EXPECT_NE(delayed->notes.find("timer scheduling"), std::string::npos);
+    EXPECT_EQ(duplicate_queue->impl, ApiStatus::Unsupported);
+    EXPECT_NE(duplicate_queue->notes.find("reference-counted"), std::string::npos);
     const auto* close = reg.find("kernel32", "CloseHandle");
     ASSERT_NE(close, nullptr);
     EXPECT_NE(close->notes.find("guest mutex"), std::string::npos);
