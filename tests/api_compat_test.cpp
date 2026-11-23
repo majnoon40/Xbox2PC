@@ -22,6 +22,7 @@
 #include <thread>
 #include <vector>
 
+#include <chrono>
 #include <gtest/gtest.h>
 
 #include "xbox2pc/api_compat.hpp"
@@ -853,6 +854,13 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     auto d = w.tq->dispatch(owner_pid, id, XTaskQueuePort::Work, 0);
     ASSERT_TRUE(d.ok());
     EXPECT_FALSE(d.value());
+
+    const auto dispatch_start = std::chrono::steady_clock::now();
+    auto timed_dispatch = w.tq->dispatch(owner_pid, id, XTaskQueuePort::Work, 15);
+    const auto dispatch_elapsed = std::chrono::steady_clock::now() - dispatch_start;
+    ASSERT_TRUE(timed_dispatch.ok());
+    EXPECT_FALSE(timed_dispatch.value());
+    EXPECT_GE(dispatch_elapsed, std::chrono::milliseconds(10));
     // Terminate: dispatch stays false (documented) — and submissions E_ABORT
     // (modeled: terminated flag).
     EXPECT_TRUE(w.tq->terminate_queue(owner_pid, id, true).ok());
