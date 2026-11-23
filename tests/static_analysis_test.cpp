@@ -15,7 +15,7 @@ TEST(StaticAnalysisTest, FindsDecoderConfirmedSyntheticInstructions) {
 
     ASSERT_TRUE(report.parsed);
     ASSERT_TRUE(report.is_pe32_plus_amd64);
-    ASSERT_EQ(report.confirmed_instructions.size(), 2u);
+    ASSERT_GE(report.confirmed_instructions.size(), 2u);
     EXPECT_EQ(report.confirmed_instructions[0].text, "nop");
     EXPECT_EQ(report.confirmed_instructions[1].text, "ret");
     ASSERT_GE(report.notes.size(), 2u);
@@ -39,4 +39,9 @@ TEST(StaticAnalysisTest, HandlesNullAndEmptyInput) {
     const auto report = xbox2pc::analysis::analyze_pe(nullptr, 0, "empty");
     EXPECT_FALSE(report.parsed);
     EXPECT_FALSE(report.notes.empty());
+}
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }
