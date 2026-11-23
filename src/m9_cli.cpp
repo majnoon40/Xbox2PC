@@ -247,7 +247,15 @@ Json compatibility_json(const xbox2pc::pe::PeImage& image,
     out.set("xbox_platform", std::move(platform));
 
     Json import_status = Json::object();
-    import_status.set("status", "UNKNOWN");
+    const char* import_compatibility_status = "UNKNOWN";
+    if (validation.stages.size() > 2) {
+        if (validation.stages[2].status == xbox2pc::validation::StageStatus::Failed) {
+            import_compatibility_status = "INVALID";
+        } else if (validation.stages[2].status == xbox2pc::validation::StageStatus::Warning) {
+            import_compatibility_status = "PARTIALLY_SUPPORTED";
+        }
+    }
+    import_status.set("status", import_compatibility_status);
     import_status.set("regular_descriptor_count",
                       static_cast<std::uint64_t>(image.imports.entries.size()));
     import_status.set("delay_descriptor_count",
