@@ -508,6 +508,13 @@ Result<void> AddressSpace::resize_region(std::uint64_t xbox_va,
         return Result<void>(RuntimeErrc::NotFound, "no region at that address");
     }
     VmRegion& r = it->second;
+    const auto allocation = r.allocation_base == 0 ? xbox_va : r.allocation_base;
+    for (const auto& [va, segment] : impl_->regions) {
+        if (va != xbox_va &&
+            (segment.allocation_base == 0 ? va : segment.allocation_base) == allocation)
+            return Result<void>(RuntimeErrc::InvalidState,
+                                "cannot resize an allocation after it has been split into ranges");
+    }
     std::uint64_t aligned_new = 0;
     if (!checked_align_up(new_size, page_size_, aligned_new)) {
         return Result<void>(RuntimeErrc::InvalidArgument,
