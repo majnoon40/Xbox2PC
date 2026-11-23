@@ -115,7 +115,8 @@ private:
 class RtGuestMutex : public RuntimeObject {
 public:
     XBOX2PC_RUNTIME_OBJECT_TYPE(RtGuestMutex, Mutex)
-    RtGuestMutex() : RuntimeObject(TypeId::Mutex) {}
+    RtGuestMutex();
+    ~RtGuestMutex() override;
     Result<bool> acquire(std::uint64_t guest_thread_id, pal::MonotonicNs timeout_ns,
                          const std::function<bool()>& cancelled = {});
     Result<void> release(std::uint64_t guest_thread_id);
@@ -131,6 +132,9 @@ private:
     bool abandoned_ = false;
     bool closed_ = false;
 };
+
+// Called by RtThread's exit trampoline to release ownership abandoned by a guest thread.
+void abandon_guest_mutexes_for_thread(std::uint64_t guest_thread_id);
 
 class RtGuestSemaphore : public RuntimeObject {
 public:

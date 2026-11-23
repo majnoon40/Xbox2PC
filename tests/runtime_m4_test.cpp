@@ -1064,6 +1064,27 @@ TEST(GuestSyncTest, SemaphoreReleaseWakesBlockedGuestThread) {
     EXPECT_TRUE(acquired.load(std::memory_order_acquire));
 }
 
+
+namespace {
+void* acquire_guest_mutex_then_exit(RtThread& self, void* raw) {
+    auto* mutex = static_cast<rt::RtGuestMutex*>(raw);
+    const auto acquired = mutex->acquire(self.thread_id(), 0);
+    return acquired.ok() ? nullptr : reinterpret_cast<void*>(1);
+}
+}  // namespace
+
+TEST(GuestSyncTest, GuestThreadExitAutomaticallyAbandonsOwnedMutexes) {
+    rt::RtGuestMutex mutex;
+    RtThread owner(acquire_guest_mutex_then_exit, &mutex, "guest-mutex-owner");
+    ASSERT_TRUE(owner.start().ok());
+    auto joined = owner.join_ns(-1);
+    ASSERT_TRUE(joined.ok());
+    auto next_owner = mutex.acquire(999, 0);
+    ASSERT_TRUE(next_owner.ok());
+    EXPECT_TRUE(next_owner.value());
+    ASSERT_TRUE(mutex.release(999).ok());
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

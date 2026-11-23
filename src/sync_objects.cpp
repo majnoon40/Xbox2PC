@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <climits>
 #include <thread>
+#include <algorithm>
 #include <utility>
 
 namespace xbox2pc::rt {
@@ -112,6 +113,31 @@ bool guest_wait_cancelled(const std::function<bool()>& cancelled) {
     return cancelled && cancelled();
 }
 }  // namespace
+
+namespace {
+std::mutex g_guest_mutex_registry_lock;
+std::vector<RtGuestMutex*> g_guest_mutex_registry;
+}  // namespace
+
+RtGuestMutex::RtGuestMutex() : RuntimeObject(TypeId::Mutex) {
+    std::lock_guard guard(g_guest_mutex_registry_lock);
+    g_guest_mutex_registry.push_back(this);
+}
+
+RtGuestMutex::~RtGuestMutex() {
+    std::lock_guard guard(g_guest_mutex_registry_lock);
+    const auto it = std::find(g_guest_mutex_registry.begin(),
+                              g_guest_mutex_registry.end(), this);
+    if (it != g_guest_mutex_registry.end()) g_guest_mutex_registry.erase(it);
+}
+
+void abandon_guest_mutexes_for_thread(std::uint64_t guest_thread_id) {
+    if (guest_thread_id == 0) return;
+    std::lock_guard guard(g_guest_mutex_registry_lock);
+    for (auto* mutex : g_guest_mutex_registry) {
+        if (mutex != nullptr) (void)mutex->abandon_owner(guest_thread_id);
+    }
+}
 
 Result<bool> RtGuestMutex::acquire(std::uint64_t tid, pal::MonotonicNs timeout_ns,
                                    const std::function<bool()>& cancelled) {

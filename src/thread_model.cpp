@@ -1,6 +1,7 @@
 // thread_model.cpp — RtThread implementation.
 
 #include "xbox2pc/thread_model.hpp"
+#include "xbox2pc/sync_objects.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -153,17 +154,20 @@ void* RtThread::pal_trampoline(void* self_ptr) {
         code = self->main_(*self, self->arg_);
     } catch (const std::exception& e) {
         self->fail(std::string("thread exception: ") + e.what());
+        abandon_guest_mutexes_for_thread(self->thread_id());
         self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
         self->exited_.store(true, std::memory_order_release);
         self->trampoline_done_.store(true, std::memory_order_release);
         return reinterpret_cast<void*>(kExceptionExitCode);
     } catch (...) {
         self->fail("thread exception: unknown type");
+        abandon_guest_mutexes_for_thread(self->thread_id());
         self->exit_code_.store(kExceptionExitCode, std::memory_order_release);
         self->exited_.store(true, std::memory_order_release);
         self->trampoline_done_.store(true, std::memory_order_release);
         return reinterpret_cast<void*>(kExceptionExitCode);
     }
+    abandon_guest_mutexes_for_thread(self->thread_id());
     const std::uint64_t ec = reinterpret_cast<std::uint64_t>(code);
     self->exit_code_.store(ec, std::memory_order_release);
     self->exited_.store(true, std::memory_order_release);
