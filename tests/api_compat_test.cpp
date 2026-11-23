@@ -115,7 +115,7 @@ struct GuestWaitThreadArgs {
     std::atomic<bool> entered{false};
     std::atomic<std::uint64_t> wait_result{0};
 };
-void* guest_wait_thread_main(RtThread& self, void* raw) {
+void* guest_wait_thread_main(xbox2pc::rt::RtThread& self, void* raw) {
     auto* args = static_cast<GuestWaitThreadArgs*>(raw);
     ApiContext ctx;
     ctx.process_id = args->process_id;
