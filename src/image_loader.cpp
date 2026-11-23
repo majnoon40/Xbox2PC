@@ -903,21 +903,27 @@ Result<std::vector<ImportBinding>> ImageLoader::resolve_imports(
         return Ret(RuntimeErrc::InvalidArgument,
                    "import directory RVA not file-backed");
     }
+    std::uint64_t desc_end = 0;
+    if (!add_ok(desc_off, dir.size, desc_end) || desc_end > file_size) {
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "import directory exceeds file bounds");
+    }
 
     const FileReader rd{file, file_size};
     std::size_t total = 0;
-    for (std::uint64_t d = desc_off;; d += 20) {
-        if (d + 20 > file_size) {
-            return Ret(RuntimeErrc::InvalidArgument,
-                       "import descriptor truncated");
-        }
+    bool descriptor_terminated = false;
+    for (std::uint64_t d = desc_off; d <= desc_end && desc_end - d >= 20;
+         d += 20) {
         std::uint32_t int_rva = 0, name_rva = 0, iat_rva = 0;
         if (!rd.u32(d + 0, int_rva) || !rd.u32(d + 12, name_rva) ||
             !rd.u32(d + 16, iat_rva)) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "import descriptor read failure");
         }
-        if (int_rva == 0 && name_rva == 0 && iat_rva == 0) break;  // terminator
+        if (int_rva == 0 && name_rva == 0 && iat_rva == 0) {
+            descriptor_terminated = true;
+            break;
+        }
         if (++total > limits_.max_imports) {
             return Ret(RuntimeErrc::OutOfResources, "import count exceeds limit");
         }
@@ -964,29 +970,64 @@ Result<std::vector<ImportBinding>> ImageLoader::resolve_imports(
         // array mirrors the INT order), so its Xbox VA is
         // layout.actual_base + iat_rva + k*8.
         std::uint64_t k = 0;
-        for (std::uint64_t t = t_off; t + 8 <= file_size; t += 8) {
+        bool thunk_terminated = false;
+        for (std::uint64_t t = t_off;
+             t <= file_size && file_size - t >= 8; t += 8) {
             std::uint64_t tv = 0;
             if (!rd.u64(t, tv)) {
                 return Ret(RuntimeErrc::InvalidArgument, "thunk read failure");
             }
-            if (tv == 0) break;  // terminator
+            if (tv == 0) {
+                thunk_terminated = true;
+                break;
+            }
             if (++total > limits_.max_imports) {
                 return Ret(RuntimeErrc::OutOfResources,
                            "import count exceeds limit");
             }
-            const std::uint64_t slot_va = layout.actual_base + iat_rva + k * 8;
+            if (k > (~0ull) / 8) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "IAT slot index overflows");
+            }
+            std::uint64_t slot_rva = 0;
+            if (!add_ok(iat_rva, k * 8, slot_rva) ||
+                slot_rva > img.opt.size_of_image ||
+                img.opt.size_of_image - slot_rva < 8 ||
+                layout.actual_base > (~0ull) - slot_rva) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "IAT slot lies outside the image");
+            }
+            bool slot_file_ok = false;
+            (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(slot_rva),
+                                        slot_file_ok);
+            if (!slot_file_ok) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "IAT slot is not file-backed");
+            }
+            const std::uint64_t slot_va = layout.actual_base + slot_rva;
             ImportLookup look;
             look.dll = dll;
             if ((tv & 0x8000000000000000ull) != 0) {
                 look.by_ordinal = true;
                 look.ordinal = static_cast<std::uint32_t>(tv & 0xFFFF);
             } else {
+                if (tv > UINT32_MAX) {
+                    ImportBinding b;
+                    b.lookup = look;
+                    b.status = ImportStatus::Invalid;
+                    b.note = "import-by-name RVA exceeds 32 bits";
+                    b.iat_va = slot_va;
+                    bindings.push_back(std::move(b));
+                    ++k;
+                    continue;
+                }
                 bool xok = false;
                 const std::uint64_t hn_off =
                     checked_rva_to_offset(img, static_cast<std::uint32_t>(tv), xok);
+                std::uint64_t symbol_off = 0;
                 // Skip the 2-byte hint; read the name.
-                if (!xok ||
-                    !read_cstr(file, file_size, hn_off + 2, kMaxImportNameLen,
+                if (!xok || !add_ok(hn_off, 2, symbol_off) ||
+                    !read_cstr(file, file_size, symbol_off, kMaxImportNameLen,
                                look.symbol)) {
                     ImportBinding b;
                     b.lookup = look;
@@ -1010,6 +1051,14 @@ Result<std::vector<ImportBinding>> ImageLoader::resolve_imports(
             bindings.push_back(std::move(b));
             ++k;
         }
+        if (!thunk_terminated) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "import thunk table lacks an in-bounds terminator");
+        }
+    }
+    if (!descriptor_terminated) {
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "import descriptor table lacks an in-bounds terminator");
     }
     return Ret(std::move(bindings));
 }
@@ -1020,33 +1069,56 @@ Result<void> ImageLoader::write_iat_slots(
     const std::vector<ImportBinding>& bindings) {
     using Ret = Result<void>;
     std::vector<std::pair<std::uint64_t, MemProtect>> flipped;
+    struct RestoreOnExit {
+        AddressSpace& space;
+        std::vector<std::pair<std::uint64_t, MemProtect>>& regions;
+        ~RestoreOnExit() {
+            for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+                (void)space.protect_region(it->first, it->second);
+            }
+        }
+    } restore_on_error{space, flipped};
+
     for (const auto& b : bindings) {
         if (b.status != ImportStatus::Resolved) continue;
-        // IAT slot rva = slot file offset equivalence: the slot's VA.
-        // The binding carries the FILE offset of the IAT slot; convert to
-        // the RVA it came from is not possible post-hoc, so resolve via
-        // the slot's xbox VA recorded at walk time.
         if (b.iat_va == 0) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "resolved import missing its IAT slot VA");
         }
         const SectionLayout* host = nullptr;
         for (const auto& sl : layout.sections) {
-            if (b.iat_va >= sl.mapped_base &&
-                b.iat_va + 8 <= sl.mapped_base + sl.mapped_size) {
-                host = &sl;
-                break;
+            if (b.iat_va >= sl.mapped_base) {
+                const std::uint64_t offset = b.iat_va - sl.mapped_base;
+                if (offset <= sl.mapped_size && 8 <= sl.mapped_size - offset) {
+                    host = &sl;
+                    break;
+                }
             }
         }
         if (host == nullptr) {
-            // Headers-resident IAT (allowed: SizeOfHeaders region).
-            if (b.iat_va >= layout.actual_base &&
-                b.iat_va + 8 <= layout.actual_base +
-                                   layout.headers_region_size) {
-                auto dst = space.translate(b.iat_va);
-                if (!dst.ok()) return Ret(dst.errc(), dst.context());
-                std::memcpy(dst.value(), &b.value, 8);
-                continue;
+            // Headers are read-only after mapping; temporarily make the
+            // header region writable for a headers-resident IAT slot.
+            if (b.iat_va >= layout.actual_base) {
+                const std::uint64_t offset = b.iat_va - layout.actual_base;
+                if (offset <= layout.headers_region_size &&
+                    8 <= layout.headers_region_size - offset) {
+                    const auto already = std::find_if(
+                        flipped.begin(), flipped.end(),
+                        [&](const auto& x) {
+                            return x.first == layout.headers_region_xbox_va;
+                        });
+                    if (already == flipped.end()) {
+                        auto pr = space.protect_region(
+                            layout.headers_region_xbox_va, MemProtect::ReadWrite);
+                        if (!pr.ok()) return Ret(pr.errc(), pr.context());
+                        flipped.emplace_back(layout.headers_region_xbox_va,
+                                             MemProtect::ReadOnly);
+                    }
+                    auto dst = space.translate(b.iat_va);
+                    if (!dst.ok()) return Ret(dst.errc(), dst.context());
+                    std::memcpy(dst.value(), &b.value, 8);
+                    continue;
+                }
             }
             return Ret(RuntimeErrc::InvalidArgument,
                        "IAT slot VA outside the mapped image");
@@ -1055,20 +1127,27 @@ Result<void> ImageLoader::write_iat_slots(
             host->protection == MemProtect::ReadWrite ||
             host->protection == MemProtect::Full;
         if (!writable_now) {
-            auto pr = space.protect_region(host->mapped_base,
-                                           MemProtect::ReadWrite);
-            if (!pr.ok()) return Ret(pr.errc(), pr.context());
-            flipped.emplace_back(host->mapped_base, host->protection);
+            const auto already = std::find_if(
+                flipped.begin(), flipped.end(),
+                [&](const auto& x) { return x.first == host->mapped_base; });
+            if (already == flipped.end()) {
+                auto pr = space.protect_region(host->mapped_base,
+                                               MemProtect::ReadWrite);
+                if (!pr.ok()) return Ret(pr.errc(), pr.context());
+                flipped.emplace_back(host->mapped_base, host->protection);
+            }
         }
         auto dst = space.translate(b.iat_va);
         if (!dst.ok()) return Ret(dst.errc(), dst.context());
         std::memcpy(dst.value(), &b.value, 8);
     }
-    // Restore (reverse order).
+    // Restore (reverse order). The scope guard retries restoration if a
+    // failure path returns before this point.
     for (auto it = flipped.rbegin(); it != flipped.rend(); ++it) {
         auto pr = space.protect_region(it->first, it->second);
         if (!pr.ok()) return Ret(pr.errc(), pr.context());
     }
+    flipped.clear();
     return Ret::ok_result();
 }
 
