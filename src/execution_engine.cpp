@@ -471,6 +471,12 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     //   XTaskQueueTerminate(queue, bool, ptr, ptr)     -> int, int, ptr, ptr
     //   QueryPerformanceCounter(ptr)                   -> ptr out, BOOL
     //   QueryPerformanceFrequency(ptr)                 -> ptr out, BOOL
+    //   GetCurrentProcessId() / GetCurrentThreadId()   -> no args, DWORD
+    //   VirtualQuery(address, buffer, size)             -> ptr in, ptr out, int
+    //   CreateEventW(attrs, manual, initial, name)      -> ptr in, int, int, ptr in
+    //   SetEvent(handle) / ResetEvent(handle)           -> int
+    //   WaitForSingleObject(handle, timeout)            -> int, int
+    //   CloseHandle(handle)                             -> int
     const std::string id = d.export_name;
     auto int_arg = [&] { abi::ArgSpec a; a.kind = abi::ArgKind::Int; return a; };
     auto ptr_in = [&](std::uint64_t sz) {
@@ -527,9 +533,21 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     } else if (id == "QueryPerformanceCounter" || id == "QueryPerformanceFrequency") {
         plan.call.args.push_back(ptr_out(8)); plan.out_buffer_args.push_back(0);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "GetCurrentProcessId" || id == "GetCurrentThreadId") {
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "VirtualQuery") {
         plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(ptr_out(48));
         plan.call.args.push_back(int_arg()); plan.out_buffer_args.push_back(1);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateEventW") {
+        plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(ptr_in(0));
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "SetEvent" || id == "ResetEvent" || id == "CloseHandle") {
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "WaitForSingleObject") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else {
         return Ret(RuntimeErrc::NotFound,
