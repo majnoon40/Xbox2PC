@@ -375,6 +375,15 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
     api::ApiCallResult api_res =
         registry.dispatch(plan.library, plan.export_name, ctx);
 
+    // Implementations are extensible; never trust their reported payload size
+    // when indexing the fixed-capacity host array. Reject before changing the
+    // guest return state or passing a potentially out-of-bounds host pointer
+    // to GuestMemory::write.
+    if (api_res.has_out && api_res.out_bytes_size > api_res.out_bytes.size()) {
+        return Ret(RuntimeErrc::PlatformError,
+                   "out payload exceeds the fixed API result buffer");
+    }
+
     // 4. Convert into guest return state (RAX/XMM0, RSP pop) [MS-X64CC].
     {
         // String inputs were NOT consumed by M7's context model (its
