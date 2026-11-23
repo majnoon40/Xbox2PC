@@ -188,6 +188,9 @@ private:
     std::map<std::uint64_t, std::uint64_t> pid_to_object_id_;  // pid -> obj id
     std::atomic<std::uint64_t> next_pid_{1};
     ResourceLimits limits_;
+    // Spawn reservations counted while a thread is being registered/attached.
+    // Protected by lock_ so concurrent spawns cannot bypass the global limit.
+    std::uint64_t pending_threads_ = 0;
     // Global totals maintained incrementally for fast limit checks.
     mutable std::atomic<std::uint64_t> committed_total_{0};
     mutable std::atomic<std::uint64_t> reserved_total_{0};
