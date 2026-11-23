@@ -69,7 +69,7 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XThreadSetTimeSensitive | `HRESULT ...(bool)` | partially-implemented |
 | XThreadIsTimeSensitive | `bool XThreadIsTimeSensitive()` | partially-implemented |
 | XTaskQueueCreate | `HRESULT ...(mode, mode, handle*)` | partially-implemented |
-| XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented |
+| XTaskQueueDispatch | `bool ...(queue, port, timeoutInMs)` | partially-implemented (timeout wait; no callback execution) |
 | XTaskQueueCloseHandle | `void ...(queue)` | partially-implemented |
 | XTaskQueueTerminate | `HRESULT ...(queue, bool, void*, cb*)` | partially-implemented |
 | XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | unsupported implementation |
