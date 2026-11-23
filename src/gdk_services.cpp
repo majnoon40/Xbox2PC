@@ -1561,17 +1561,10 @@ Result<std::uint32_t> GameRuntimeService::wait_objects_all(
                     acquired.push_back(i);
                     continue;
                 }
-                if (failure == RuntimeErrc::Timeout) {
-                    if (auto* event = value->as<RtEvent>()) {
-                        (void)event;
-                    } else if (auto* semaphore = value->as<RtGuestSemaphore>()) {
-                        (void)semaphore;
-                    }
-                    if (!event_result.ok() &&
-                        event_result.errc() != RuntimeErrc::ObjectTypeMismatch) {
-                        failure = event_result.errc();
-                        failure_context = event_result.context();
-                    }
+                if (failure == RuntimeErrc::Timeout && !event_result.ok() &&
+                    event_result.errc() != RuntimeErrc::ObjectTypeMismatch) {
+                    failure = event_result.errc();
+                    failure_context = event_result.context();
                 }
                 break;
             }
