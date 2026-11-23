@@ -74,7 +74,7 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XTaskQueueTerminate | `HRESULT ...(queue, bool, void*, cb*)` | partially-implemented |
 | XTaskQueueSubmitCallback | `HRESULT ...(queue, port, context, callback*)` | partially-implemented (bounded manual-port queue + guest callback invocation) |
 | XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
-| XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | partially-implemented (same-process shared queue handle; no callback execution) |
+| XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | partially-implemented (same-process shared queue handle; pending callbacks retain queue lifetime) |
 | WaitForMultipleObjects | `DWORD ...(count, HANDLE*, waitAll, timeout)` | partially-implemented (wait-any and transactional wait-all subsets) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
