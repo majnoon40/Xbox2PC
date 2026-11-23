@@ -135,6 +135,7 @@ Result<void> RtProcess::initialize(const ModuleDescriptor& main_module,
 }
 
 Result<void> RtProcess::run() {
+    std::lock_guard lock(collections_lock_);
     const ProcessState cur = state_.load(std::memory_order_acquire);
     if (!process_transition_valid(cur, ProcessState::Running)) {
         return Result<void>(RuntimeErrc::InvalidTransition,
@@ -145,6 +146,7 @@ Result<void> RtProcess::run() {
 }
 
 Result<void> RtProcess::suspend() {
+    std::lock_guard lock(collections_lock_);
     const ProcessState cur = state_.load(std::memory_order_acquire);
     if (!process_transition_valid(cur, ProcessState::Suspended)) {
         return Result<void>(RuntimeErrc::InvalidTransition,
@@ -156,6 +158,7 @@ Result<void> RtProcess::suspend() {
 }
 
 Result<void> RtProcess::resume() {
+    std::lock_guard lock(collections_lock_);
     // resume() is exclusively the inverse of suspend(): only a Suspended
     // process may resume (run() covers Initializing -> Running).
     const ProcessState cur = state_.load(std::memory_order_acquire);
@@ -169,26 +172,41 @@ Result<void> RtProcess::resume() {
     return Result<void>::ok_result();
 }
 
-Result<void> RtProcess::terminate(std::uint64_t exit_code) {
-    {
-        std::lock_guard lock(collections_lock_);
-        const ProcessState cur = state_.load(std::memory_order_acquire);
-        if (!process_transition_valid(cur, ProcessState::Terminating)) {
-            // Terminated -> Terminated is the idempotent case.
-            if (cur == ProcessState::Terminated) {
-                return Result<void>::ok_result();
-            }
-            return Result<void>(RuntimeErrc::InvalidTransition,
-                                "terminate() from " +
-                                    std::string(process_state_to_name(cur)));
-        }
-        state_.store(ProcessState::Terminating, std::memory_order_release);
-        // Close the per-process handle table (all handles die together).
-        table_.close_all();
-        state_.store(ProcessState::Terminated, std::memory_order_release);
-        exit_code_ = exit_code;
+Result<void> RtProcess::begin_termination() {
+    std::lock_guard lock(collections_lock_);
+    const ProcessState cur = state_.load(std::memory_order_acquire);
+    if (cur == ProcessState::Terminating || cur == ProcessState::Terminated) {
+        return Result<void>::ok_result();
     }
+    if (!process_transition_valid(cur, ProcessState::Terminating)) {
+        return Result<void>(RuntimeErrc::InvalidTransition,
+                            "begin_termination() from " +
+                                std::string(process_state_to_name(cur)));
+    }
+    state_.store(ProcessState::Terminating, std::memory_order_release);
     return Result<void>::ok_result();
+}
+
+Result<void> RtProcess::finish_termination(std::uint64_t exit_code) {
+    std::lock_guard lock(collections_lock_);
+    const ProcessState cur = state_.load(std::memory_order_acquire);
+    if (cur == ProcessState::Terminated) return Result<void>::ok_result();
+    if (cur != ProcessState::Terminating) {
+        return Result<void>(RuntimeErrc::InvalidTransition,
+                            "finish_termination() from " +
+                                std::string(process_state_to_name(cur)));
+    }
+    auto closed = table_.close_all();
+    if (!closed.ok()) return closed;
+    exit_code_ = exit_code;
+    state_.store(ProcessState::Terminated, std::memory_order_release);
+    return Result<void>::ok_result();
+}
+
+Result<void> RtProcess::terminate(std::uint64_t exit_code) {
+    auto begun = begin_termination();
+    if (!begun.ok()) return begun;
+    return finish_termination(exit_code);
 }
 
 Result<void> RtProcess::fail(std::string reason) {
@@ -206,7 +224,10 @@ Result<void> RtProcess::fail(std::string reason) {
     return Result<void>::ok_result();
 }
 
-std::uint64_t RtProcess::exit_code() const { return exit_code_; }
+std::uint64_t RtProcess::exit_code() const {
+    std::lock_guard lock(collections_lock_);
+    return exit_code_;
+}
 
 std::string RtProcess::fail_reason() const {
     std::lock_guard lock(collections_lock_);
@@ -219,10 +240,12 @@ const ModuleDescriptor* RtProcess::main_module() const {
 }
 
 Result<void> RtProcess::add_loaded_module(ModuleDescriptor mod) {
-    if (state_.load(std::memory_order_acquire) == ProcessState::Terminated) {
-        return Result<void>(RuntimeErrc::ProcessTerminated, "process terminated");
-    }
     std::lock_guard lock(collections_lock_);
+    const ProcessState cur = state_.load(std::memory_order_acquire);
+    if (cur == ProcessState::Terminating || cur == ProcessState::Terminated ||
+        cur == ProcessState::Failed) {
+        return Result<void>(RuntimeErrc::ProcessTerminated, "process is terminating");
+    }
     modules_.push_back(std::move(mod));
     return Result<void>::ok_result();
 }
