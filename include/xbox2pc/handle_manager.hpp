@@ -66,6 +66,7 @@ class Handle {
 public:
     Handle() = default;
     constexpr std::uint64_t raw() const { return raw_; }
+    static constexpr Handle from_raw(std::uint64_t raw) { Handle h; h.raw_ = raw; return h; }
     constexpr bool is_null() const { return raw_ == 0; }
     constexpr std::uint16_t type() const {
         return static_cast<std::uint16_t>(raw_ & 0x1FF);

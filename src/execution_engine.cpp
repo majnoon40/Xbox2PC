@@ -527,6 +527,21 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     } else if (id == "QueryPerformanceCounter" || id == "QueryPerformanceFrequency") {
         plan.call.args.push_back(ptr_out(8)); plan.out_buffer_args.push_back(0);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "GetCurrentProcessId" || id == "GetCurrentThreadId") {
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "CreateEventW") {
+        plan.call.args.push_back(ptr_in(0));
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(ptr_in(0));
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "SetEvent" || id == "ResetEvent" || id == "CloseHandle") {
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "WaitForSingleObject") {
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "VirtualQuery") {
         plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(ptr_out(48));
         plan.call.args.push_back(int_arg()); plan.out_buffer_args.push_back(1);

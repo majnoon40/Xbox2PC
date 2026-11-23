@@ -125,6 +125,7 @@ public:
     ApiRegistry& registry() { return api_reg_; }
 
 private:
+    Result<RefGuard> lookup_event(std::uint64_t process_id, std::uint64_t handle) const;
     struct ProcState {
         std::uint64_t init_count = 0;
         bool uninit_failed_terminal = false;  // documented terminal state
@@ -135,8 +136,10 @@ private:
     mutable std::mutex state_lock_;
     std::map<std::uint64_t, ProcState> procs_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, bool> ts_bits_; // (pid, tid)
-    std::map<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<RtEvent>> events_;
-    std::atomic<std::uint64_t> next_event_handle_{1};
+    // Active event handles map to ObjectManager object IDs. Closed objects
+    // are retired until process teardown so in-flight waiters remain pinned.
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> events_;
+    std::map<std::uint64_t, std::vector<std::uint64_t>> retired_event_objects_;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
 

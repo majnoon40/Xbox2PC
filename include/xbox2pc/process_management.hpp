@@ -119,6 +119,9 @@ public:
     explicit ProcessManager(ObjectManager& objects);
     ~ProcessManager();
 
+    // Shared runtime object owner used by process-scoped kernel objects.
+    ObjectManager& objects() { return objects_; }
+
     ProcessManager(const ProcessManager&) = delete;
     ProcessManager& operator=(const ProcessManager&) = delete;
 
