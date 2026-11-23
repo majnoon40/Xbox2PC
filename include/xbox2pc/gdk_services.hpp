@@ -180,6 +180,8 @@ public:
     Result<std::uint64_t> create_queue(std::uint64_t process_id,
                                         std::uint32_t work_mode,
                                         std::uint32_t completion_mode);
+    Result<std::uint64_t> duplicate_queue(std::uint64_t process_id,
+                                           std::uint64_t queue_id);
     // Dispatch waits for work up to timeout_ms (or until termination/close).
     // No guest callback submissions exist yet, so an empty queue returns false.
     Result<bool> dispatch(std::uint64_t process_id, std::uint64_t queue_id,
@@ -203,7 +205,7 @@ private:
     ProcessManager& pm_;
     mutable std::mutex lock_;
     std::condition_variable queue_cv_;
-    std::map<std::uint64_t, Queue> queues_;
+    std::map<std::uint64_t, std::shared_ptr<Queue>> queues_;
     std::uint64_t next_id_ = 1;
     std::uint64_t process_exit_observer_id_ = 0;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
