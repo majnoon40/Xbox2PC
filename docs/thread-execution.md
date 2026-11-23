@@ -65,9 +65,12 @@ Both record state `Failed` + a distinct exit code
   execution contexts. The legacy explicit PID/TID constructor remains for
   synthetic tests and externally managed contexts.
 - `ExecutionContext::prepare_entry` retains the image's assigned TLS
-  index in its per-thread context metadata. `invoke` and `step` propagate
-  the same gate to the backend. TLS callback execution attaches that gate
-  and binds the same PID/TID/address-space tuple as normal guest execution.
+  index in its per-thread context metadata. `invoke` and `step` always
+  override any request-supplied gate with the owning context's gate, so a
+  caller cannot bypass managed-thread suspension or termination by
+  attaching a different gate. TLS callback execution attaches that same
+  gate and binds the same PID/TID/address-space tuple as normal guest
+  execution.
   Nested task-queue callbacks inherit the active request's gate and
   execution identity, so suspension and termination apply consistently at
   callback instruction boundaries. Per-image TLS template materialization
