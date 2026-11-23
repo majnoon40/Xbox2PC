@@ -168,7 +168,7 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
             set_bad(RejectClass::NeedMoreBytes, "instruction truncated: prefixes reach the end of the buffer");
             return finish_bad();
         }
-        if (i + 1 >= kMaxInstructionBytes) {
+        if (i >= kMaxInstructionBytes) {
             set_bad(RejectClass::TooLong, "instruction exceeds the 15-byte architectural limit");
             return finish_bad();
         }
