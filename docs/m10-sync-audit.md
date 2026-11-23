@@ -101,3 +101,9 @@ metadata segments while preserving the original allocation base; MEM_RELEASE
 must use that original base and removes all segments. Linux decommit uses
 MADV_DONTNEED after changing the range to PROT_NONE. This is a Linux host
 memory-management behavior, not Xbox physical-memory emulation.
+
+
+MEM_COMMIT is idempotent across a mixed range of already-committed and
+reserved pages within one allocation. Existing committed pages retain their
+current protection; newly committed pages receive the requested protection.
+Global commit accounting charges only the newly committed pages.
