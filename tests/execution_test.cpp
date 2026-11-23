@@ -562,6 +562,15 @@ TEST(BridgeTest, PlanForDescriptorsAndErrors) {
         ASSERT_TRUE(p.ok()) << d->export_name << ": " << p.error_string();
         EXPECT_TRUE(rt::abi::validate_call(p.value().call).ok());
     }
+    const auto* multi = w.reg.find("kernel32", "WaitForMultipleObjects");
+    ASSERT_NE(multi, nullptr);
+    auto multi_plan = plan_for_descriptor(*multi);
+    ASSERT_TRUE(multi_plan.ok());
+    ASSERT_EQ(multi_plan.value().pointer_array_args.size(), 1u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].pointer_arg, 1u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].count_arg, 0u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].max_count, 64u);
+    EXPECT_EQ(multi_plan.value().pointer_array_args[0].element_size, 8u);
     // An unknown descriptor is refused.
     api::ApiDescriptor fake;
     fake.library = "fakelib";
