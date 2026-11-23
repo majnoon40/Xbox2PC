@@ -680,14 +680,28 @@ public:
         switch (mode) {
             case FileOpenMode::ReadExisting: flags = O_RDONLY; break;
             case FileOpenMode::WriteNew:
-                flags = O_WRONLY | O_CREAT | O_TRUNC;
+                flags = O_WRONLY | O_CREAT | O_EXCL;
                 break;
             case FileOpenMode::ReadWriteAppend:
                 flags = O_RDWR | O_CREAT | O_APPEND;
                 break;
         }
+        // Refuse a final-component symlink even if it is swapped in after
+        // the VFS's lstat-style preflight. Intermediate components still
+        // require the prefix checks in HostDirBackend.
+        flags |= O_NOFOLLOW | O_CLOEXEC;
         const int fd = ::open(path.c_str(), flags, 0644);
         if (fd < 0) {
+            const int en = errno;
+            if (en == EEXIST) {
+                return Result<std::unique_ptr<PalFile>>(
+                    RuntimeErrc::AlreadyExists, "open: file already exists");
+            }
+            if (en == ELOOP) {
+                return Result<std::unique_ptr<PalFile>>(
+                    RuntimeErrc::InvalidArgument, "open: symlink rejected");
+            }
+            errno = en;
             return Result<std::unique_ptr<PalFile>>(
                 RuntimeErrc::IoError, errno_string("open"));
         }
