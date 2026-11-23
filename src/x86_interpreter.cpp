@@ -20,6 +20,7 @@
 
 #include <cstring>
 #include <string>
+#include <mutex>
 
 namespace xbox2pc::rt::x86 {
 
@@ -35,6 +36,11 @@ using x64::Operand;
 // ── 1. sub-register access ────────────────────────────────────────────────
 
 namespace {
+
+// Serialize guest memory accesses across interpreter instances. The recursive
+// lock lets a memory XCHG hold the lock across its read/write pair while the
+// shared operand helpers take the same lock internally.
+std::recursive_mutex g_guest_memory_mutex;
 
 constexpr std::uint64_t kMask8 = 0xFFull;
 constexpr std::uint64_t kMask16 = 0xFFFFull;
@@ -122,6 +128,9 @@ struct Ctx {
 
 // Reads an operand's value (register, immediate or memory).
 bool read_operand(Ctx& cx, const Operand& o, Value& out) {
+    std::unique_lock<std::recursive_mutex> memory_lock(
+        g_guest_memory_mutex, std::defer_lock);
+    if (o.kind == x64::OpKind::Mem) memory_lock.lock();
     switch (o.kind) {
         case x64::OpKind::Reg:
             out.bits = o.bits;
@@ -166,6 +175,9 @@ bool read_operand(Ctx& cx, const Operand& o, Value& out) {
 }
 
 bool write_operand(Ctx& cx, const Operand& o, std::uint64_t value) {
+    std::unique_lock<std::recursive_mutex> memory_lock(
+        g_guest_memory_mutex, std::defer_lock);
+    if (o.kind == x64::OpKind::Mem) memory_lock.lock();
     switch (o.kind) {
         case x64::OpKind::Reg:
             write_gpr(cx.cpu, o.reg, o.bits, value, cx.rex);
@@ -570,7 +582,7 @@ StepResult Interpreter::step(const Decoded& ins) {
                 cx.cpu.set_flag(cpu::kFlagAF, (bits3 & 0x10ull) != 0);
             }
             if (ins.mnem != Mnemonic::Cmp) {
-                if (!write_operand(cx, ins.ops[0], result)) {
+                if (!write_operand(cx, dst_operand, result)) {
                     return StepResult::failed(cx.fail);
                 }
             }
@@ -1132,14 +1144,14 @@ StepResult Interpreter::step(const Decoded& ins) {
             return StepResult::success();
         }
         case Mnemonic::Xchg: {
-            // Memory XCHG is implicitly LOCKed by the ISA. The current
-            // deterministic backend has no atomic guest-memory primitive,
-            // so reject it rather than silently execute a racy operation.
+            // Memory XCHG is implicitly locked. Hold the shared guest-memory
+            // lock across both operand accesses so other interpreter threads
+            // cannot observe an intermediate value.
+            std::unique_lock<std::recursive_mutex> atomic_lock(
+                g_guest_memory_mutex, std::defer_lock);
             if (ins.ops[0].kind == x64::OpKind::Mem ||
                 ins.ops[1].kind == x64::OpKind::Mem) {
-                cx.abort(GuestFault::UnsupportedInstruction,
-                         "memory XCHG is implicitly atomic and unsupported");
-                return StepResult::failed(cx.fail);
+                atomic_lock.lock();
             }
             Value a_v, b_v;
             if (!read_operand(cx, ins.ops[0], a_v)) return StepResult::failed(cx.fail);
@@ -1328,24 +1340,36 @@ StepResult Interpreter::step(const Decoded& ins) {
 
         case Mnemonic::Bt: case Mnemonic::Bts: case Mnemonic::Btr:
         case Mnemonic::Btc: {
-            // A register bit offset on a memory operand is a bit-string
-            // index: it can move the effective address to another word.
-            // Until that addressing rule is implemented, reject it instead
-            // of incorrectly wrapping the index within the first word.
-            if (ins.ops[0].kind == x64::OpKind::Mem &&
-                ins.ops[1].kind == x64::OpKind::Reg) {
-                cx.abort(GuestFault::UnsupportedInstruction,
-                         "memory bit-string register offsets are unsupported");
-                return StepResult::failed(cx.fail);
-            }
-            Value dst, pos;
-            if (!read_operand(cx, ins.ops[0], dst)) return StepResult::failed(cx.fail);
-            // ops[1]: immediate bit index, or the same-width register form
-            // (BT r/m, r: the bit offset applies modulo the operand size).
+            Value pos;
             if (!read_operand(cx, ins.ops[1], pos)) return StepResult::failed(cx.fail);
             const std::uint8_t bits = ins.ops[0].bits;
+            Operand dst_operand = ins.ops[0];
+            std::uint64_t bit = pos.raw % bits;
+            if (dst_operand.kind == x64::OpKind::Mem &&
+                ins.ops[1].kind == x64::OpKind::Reg) {
+                // For a memory bit string, the signed register index selects
+                // a word relative to the effective address, not merely a bit
+                // within the first word.
+                const std::int64_t index = static_cast<std::int64_t>(pos.raw);
+                std::int64_t word = index / static_cast<std::int64_t>(bits);
+                std::int64_t rem = index % static_cast<std::int64_t>(bits);
+                if (rem < 0) { rem += bits; --word; }
+                const std::int64_t byte_delta =
+                    word * static_cast<std::int64_t>(bits / 8u);
+                if ((byte_delta > 0 &&
+                     dst_operand.disp > INT64_MAX - byte_delta) ||
+                    (byte_delta < 0 &&
+                     dst_operand.disp < INT64_MIN - byte_delta)) {
+                    cx.abort(GuestFault::InvalidAccess,
+                             "memory bit-string address overflow");
+                    return StepResult::failed(cx.fail);
+                }
+                dst_operand.disp += byte_delta;
+                bit = static_cast<std::uint64_t>(rem);
+            }
+            Value dst;
+            if (!read_operand(cx, dst_operand, dst)) return StepResult::failed(cx.fail);
             const std::uint64_t m = width_mask(bits);
-            const std::uint64_t bit = pos.raw % bits;
             const bool was = ((dst.raw >> bit) & 1ull) != 0;
             std::uint64_t result = dst.raw & m;
             switch (ins.mnem) {
