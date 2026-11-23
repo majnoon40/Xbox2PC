@@ -1025,6 +1025,83 @@ TEST(EngineTest, DispatchesWin32EventApiBinding) {
     EXPECT_TRUE(w.grt->close_sync_handle(pid, result.return_value).ok());
 }
 
+TEST(EngineTest, DispatchesTaskQueueDuplicateHandleAndWritesGuestOutput) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("task-queue-duplicate-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "task-queue-duplicate-binding.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    const auto original = w.tq->create_queue(
+        pid,
+        static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(api::XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(original.ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    std::uint64_t output_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    scratch_region(*process, 0x1000, &output_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+    ASSERT_TRUE(mem.write_u64(output_va, 0).ok());
+
+    constexpr std::uint64_t binding = 0x51000001ull;
+    constexpr std::uint64_t tid = 0x95;
+    const std::uint64_t rsp = stack_va + 0x100;
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(ApiBindingInfo{
+        binding, "xgameruntime", "XTaskQueueDuplicateHandle", false, 0});
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, original.value());
+    cpu_state.set_reg(cpu::Gpr::Rdx, output_va);
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    ASSERT_EQ(result.outcome, Outcome::Returned);
+    ASSERT_EQ(result.api_calls, 1u);
+    EXPECT_EQ(result.return_value, api::kSOk);
+    auto duplicated = mem.read_u64(output_va);
+    ASSERT_TRUE(duplicated.ok());
+    ASSERT_NE(duplicated.value(), 0u);
+    EXPECT_NE(duplicated.value(), original.value());
+
+    ASSERT_TRUE(w.tq->close_queue(pid, original.value()).ok());
+    EXPECT_TRUE(w.tq->dispatch(pid, duplicated.value(),
+                              api::XTaskQueuePort::Work, 0).ok());
+    ASSERT_TRUE(w.tq->close_queue(pid, duplicated.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    ASSERT_TRUE(w.pm.terminate_process(process_handle, 0).ok());
+}
+
 TEST(EngineTest, RejectsUnmappedSyntheticApiBinding) {
     ExecWorld w;
     auto [process_handle, process] = w.new_process("unmapped-api.exe");
