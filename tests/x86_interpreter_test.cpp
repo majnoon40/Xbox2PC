@@ -129,6 +129,40 @@ TEST_F(X86SemanticsTest, SubRegisterMergeRules) {
 
 // ── ADD / ADC / SUB / SBB / CMP flags ───────────────────────────────────────
 
+TEST_F(X86SemanticsTest, InstructionFetchDoesNotReadPastDecodedLength) {
+    const std::uint64_t rx = 0x10010000;
+    const std::uint64_t rw = rx + 4096;
+    ASSERT_TRUE(space_->reserve_region(rx, 4096, "rx-tail").ok());
+    ASSERT_TRUE(space_->reserve_region(rw, 4096, "rw-next").ok());
+    ASSERT_TRUE(space_->commit_region(rx).ok());
+    ASSERT_TRUE(space_->commit_region(rw).ok());
+    const std::uint8_t nop = 0x90;
+    const std::uint8_t next = 0x90;
+    ASSERT_TRUE(mem().write(rx + 4095, &nop, 1).ok());
+    ASSERT_TRUE(mem().write(rw, &next, 1).ok());
+    ASSERT_TRUE(space_->protect_region(rx, MemProtect::ReadExecute).ok());
+    cpu().rip = rx + 4095;
+    auto r = interp().step_at_rip();
+    ASSERT_TRUE(r.ok());
+    EXPECT_EQ(cpu().rip, rx + 4096);
+
+    // A multi-byte instruction requiring the next byte must fault on the
+    // non-executable page rather than fetching it with read permission.
+    const std::uint8_t rex = 0x48;
+    ASSERT_TRUE(space_->protect_region(rx, MemProtect::ReadWrite).ok());
+    ASSERT_TRUE(mem().write(rx + 4095, &rex, 1).ok());
+    const std::uint8_t mov_opcode = 0xB8;
+    ASSERT_TRUE(mem().write(rw, &mov_opcode, 1).ok());
+    ASSERT_TRUE(space_->protect_region(rx, MemProtect::ReadExecute).ok());
+    cpu().rip = rx + 4095;
+    const auto before = cpu();
+    auto bad = interp().step_at_rip();
+    ASSERT_FALSE(bad.ok());
+    EXPECT_EQ(bad.fault().fault, rt::exec::GuestFault::PermissionExec);
+    EXPECT_EQ(bad.fault().fault_address, rw);
+    EXPECT_EQ(cpu().rip, before.rip);
+}
+
 TEST_F(X86SemanticsTest, ShlOverflowIncludesCarryOut) {
     cpu().set_reg(Gpr::Rax, 0x80);
     cpu().rip = code_at(0, {0xD0, 0xE0}); // shl al, 1
