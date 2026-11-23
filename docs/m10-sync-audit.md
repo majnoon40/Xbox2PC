@@ -44,7 +44,7 @@ The existing `WaitSet` uses polling and has a documented non-transactional wait-
 
 1. Add deterministic tests for cancellation during a blocked wait, wake-on-release, abandonment, and object-close races; run all sanitizer configurations.
 2. Connect guest wait parking to the execution engine only after a backend-level park/resume contract exists.
-3. Integrate automatic owner abandonment into the managed guest-thread exit path, rather than relying only on the explicit primitive hook.
+3. Automatic mutex abandonment is now invoked by the managed guest-thread exit trampoline; continue testing this path under sanitizers.
 4. Expand wait-multiple semantics with correct auto-reset consumption and rollback behavior.
 5. Continue virtual memory, task queue, I/O, and final compatibility audit work.
 

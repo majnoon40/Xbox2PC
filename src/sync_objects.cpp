@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <climits>
 #include <thread>
-#include <algorithm>
 #include <utility>
 
 namespace xbox2pc::rt {
