@@ -144,8 +144,8 @@ struct ExecutionRequest {
     std::uint64_t stack_top_va = 0;     // 16-aligned free stack top
     std::uint64_t stack_size = 0;       // guard floor = top - size
     // Imported-API binding values the image's IAT entries hold (M7
-    // ApiResolver-issued); landing on one enters the marshalling
-    // bridge. The engine treats anything in binding range as a call.
+    // ApiResolver-issued); retained for diagnostics and compatibility.
+    // Dispatch requires a matching exact ApiBindingInfo below.
     std::vector<std::uint64_t> api_binding_values;
     // Exact import identity for every resolved binding. This is the
     // authoritative dispatch map; binding-range addresses alone are not.
