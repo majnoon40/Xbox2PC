@@ -1333,21 +1333,24 @@ TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
     scratch_region(*process, 0x1000, &output_va);
     const std::uint64_t callback_va = code_va + 0x100;
     const std::uint64_t continuation_va = code_va + 0x200;
-    // Callback: RAX=42; *(uint64_t*)RCX=RAX; RET.
+    // Callback writes a marker through RCX and the canceled flag from RDX.
     const std::uint8_t callback_code[] = {
-        0x48, 0xB8, 0x2A, 0, 0, 0, 0, 0, 0, 0,
-        0x48, 0x89, 0x41, 0x00, 0xC3
+        0x48, 0xB8, 0x2A, 0, 0, 0, 0, 0, 0, 0, // mov rax, 42
+        0x48, 0x89, 0x01,                       // mov [rcx], rax
+        0x48, 0x89, 0x51, 0x08,                 // mov [rcx+8], rdx
+        0xC3
     };
     ASSERT_TRUE(mem.write(callback_va, callback_code, sizeof(callback_code)).ok());
     ASSERT_TRUE(mem.write_u8(continuation_va, 0xC3).ok());
     ASSERT_TRUE(process->address_space().protect_region(
         code_va, MemProtect::ReadExecute).ok());
-    ASSERT_TRUE(mem.write_u64(output_va, 0).ok());
+    for (std::uint64_t offset : {0ull, 8ull, 16ull, 24ull})
+        ASSERT_TRUE(mem.write_u64(output_va + offset, 0).ok());
 
     constexpr std::uint64_t submit_binding = 0x51000020ull;
     constexpr std::uint64_t dispatch_binding = 0x51000021ull;
     constexpr std::uint64_t tid = 0xA5;
-    const std::uint64_t rsp = stack_va + 0x808; // x64 function-entry alignment
+    const std::uint64_t rsp = stack_va + 0x808; // x64 function-entry alignment;
 
     auto config = ExecutionConfig::default_validated();
     ASSERT_TRUE(config.ok());
@@ -1364,44 +1367,60 @@ TEST(EngineTest, DispatchesGuestTaskQueueCallbackThroughNestedBackend) {
         submit_binding, "xgameruntime", "XTaskQueueSubmitCallback", false, 0});
     request.api_bindings.push_back(ApiBindingInfo{
         dispatch_binding, "xgameruntime", "XTaskQueueDispatch", false, 0});
-
-    // Exercise the real guest ABI bridge for callback submission (RCX/RDX/R8/R9).
-    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
-    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
-    cpu::CpuState submit_state;
-    submit_state.reset();
-    submit_state.set_reg(cpu::Gpr::Sp, rsp);
-    submit_state.set_reg(cpu::Gpr::Rcx, queue.value());
-    submit_state.set_reg(cpu::Gpr::Rdx,
-        static_cast<std::uint32_t>(api::XTaskQueuePort::Work));
-    submit_state.set_reg(cpu::Gpr::R8, output_va);
-    submit_state.set_reg(cpu::Gpr::R9, callback_va);
-    submit_state.rip = submit_binding;
     std::atomic<bool> interrupted{false};
-    const auto submitted = backend.run(request, submit_state, interrupted);
+
+    const auto run_guest_api = [&](std::uint64_t binding, std::uint64_t rcx,
+                                   std::uint64_t rdx, std::uint64_t r8,
+                                   std::uint64_t r9) {
+        EXPECT_TRUE(mem.write_u64(rsp, continuation_va).ok());
+        EXPECT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+        cpu::CpuState state;
+        state.reset();
+        state.set_reg(cpu::Gpr::Sp, rsp);
+        state.set_reg(cpu::Gpr::Rcx, rcx);
+        state.set_reg(cpu::Gpr::Rdx, rdx);
+        state.set_reg(cpu::Gpr::R8, r8);
+        state.set_reg(cpu::Gpr::R9, r9);
+        state.rip = binding;
+        return backend.run(request, state, interrupted);
+    };
+    const auto port = static_cast<std::uint32_t>(api::XTaskQueuePort::Work);
+
+    // Submit through the real guest ABI bridge (RCX/RDX/R8/R9).
+    const auto submitted = run_guest_api(
+        submit_binding, queue.value(), port, output_va, callback_va);
     ASSERT_EQ(submitted.outcome, Outcome::Returned)
         << (submitted.exception.has_value() ? format_exception(*submitted.exception) : "");
     EXPECT_EQ(submitted.return_value, 0u); // S_OK
 
-    // Dispatch is a second guest API call. The nested callback must run on the
-    // same guest thread, receive context in RCX, and leave the caller resumable.
-    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
-    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
-    cpu::CpuState dispatch_state;
-    dispatch_state.reset();
-    dispatch_state.set_reg(cpu::Gpr::Sp, rsp);
-    dispatch_state.set_reg(cpu::Gpr::Rcx, queue.value());
-    dispatch_state.set_reg(cpu::Gpr::Rdx,
-        static_cast<std::uint32_t>(api::XTaskQueuePort::Work));
-    dispatch_state.set_reg(cpu::Gpr::R8, 0);
-    dispatch_state.rip = dispatch_binding;
-    const auto dispatched = backend.run(request, dispatch_state, interrupted);
+    // Dispatch invokes the callback on this guest thread with context in RCX
+    // and canceled=false in RDX, then returns to the suspended caller.
+    const auto dispatched = run_guest_api(
+        dispatch_binding, queue.value(), port, 0, 0);
     ASSERT_EQ(dispatched.outcome, Outcome::Returned)
         << (dispatched.exception.has_value() ? format_exception(*dispatched.exception) : "");
     EXPECT_EQ(dispatched.return_value, 1u);
-    const auto callback_value = mem.read_u64(output_va);
-    ASSERT_TRUE(callback_value.ok());
-    EXPECT_EQ(callback_value.value(), 42u);
+    ASSERT_EQ(mem.read_u64(output_va).value(), 42u);
+    ASSERT_EQ(mem.read_u64(output_va + 8).value(), 0u);
+
+    // Termination marks a queued callback canceled. The nested guest callback
+    // must observe canceled=true through RDX.
+    const auto submitted_canceled = run_guest_api(
+        submit_binding, queue.value(), port, output_va + 16, callback_va);
+    ASSERT_EQ(submitted_canceled.outcome, Outcome::Returned)
+        << (submitted_canceled.exception.has_value()
+                ? format_exception(*submitted_canceled.exception) : "");
+    EXPECT_EQ(submitted_canceled.return_value, 0u);
+    ASSERT_TRUE(w.tq->terminate_queue(pid, queue.value(), false).ok());
+    const auto dispatched_canceled = run_guest_api(
+        dispatch_binding, queue.value(), port, 0, 0);
+    ASSERT_EQ(dispatched_canceled.outcome, Outcome::Returned)
+        << (dispatched_canceled.exception.has_value()
+                ? format_exception(*dispatched_canceled.exception) : "");
+    EXPECT_EQ(dispatched_canceled.return_value, 1u);
+    ASSERT_EQ(mem.read_u64(output_va + 16).value(), 42u);
+    ASSERT_EQ(mem.read_u64(output_va + 24).value(), 1u);
+
     EXPECT_TRUE(w.tq->close_queue(pid, queue.value()).ok());
     ASSERT_TRUE(w.pm.terminate_process(process_handle, 0).ok());
 }
