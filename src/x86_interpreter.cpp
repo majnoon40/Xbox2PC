@@ -77,7 +77,11 @@ struct Ea {
 Ea compute_ea(const CpuState& c, const Operand& o, std::uint64_t base_rip) {
     Ea ea;
     if (o.rip_relative) {
-        ea.va = static_cast<std::uint64_t>(static_cast<std::int64_t>(base_rip) + o.disp);
+        // Unsigned arithmetic deliberately models x86 address wraparound.
+        // With 67h, EIP-relative addresses are truncated to 32 bits and
+        // zero-extended; without it, the full 64-bit sum is retained.
+        const std::uint64_t sum = base_rip + static_cast<std::uint64_t>(o.disp);
+        ea.va = o.addr32 ? (sum & kMask32) : sum;
         return ea;
     }
     std::uint64_t sum = 0;
@@ -90,8 +94,9 @@ Ea compute_ea(const CpuState& c, const Operand& o, std::uint64_t base_rip) {
         const std::uint64_t scaled = idx * o.scale;   // scale ∈ {1,2,4,8}
         sum += o.addr32 ? (scaled & kMask32) : scaled;
     }
+    sum += static_cast<std::uint64_t>(o.disp);
     if (o.addr32) sum &= kMask32;
-    ea.va = static_cast<std::uint64_t>(static_cast<std::int64_t>(sum) + o.disp);
+    ea.va = sum;
     return ea;
 }
 
@@ -315,8 +320,9 @@ U128 u128_div_u64(U128 n, std::uint64_t d) {
     std::uint64_t rem = 0;
     for (int i = 127; i >= 0; --i) {
         // rem = rem << 1 | bit i of n (check rem < d before subtracting).
+        const bool carry = (rem >> 63) != 0;
         rem = (rem << 1) | ((i >= 64 ? (n.hi >> (i - 64)) : (n.lo >> i)) & 1ull);
-        if (rem >= d) {
+        if (carry || rem >= d) {
             rem -= d;
             if (i >= 64) q.hi |= (1ull << (i - 64));
             else q.lo |= (1ull << i);
@@ -328,8 +334,9 @@ U128 u128_div_u64(U128 n, std::uint64_t d) {
 inline std::uint64_t u128_mod_u64(U128 n, std::uint64_t d) {
     std::uint64_t rem = 0;
     for (int i = 127; i >= 0; --i) {
+        const bool carry = (rem >> 63) != 0;
         rem = (rem << 1) | ((i >= 64 ? (n.hi >> (i - 64)) : (n.lo >> i)) & 1ull);
-        if (rem >= d) rem -= d;
+        if (carry || rem >= d) rem -= d;
     }
     return rem;
 }
@@ -485,14 +492,15 @@ StepResult Interpreter::step(const Decoded& ins) {
             switch (ins.mnem) {
                 case Mnemonic::Add:
                     result = (av + bv) & m;
-                    cf = (av + bv) > m;
+                    cf = av > (m - bv);
                     of = ((~(av ^ bv) & (av ^ result)) & (1ull << (bits - 1))) != 0;
                     break;
                 case Mnemonic::Adc: {
                     const std::uint64_t cin = cx.cpu.flag(cpu::kFlagCF) ? 1u : 0u;
+                    const std::uint64_t limit = m - bv;
+                    cf = av > limit || (cin != 0 && av == limit);
                     const std::uint64_t sum = av + bv + cin;
                     result = sum & m;
-                    cf = sum > m;
                     of = ((~(av ^ bv) & (av ^ result)) & (1ull << (bits - 1))) != 0;
                     break;
                 }
@@ -631,8 +639,10 @@ StepResult Interpreter::step(const Decoded& ins) {
             // unsigned product av*bv (fits in 64 bits unless both are huge)
             const std::uint64_t prod = mul_full(av, bv);
             if (bits == 8) {
-                write_gpr(cx.cpu, 0, 16, prod & 0xFFFFull, cx.rex);           // AX
-                write_gpr(cx.cpu, 4, 8, (prod >> 8) & 0xFFull, cx.rex);       // DX:AH..
+                // The complete byte-product is AX. Writing AH separately
+                // through the encoded byte-register path is wrong when a
+                // REX prefix is present (register 4 would mean SPL).
+                write_gpr(cx.cpu, 0, 16, prod & 0xFFFFull, cx.rex);
             } else if (bits == 16) {
                 write_gpr(cx.cpu, 0, 16, prod & kMask16, cx.rex);             // AX
                 write_gpr(cx.cpu, 2, 16, (prod >> 16) & kMask16, cx.rex);    // DX
@@ -1189,24 +1199,27 @@ StepResult Interpreter::step(const Decoded& ins) {
                 // (width-1..0) chain, which for a >= width shift of a masked
                 // value is 0 when masked > bits and the value's bit
                 // (masked-bits-1)... keep it simple: CF = 0 (documented).
-                bool cf = false;
                 if (masked <= bits) {
-                    cf = ((dst.raw >> (bits - masked)) & 1ull) != 0;
+                    const bool cf = ((dst.raw >> (bits - masked)) & 1ull) != 0;
+                    cx.cpu.set_flag(cpu::kFlagCF, cf);
                 }
-                cx.cpu.set_flag(cpu::kFlagCF, cf);
                 if (masked == 1) {
                     cx.cpu.set_flag(cpu::kFlagOF, sign_bit(result, bits) != 0);
                 }
             } else if (ins.mnem == Mnemonic::Shr) {
-                const std::uint64_t last = masked <= bits ? ((dst.raw >> (masked - 1)) & 1ull) : 0;
-                cx.cpu.set_flag(cpu::kFlagCF, masked <= bits && (last != 0));
+                if (masked <= bits) {
+                    const std::uint64_t last = (dst.raw >> (masked - 1)) & 1ull;
+                    cx.cpu.set_flag(cpu::kFlagCF, last != 0);
+                }
                 if (masked == 1) {
                     cx.cpu.set_flag(cpu::kFlagOF, sign_bit(dst.raw & m, bits) != 0);
                 }
             } else if (ins.mnem == Mnemonic::Sar) {
-                const std::uint64_t last = masked <= bits ? ((dst.raw >> (masked - 1)) & 1ull) : 0;
-                cx.cpu.set_flag(cpu::kFlagCF, masked <= bits && (last != 0));
-                cx.cpu.set_flag(cpu::kFlagOF, false);
+                if (masked <= bits) {
+                    const std::uint64_t last = (dst.raw >> (masked - 1)) & 1ull;
+                    cx.cpu.set_flag(cpu::kFlagCF, last != 0);
+                }
+                if (masked == 1) cx.cpu.set_flag(cpu::kFlagOF, false);
             } else if (ins.mnem == Mnemonic::Rol) {
                 const std::uint64_t n = masked % bits;
                 if (n != 0) {
