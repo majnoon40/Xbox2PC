@@ -734,6 +734,16 @@ TEST(GdkServiceTest, GuestWaitAnySelectsSignaledObjectAndHonorsTimeout) {
     ASSERT_TRUE(timed_out.ok());
     EXPECT_EQ(timed_out.value(), 0x102u); // WAIT_TIMEOUT
 
+    auto auto_reset = w.grt->create_event(pid.value(), false, true);
+    ASSERT_TRUE(auto_reset.ok());
+    const std::vector<std::uint64_t> auto_reset_only{auto_reset.value()};
+    auto consumed = w.grt->wait_objects_any(pid.value(), 0, auto_reset_only, 0);
+    ASSERT_TRUE(consumed.ok());
+    EXPECT_EQ(consumed.value(), 0u);
+    auto no_longer_signaled = w.grt->wait_object(pid.value(), 0, auto_reset.value(), 0);
+    ASSERT_TRUE(no_longer_signaled.ok());
+    EXPECT_EQ(no_longer_signaled.value(), 0x102u); // auto-reset signal consumed exactly once
+
     const std::vector<std::uint64_t> duplicate{first.value(), first.value()};
     EXPECT_FALSE(w.grt->wait_objects_any(pid.value(), 0, duplicate, 0).ok());
     const std::vector<std::uint64_t> too_many(65, first.value());
