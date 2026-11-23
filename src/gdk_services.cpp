@@ -639,19 +639,31 @@ class ReleaseSemaphoreImpl : public IApiImplementation {
 public:
     explicit ReleaseSemaphoreImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.arg_count != 3 || ctx.args[2] != 0 || ctx.args[1] == 0 ||
+        if (ctx.arg_count != 3 || ctx.args[1] == 0 ||
             ctx.args[1] > INT32_MAX) {
             out.return_value = 0;
-            out.note = "ReleaseSemaphore currently requires a null previous-count pointer and positive LONG release count";
+            out.note = "ReleaseSemaphore requires a positive LONG release count and a valid optional previous-count output";
             return true;
         }
         auto r = svc_.release_semaphore(ctx.process_id, ctx.args[0],
                                         static_cast<std::uint32_t>(ctx.args[1]));
-        out.return_value = r.ok() ? 1 : 0;
-        if (!r.ok()) out.note = r.error_string();
+        if (!r.ok()) {
+            out.return_value = 0;
+            out.note = r.error_string();
+            return true;
+        }
+        out.return_value = 1;
+        if (ctx.args[2] != 0) {
+            const auto previous = static_cast<std::int32_t>(r.value());
+            std::memcpy(out.out_bytes.data(), &previous, sizeof(previous));
+            out.out_bytes_size = sizeof(previous);
+            out.has_out = true;
+            out.out_size = sizeof(previous);
+            out.out_value = static_cast<std::uint32_t>(previous);
+        }
         return true;
     }
-    std::string describe() const override { return "Win32: ReleaseSemaphore (null previous-count output only)"; }
+    std::string describe() const override { return "Win32: ReleaseSemaphore (optional DWORD previous-count output)"; }
 private: GameRuntimeService& svc_;
 };
 class SetEventImpl : public IApiImplementation {
