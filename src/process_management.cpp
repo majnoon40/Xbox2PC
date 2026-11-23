@@ -232,15 +232,26 @@ Result<void> ProcessManager::suspend_process(Handle process) {
     }
     auto r = proc->suspend();
     if (!r.ok()) return r;
-    // Cooperative suspension across owned threads: request stop so their
-    // safe points observe it (never forced).
-    for (std::uint64_t tid : proc->thread_ids()) {
+    // Suspend each owned live thread through its resumable gate. This is
+    // deliberately not request_stop(): stop is terminal cancellation.
+    std::vector<RtThread*> suspended;
+    for (const std::uint64_t tid : proc->thread_ids()) {
         auto t = objects_.lookup_id(tid);
-        if (t.ok() && t.value().get() != nullptr) {
-            if (auto* thread = t.value().get()->as<RtThread>()) {
-                thread->request_stop();
-            }
+        if (!t.ok() || t.value().get() == nullptr) continue;
+        auto* thread = t.value().get()->as<RtThread>();
+        if (thread == nullptr) continue;
+        const auto state = thread->state();
+        if (state == ThreadState::Suspended || state == ThreadState::Terminated ||
+            state == ThreadState::Failed || state == ThreadState::Created) continue;
+        auto paused = thread->suspend();
+        if (!paused.ok()) {
+            for (auto it = suspended.rbegin(); it != suspended.rend(); ++it)
+                (void)(*it)->resume();
+            (void)proc->resume();
+            return Result<void>(paused.errc(),
+                                "process suspension rolled back: " + paused.context());
         }
+        suspended.push_back(thread);
     }
     return Result<void>::ok_result();
 }
@@ -253,14 +264,21 @@ Result<void> ProcessManager::resume_process(Handle process) {
     }
     auto r = proc->resume();
     if (!r.ok()) return r;
-    for (std::uint64_t tid : proc->thread_ids()) {
+    std::vector<RtThread*> resumed;
+    for (const std::uint64_t tid : proc->thread_ids()) {
         auto t = objects_.lookup_id(tid);
-        if (t.ok() && t.value().get() != nullptr) {
-            if (auto* thread = t.value().get()->as<RtThread>()) {
-                // Clear the cooperative stop for resumable threads.
-                (void)thread->resume();
-            }
+        if (!t.ok() || t.value().get() == nullptr) continue;
+        auto* thread = t.value().get()->as<RtThread>();
+        if (thread == nullptr || thread->state() != ThreadState::Suspended) continue;
+        auto running = thread->resume();
+        if (!running.ok()) {
+            for (auto it = resumed.rbegin(); it != resumed.rend(); ++it)
+                (void)(*it)->suspend();
+            (void)proc->suspend();
+            return Result<void>(running.errc(),
+                                "process resume rolled back: " + running.context());
         }
+        resumed.push_back(thread);
     }
     return Result<void>::ok_result();
 }
