@@ -479,9 +479,11 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     auto pid=w.pm.resolve_pid(w.last_handle); ASSERT_TRUE(pid.ok());
     ApiContext c; c.process_id=pid.value(); c.arg_count=4;
     c.args[0]=0; c.args[1]=1; c.args[2]=0; c.args[3]=0;
+    const auto handles_before=p->handle_table().live_count();
     auto created=w.reg.dispatch("kernel32","CreateEventW",c);
     ASSERT_TRUE(created.ok); ASSERT_NE(created.return_value,0u);
     const auto h=created.return_value;
+    EXPECT_EQ(p->handle_table().live_count(),handles_before+1);
     c.arg_count=2; c.args[0]=h; c.args[1]=0;
     auto timeout=w.reg.dispatch("kernel32","WaitForSingleObject",c);
     ASSERT_TRUE(timeout.ok); EXPECT_EQ(timeout.return_value,0x102u);
@@ -518,6 +520,7 @@ TEST(GdkServiceTest, Win32EventApiLifecycleAndProcessIsolation) {
     c.process_id=pid.value();
     auto closed=w.reg.dispatch("kernel32","CloseHandle",c);
     ASSERT_TRUE(closed.ok); EXPECT_EQ(closed.return_value,1u);
+    EXPECT_EQ(p->handle_table().live_count(),handles_before);
     auto stale=w.reg.dispatch("kernel32","SetEvent",c);
     ASSERT_TRUE(stale.ok); EXPECT_EQ(stale.return_value,0u);
 }
