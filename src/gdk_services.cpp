@@ -478,9 +478,28 @@ public:
         const auto submitted = svc_.submit_callback(
             ctx.process_id, ctx.args[0],
             static_cast<XTaskQueuePort>(ctx.args[1]), ctx.args[2], ctx.args[3]);
-        out.return_value = submitted.ok() ? kSOk
-            : submitted.errc() == RuntimeErrc::ProcessTerminated ? kEAbort
-                                                                  : kEInvalidArg;
+        if (submitted.ok()) {
+            out.return_value = kSOk;
+        } else {
+            switch (submitted.errc()) {
+                case RuntimeErrc::ProcessTerminated:
+                    out.return_value = kEAbort;
+                    break;
+                case RuntimeErrc::OutOfResources:
+                    out.return_value = kEOutOfMemory;
+                    break;
+                case RuntimeErrc::InvalidHandle:
+                case RuntimeErrc::NotFound:
+                    out.return_value = kEHandle;
+                    break;
+                case RuntimeErrc::InvalidArgument:
+                    out.return_value = kEInvalidArg;
+                    break;
+                default:
+                    out.return_value = kEFail;
+                    break;
+            }
+        }
         if (!submitted.ok()) out.error = submitted.error_string();
         out.note = submitted.ok()
             ? "guest callback queued for explicit manual dispatch"
