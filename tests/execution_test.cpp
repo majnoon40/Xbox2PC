@@ -926,6 +926,7 @@ TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
         code_va, MemProtect::ReadExecute).ok());
 
     constexpr std::uint64_t binding = 0x51000001ull;
+    EXPECT_TRUE(is_api_binding(0x51010001ull)); // Win32 bindings occupy the second synthetic range
     constexpr std::uint64_t tid = 0x91;
     const std::uint64_t rsp = stack_va + 0x100;
     ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
@@ -957,7 +958,7 @@ TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
     EXPECT_EQ(result.api_calls, 1u);
     EXPECT_EQ(result.return_value, api::kSOk);
     EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), api::kSOk);
-    EXPECT_EQ(cpu_state.rip, code_va + 0x101);
+    EXPECT_EQ(cpu_state.rip, code_va + 0x100); // RET sentinel pre-check stops at the return instruction
 }
 
 TEST(EngineTest, ExecutesSubsetProgram) {
