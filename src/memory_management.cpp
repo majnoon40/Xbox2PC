@@ -164,7 +164,7 @@ Result<std::uint64_t> AddressSpace::reserve_region(std::uint64_t xbox_va,
     if (limits_.max_reserved_bytes != 0) {
         std::uint64_t current_reserved = 0;
         for (const auto& [va, r] : impl_->regions) {
-            if (r.state == RegionState::Reserved) current_reserved += r.size;
+            current_reserved += r.size; // committed regions still occupy reserved VA space
         }
         if (current_reserved > limits_.max_reserved_bytes ||
             aligned_size > limits_.max_reserved_bytes - current_reserved) {
@@ -239,7 +239,7 @@ Result<std::uint64_t> AddressSpace::reserve_region_auto(std::uint64_t size,
     if (limits_.max_reserved_bytes != 0) {
         std::uint64_t current_reserved = 0;
         for (const auto& [va, r] : impl_->regions) {
-            if (r.state == RegionState::Reserved) current_reserved += r.size;
+            current_reserved += r.size; // committed regions still occupy reserved VA space
         }
         if (current_reserved > limits_.max_reserved_bytes ||
             aligned > limits_.max_reserved_bytes - current_reserved) {
@@ -442,18 +442,19 @@ Result<void> AddressSpace::resize_region(std::uint64_t xbox_va,
                             "grow would overlap the next region");
     }
     const std::uint64_t delta = aligned_new - r.size;
-    if (r.state == RegionState::Reserved && limits_.max_reserved_bytes != 0) {
-        std::uint64_t current = 0;
-        for (const auto& [va, reg] : impl_->regions) {
-            if (reg.state == RegionState::Reserved) current += reg.size;
-        }
-        if (current > limits_.max_reserved_bytes ||
-            delta > limits_.max_reserved_bytes - current) {
+    // Every region consumes reservation address space regardless of
+    // whether its pages are currently committed.
+    if (limits_.max_reserved_bytes != 0) {
+        std::uint64_t current_reserved = 0;
+        for (const auto& [va, reg] : impl_->regions) current_reserved += reg.size;
+        if (current_reserved > limits_.max_reserved_bytes ||
+            delta > limits_.max_reserved_bytes - current_reserved) {
             return Result<void>(RuntimeErrc::OutOfResources,
                                 "reservation limit exceeded on resize");
         }
-    } else if (r.state == RegionState::Committed &&
-               limits_.max_committed_bytes != 0) {
+    }
+    if (r.state == RegionState::Committed &&
+        limits_.max_committed_bytes != 0) {
         std::uint64_t current = 0;
         for (const auto& [va, reg] : impl_->regions) {
             if (reg.state == RegionState::Committed) current += reg.size;
