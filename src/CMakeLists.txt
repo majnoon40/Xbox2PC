@@ -23,6 +23,14 @@ target_include_directories(xbox2pc_rt_binary_validation PUBLIC ${PROJECT_SOURCE_
 target_link_libraries(xbox2pc_rt_binary_validation PUBLIC xbox2pc_pe_parser)
 target_compile_features(xbox2pc_rt_binary_validation PUBLIC cxx_std_20)
 
+# ── M9: binary CLI/reporting support ──
+add_library(xbox2pc_rt_m9_cli STATIC m9_cli.cpp)
+target_include_directories(xbox2pc_rt_m9_cli PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_m9_cli PUBLIC
+    xbox2pc_rt_binary_validation xbox2pc_rt_static_analysis
+    xbox2pc_pe_parser xbox2pc_json xbox2pc_diagnostics)
+target_compile_features(xbox2pc_rt_m9_cli PUBLIC cxx_std_20)
+
 # ── json_writer (M2: strict JSON serialization) ──
 add_library(xbox2pc_json STATIC json_writer.cpp)
 target_include_directories(xbox2pc_json PUBLIC ${PROJECT_SOURCE_DIR}/include)
