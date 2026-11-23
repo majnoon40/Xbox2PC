@@ -1487,6 +1487,7 @@ Result<void> TaskQueueService::on_shutdown() {
         std::lock_guard lock(lock_);
         queues_.clear();
     }
+    queue_cv_.notify_all();
     owned_.clear();
     if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
         return Result<void>(observer_removed.errc(), observer_removed.context());
@@ -1521,8 +1522,8 @@ Result<std::uint64_t> TaskQueueService::create_queue(
 Result<bool> TaskQueueService::dispatch(
     std::uint64_t process_id, std::uint64_t queue_id,
     XTaskQueuePort port, std::uint32_t timeout_ms) {
-    std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
+    std::unique_lock lock(lock_);
+    auto it = queues_.find(queue_id);
     if (it == queues_.end()) {
         return Result<bool>(RuntimeErrc::NotFound, "unknown queue handle");
     }
@@ -1535,7 +1536,20 @@ Result<bool> TaskQueueService::dispatch(
                             "unknown XTaskQueuePort value");
     }
     if (it->second.terminated) return Result<bool>(false);
-    (void)timeout_ms;  // no callback submissions exist in this compatibility slice
+
+    // No callback submissions exist yet. Preserve the documented blocking
+    // contract: finite timeouts elapse; INFINITE waits for termination/close.
+    const auto stopped = [&] {
+        const auto current = queues_.find(queue_id);
+        return current == queues_.end() ||
+               current->second.owner_process_id != process_id ||
+               current->second.terminated;
+    };
+    if (timeout_ms == 0xFFFFFFFFu) {
+        queue_cv_.wait(lock, stopped);
+    } else if (timeout_ms != 0) {
+        (void)queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), stopped);
+    }
     return Result<bool>(false);
 }
 
@@ -1551,6 +1565,7 @@ Result<void> TaskQueueService::close_queue(
                             "task queue handle belongs to another process");
     }
     queues_.erase(it);
+    queue_cv_.notify_all();
     return Result<void>::ok_result();
 }
 
@@ -1567,6 +1582,7 @@ Result<void> TaskQueueService::terminate_queue(
     }
     it->second.terminated = true;
     (void)wait;  // no callback work exists to drain in this partial model
+    queue_cv_.notify_all();
     return Result<void>::ok_result();
 }
 
@@ -1576,6 +1592,7 @@ void TaskQueueService::release_process(std::uint64_t process_id) {
         if (it->second.owner_process_id == process_id) it = queues_.erase(it);
         else ++it;
     }
+    queue_cv_.notify_all();
 }
 
 std::size_t TaskQueueService::live_queues() const {
