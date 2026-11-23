@@ -19,7 +19,7 @@ whitelist returns typed `NotFound` — layouts are never guessed.
 
 M10 synchronization marshalling covers `CreateEventW`, `SetEvent`,
 `ResetEvent`, `CreateMutexW`, `ReleaseMutex`, `CreateSemaphoreW`,
-`ReleaseSemaphore` (null previous-count pointer subset),
+`ReleaseSemaphore` (including the optional previous-count output pointer),
 `WaitForSingleObject`, and synchronization-handle `CloseHandle`.
 No host function pointers are exposed to guest code; nested dispatch
 depth is capped. Tests cover integer/pointer/out-buffer/error/
