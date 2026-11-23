@@ -1880,6 +1880,21 @@ Result<bool> TaskQueueService::dispatch(
         return Result<bool>(RuntimeErrc::InvalidArgument, "unknown XTaskQueuePort value");
     auto& callbacks = port == XTaskQueuePort::Work
         ? queue->work_callbacks : queue->completion_callbacks;
+    ++queue->active_dispatches;
+    const auto finish_dispatch = [&] {
+        if (queue->active_dispatches != 0) --queue->active_dispatches;
+        const bool still_referenced = std::any_of(
+            queues_.begin(), queues_.end(),
+            [&](const auto& entry) { return entry.second == queue; });
+        if (!still_referenced && queue->active_dispatches == 0) {
+            // No handle or in-flight dispatch can consume the remaining work.
+            queue->work_callbacks.clear();
+            queue->completion_callbacks.clear();
+            retired_queues_.erase(
+                std::remove(retired_queues_.begin(), retired_queues_.end(), queue),
+                retired_queues_.end());
+        }
+    };
     const auto ready = [&] {
         const bool still_referenced = std::any_of(
             queues_.begin(), queues_.end(),
@@ -1892,11 +1907,16 @@ Result<bool> TaskQueueService::dispatch(
         else if (timeout_ms != 0)
             (void)queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), ready);
     }
-    if (callbacks.empty()) return Result<bool>(false);
+    if (callbacks.empty()) {
+        finish_dispatch();
+        return Result<bool>(false);
+    }
 
-    if (!invoke_callback)
+    if (!invoke_callback) {
+        finish_dispatch();
         return Result<bool>(RuntimeErrc::InvalidState,
                             "manual guest callback dispatch requires an execution backend");
+    }
     auto callback = callbacks.front();
     callbacks.pop_front();
     ++queue->active_callbacks;
@@ -1916,17 +1936,7 @@ Result<bool> TaskQueueService::dispatch(
     }
     lock.lock();
     if (queue->active_callbacks != 0) --queue->active_callbacks;
-    const bool has_handles = std::any_of(
-        queues_.begin(), queues_.end(),
-        [&](const auto& entry) { return entry.second == queue; });
-    const bool pending = !queue->work_callbacks.empty() ||
-                         !queue->completion_callbacks.empty() ||
-                         queue->active_callbacks != 0;
-    if (!has_handles && !pending) {
-        retired_queues_.erase(
-            std::remove(retired_queues_.begin(), retired_queues_.end(), queue),
-            retired_queues_.end());
-    }
+    finish_dispatch();
     queue_cv_.notify_all();
     lock.unlock();
     if (!invoked.ok())
@@ -1949,13 +1959,17 @@ Result<void> TaskQueueService::close_queue(
     const bool has_alias = std::any_of(
         queues_.begin(), queues_.end(),
         [&](const auto& entry) { return entry.second == queue; });
-    const bool pending = !queue->work_callbacks.empty() ||
-                         !queue->completion_callbacks.empty() ||
-                         queue->active_callbacks != 0;
-    if (!has_alias && pending &&
-        std::find(retired_queues_.begin(), retired_queues_.end(), queue) ==
-            retired_queues_.end())
-        retired_queues_.push_back(queue);
+    if (!has_alias) {
+        if (queue->active_dispatches != 0) {
+            if (std::find(retired_queues_.begin(), retired_queues_.end(), queue) ==
+                retired_queues_.end())
+                retired_queues_.push_back(queue);
+        } else {
+            // Pending callbacks cannot be reached after the final handle closes.
+            queue->work_callbacks.clear();
+            queue->completion_callbacks.clear();
+        }
+    }
     queue_cv_.notify_all();
     return Result<void>::ok_result();
 }
