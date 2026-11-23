@@ -813,6 +813,7 @@ TEST(GdkServiceTest, VirtualQueryReportsTrackedGuestRegions) {
     EXPECT_EQ(rd64(free_region,8),0u);
     EXPECT_EQ(rd64(free_region,24),proc->address_space().capacity()-0x2000);
     EXPECT_EQ(rd32(free_region,32),0x10000u); // MEM_FREE
+    EXPECT_EQ(rd32(free_region,16),0u); // no AllocationProtect for MEM_FREE
     EXPECT_EQ(rd32(free_region,36),0x01u);    // PAGE_NOACCESS
     EXPECT_EQ(rd32(free_region,40),0u);       // no MEM_PRIVATE type for free memory
     ctx.args[0]=0x7FFFFFFFFFFFFFFFull; const auto bad=w.reg.dispatch("kernel32","VirtualQuery",ctx); ASSERT_TRUE(bad.ok); EXPECT_EQ(bad.return_value,0u);
