@@ -553,7 +553,7 @@ public:
     }
     std::string describe() const override { return "Win32: CloseHandle (event handles only)"; }
 private: GameRuntimeService& svc_;
-}
+};
 
 }  // namespace
 
@@ -780,6 +780,8 @@ Result<std::uint64_t> GameRuntimeService::create_event(std::uint64_t pid,
                                                         bool manual_reset,
                                                         bool initially_set) {
     if (pid == 0) return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "event requires guest process identity");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(RuntimeErrc::NotFound, "event owner process does not exist");
     const auto handle = next_event_handle_.fetch_add(1, std::memory_order_relaxed);
     if (handle == 0 || handle == UINT64_MAX)
         return Result<std::uint64_t>(RuntimeErrc::OutOfResources, "event handle space exhausted");
