@@ -78,6 +78,15 @@ struct ExecWorld {
     }
 };
 
+struct OversizedOutPayloadImpl : api::IApiImplementation {
+    bool invoke(const api::ApiContext&, api::ApiCallResult& out) override {
+        out.has_out = true;
+        out.out_bytes_size = api::ApiCallResult::kMaxOutBytes + 1;
+        return true;
+    }
+    std::string describe() const override { return "oversized out-payload test"; }
+};
+
 // A minimal in-space RW scratch region for guest-memory tests.
 Handle scratch_region(ManagedProcess& proc, std::uint64_t size,
                       std::uint64_t* out_va) {
@@ -630,6 +639,47 @@ TEST(BridgeTest, MarshalPointerCallWithOutBuffer) {
         EXPECT_STREQ(buf, "RETAIL");
         EXPECT_EQ(r.value().api_result.out_value, 6u);   // length reported
     }
+}
+
+TEST(BridgeTest, RejectsOversizedHostOutPayloadBeforeChangingGuestState) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("oversized-out.exe");
+    guest::GuestMemory mem(proc->address_space());
+
+    api::ApiRegistry registry;
+    ASSERT_TRUE(registry.register_implementation(
+        "xgameruntime", "XSystemGetXboxLiveSandboxId",
+        std::make_shared<OversizedOutPayloadImpl>(), 9001).ok());
+    const auto* descriptor =
+        registry.find("xgameruntime", "XSystemGetXboxLiveSandboxId");
+    ASSERT_NE(descriptor, nullptr);
+    auto plan = plan_for_descriptor(*descriptor);
+    ASSERT_TRUE(plan.ok());
+
+    std::uint64_t buf_va = 0;
+    scratch_region(*proc, 0x1000, &buf_va);
+    const std::uint64_t used_va = buf_va + 0x100;
+    cpu::CpuState c;
+    c.reset();
+    c.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack st(0x2003F000ull, 0x1000);
+    std::vector<rt::abi::ArgValue> vals(3);
+    vals[0].int_v = 64;
+    vals[1].ptr_va = buf_va;
+    vals[1].int_v = buf_va;
+    vals[1].kind = rt::abi::ArgKind::Ptr;
+    vals[2].ptr_va = used_va;
+    vals[2].int_v = used_va;
+    vals[2].kind = rt::abi::ArgKind::Ptr;
+    ASSERT_TRUE(rt::abi::prepare_call(
+        c, 0x51000004, plan.value().call, vals, HostStack::writer(&st)).ok());
+    const auto callee_rsp = c.reg(cpu::Gpr::Sp);
+
+    const auto result = marshal_and_dispatch(
+        c, mem, registry, plan.value(), 1, 0, 64);
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(c.reg(cpu::Gpr::Sp), callee_rsp);
+    EXPECT_EQ(c.reg(cpu::Gpr::Rax), 0u);
 }
 
 TEST(BridgeTest, MarshalInvalidPointerAndDepth) {
