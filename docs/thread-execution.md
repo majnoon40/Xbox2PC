@@ -55,10 +55,21 @@ Both record state `Failed` + a distinct exit code
   shared `CooperativeExecutionGate`; `suspend()` requests a resumable
   pause, `resume()` releases it, and `request_stop()` terminally cancels
   it and wakes parked checkpoints. Thread mains cooperate through
-  `suspension_point()`; execution owners can bind
-  `thread.execution_control()` to an `ExecutionContext`; `invoke()` then
-  propagates that gate to requests automatically, allowing the deterministic
-  backend to park at instruction boundaries.
+  `suspension_point()`.
+- `ProcessManager::spawn_thread` stamps the stable guest process ID onto
+  each managed `RtThread` before it starts. Constructing an
+  `ExecutionContext` from that managed thread derives the guest TID from
+  `RtThread::thread_id()` and automatically shares its gate; zero or
+  mismatched/unmanaged identities are rejected during initialization.
+  This removes a separate manually supplied TID/control pair for managed
+  execution contexts. The legacy explicit PID/TID constructor remains for
+  synthetic tests and externally managed contexts.
+- `ExecutionContext::invoke` and `step` propagate the same gate to the
+  backend. TLS callback execution also attaches that gate, and it binds the
+  same PID/TID/address-space tuple as normal guest execution. Nested
+  task-queue callbacks inherit the active request's gate and execution
+  identity, so suspension and termination apply consistently at callback
+  instruction boundaries.
 - `ProcessManager::suspend_process` and `resume_process` apply those
   distinct operations across owned live threads, with rollback if a thread
   transition fails. The Win32 event/mutex/semaphore wait path checks the
