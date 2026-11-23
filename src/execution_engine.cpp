@@ -469,6 +469,22 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
         return Ret(RuntimeErrc::InvalidArgument,
                    "argument extraction: " + args.error_string());
     }
+    // Function pointers are not ordinary data pointers: a zero-sized Ptr
+    // argument deliberately skips generic range checks, so validate the
+    // submitted callback as executable guest memory before it enters a queue.
+    if (plan.library == "xgameruntime" &&
+        plan.export_name == "XTaskQueueSubmitCallback") {
+        if (args.value().size() != 4 || args.value()[3].ptr_va == 0) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "task-queue callback address is null or missing");
+        }
+        const auto executable = mem.validate(args.value()[3].ptr_va, 1, false, true);
+        if (!executable.ok()) {
+            return Ret(RuntimeErrc::NotFound,
+                       "task-queue callback is not executable guest memory: " +
+                           guest::guest_mem_errc_to_name(executable.err));
+        }
+    }
     // 2. Build the M7 ApiContext from the values (validated pointers).
     api::ApiContext ctx;
     ctx.process_id = pid;
