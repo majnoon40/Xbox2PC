@@ -91,6 +91,7 @@ Json analysis_json(const xbox2pc::analysis::AnalysisReport& report) {
         row.set("length", static_cast<std::uint64_t>(item.length));
         row.set("bytes", item.bytes_hex);
         row.set("instruction", item.text);
+        row.set("interpreter_supported", item.interpreter_supported);
         instructions.push_back(std::move(row));
     }
     out.set("confirmed_instructions", std::move(instructions));
@@ -110,6 +111,7 @@ Json analysis_json(const xbox2pc::analysis::AnalysisReport& report) {
     };
     out.set("candidate_embedded_data", regions(report.candidate_embedded_data));
     out.set("unsupported_instructions", regions(report.unsupported_instructions));
+    out.set("unsupported_execution", regions(report.unsupported_execution));
     out.set("uncertain_regions", regions(report.uncertain_regions));
 
     Json segments = Json::array();
@@ -258,7 +260,8 @@ Json compatibility_json(const xbox2pc::pe::PeImage& image,
     out.set("exception_metadata", directory_json(image, xbox2pc::pe::kDirException));
 
     Json instructions = Json::object();
-    const bool has_unsupported = !analysis.unsupported_instructions.empty();
+    const bool has_unsupported = !analysis.unsupported_instructions.empty() ||
+        !analysis.unsupported_execution.empty();
     const bool has_uncertain = !analysis.uncertain_regions.empty();
     const char* instruction_status = !analysis.parsed ? "NOT_TESTED" :
         (!amd64 ? "NOT_TESTED" :
@@ -268,6 +271,8 @@ Json compatibility_json(const xbox2pc::pe::PeImage& image,
                      static_cast<std::uint64_t>(analysis.confirmed_instructions.size()));
     instructions.set("unsupported_region_count",
                      static_cast<std::uint64_t>(analysis.unsupported_instructions.size()));
+    instructions.set("interpreter_unsupported_count",
+                     static_cast<std::uint64_t>(analysis.unsupported_execution.size()));
     instructions.set("uncertain_region_count",
                      static_cast<std::uint64_t>(analysis.uncertain_regions.size()));
     instructions.set("embedded_data_candidates",
