@@ -4,37 +4,77 @@
 #include <limits>
 
 namespace xbox2pc::rt::exec {
+namespace {
 
-GuestThreadEnvironment::GuestThreadEnvironment(AddressSpace& space)
-    : space_(space), memory_(space) {}
-
-GuestThreadEnvironment::~GuestThreadEnvironment() { release_all(); }
-
-Result<std::uint64_t> GuestThreadEnvironment::allocate(std::uint64_t size,
-                                                        const char* name) {
-    auto reserved = space_.reserve_region_auto(size, name);
+Result<std::uint64_t> allocate_zeroed(AddressSpace& space,
+                                      guest::GuestMemory& memory,
+                                      std::uint64_t size,
+                                      const char* name) {
+    auto reserved = space.reserve_region_auto(size, name);
     if (!reserved.ok()) return Result<std::uint64_t>(reserved.errc(), reserved.context());
-    auto committed = space_.commit_region(reserved.value());
+    auto committed = space.commit_region(reserved.value());
     if (!committed.ok()) {
-        (void)space_.release_region(reserved.value());
+        (void)space.release_region(reserved.value());
         return Result<std::uint64_t>(committed.errc(), committed.context());
     }
-    allocations_.push_back(reserved.value());
     const std::uint64_t rounded =
-        ((size + space_.page_size() - 1) / space_.page_size()) * space_.page_size();
+        ((size + space.page_size() - 1) / space.page_size()) * space.page_size();
     std::vector<std::uint8_t> zeros(64u * 1024u, 0);
     for (std::uint64_t offset = 0; offset < rounded;) {
         const std::size_t chunk = static_cast<std::size_t>(
             std::min<std::uint64_t>(zeros.size(), rounded - offset));
-        auto cleared = memory_.write(reserved.value() + offset, zeros.data(), chunk);
+        auto cleared = memory.write(reserved.value() + offset, zeros.data(), chunk);
         if (!cleared.ok()) {
-            (void)space_.release_region(reserved.value());
-            allocations_.pop_back();
+            (void)space.release_region(reserved.value());
             return Result<std::uint64_t>(cleared.errc(), cleared.context());
         }
         offset += chunk;
     }
     return Result<std::uint64_t>(reserved.value());
+}
+
+}  // namespace
+
+GuestProcessEnvironment::GuestProcessEnvironment(AddressSpace& space)
+    : space_(space), memory_(space) {}
+
+GuestProcessEnvironment::~GuestProcessEnvironment() {
+    if (peb_va_ != 0) (void)space_.release_region(peb_va_);
+}
+
+Result<void> GuestProcessEnvironment::initialize(std::uint64_t process_id) {
+    if (process_id == 0) {
+        return Result<void>(RuntimeErrc::InvalidArgument, "process id must be nonzero");
+    }
+    if (initialized_) {
+        return process_id_ == process_id
+            ? Result<void>::ok_result()
+            : Result<void>(RuntimeErrc::InvalidArgument, "PEB belongs to another process");
+    }
+    auto peb = allocate_zeroed(space_, memory_, kPageBytes, "guest-peb");
+    if (!peb.ok()) return Result<void>(peb.errc(), peb.context());
+    peb_va_ = peb.value();
+    process_id_ = process_id;
+    initialized_ = true;
+    return Result<void>::ok_result();
+}
+
+Result<void> GuestProcessEnvironment::set_image_base(std::uint64_t image_base) {
+    if (!initialized_) return Result<void>(RuntimeErrc::InvalidState, "PEB not initialized");
+    return memory_.write_u64(peb_va_ + kPebImageBaseOffset, image_base);
+}
+
+GuestThreadEnvironment::GuestThreadEnvironment(AddressSpace& space,
+                                                 GuestProcessEnvironment& process)
+    : space_(space), process_(process), memory_(space) {}
+
+GuestThreadEnvironment::~GuestThreadEnvironment() { release_all(); }
+
+Result<std::uint64_t> GuestThreadEnvironment::allocate(std::uint64_t size,
+                                                        const char* name) {
+    auto allocation = allocate_zeroed(space_, memory_, size, name);
+    if (allocation.ok()) allocations_.push_back(allocation.value());
+    return allocation;
 }
 
 void GuestThreadEnvironment::release_all() noexcept {
@@ -43,24 +83,20 @@ void GuestThreadEnvironment::release_all() noexcept {
     }
     allocations_.clear();
     tls_blocks_.clear();
-    teb_va_ = peb_va_ = tls_vector_va_ = 0;
+    teb_va_ = tls_vector_va_ = 0;
     initialized_ = false;
 }
 
-Result<void> GuestThreadEnvironment::initialize(std::uint64_t process_id,
-                                                 std::uint64_t thread_id) {
+Result<void> GuestThreadEnvironment::initialize(std::uint64_t thread_id) {
     if (initialized_ || !allocations_.empty()) {
-        return Result<void>(RuntimeErrc::InvalidState, "guest environment already initialized");
+        return Result<void>(RuntimeErrc::InvalidState, "thread environment already initialized");
     }
-    if (process_id == 0 || thread_id == 0) {
+    if (!process_.initialized() || process_.process_id() == 0 || thread_id == 0) {
         return Result<void>(RuntimeErrc::InvalidArgument,
-                            "guest environment requires nonzero process and thread ids");
+                            "initialized process environment and nonzero thread id required");
     }
-    auto peb = allocate(kPageBytes, "guest-peb");
-    if (!peb.ok()) return Result<void>(peb.errc(), peb.context());
-    peb_va_ = peb.value();
     auto teb = allocate(kPageBytes, "guest-teb");
-    if (!teb.ok()) { release_all(); return Result<void>(teb.errc(), teb.context()); }
+    if (!teb.ok()) return Result<void>(teb.errc(), teb.context());
     teb_va_ = teb.value();
     auto tls = allocate(kPageBytes, "guest-tls-vector");
     if (!tls.ok()) { release_all(); return Result<void>(tls.errc(), tls.context()); }
@@ -68,10 +104,10 @@ Result<void> GuestThreadEnvironment::initialize(std::uint64_t process_id,
 
     const Result<void> writes[] = {
         memory_.write_u64(teb_va_ + kTebSelfOffset, teb_va_),
+        memory_.write_u64(teb_va_ + kTebProcessIdOffset, process_.process_id()),
+        memory_.write_u64(teb_va_ + kTebThreadIdOffset, thread_id),
         memory_.write_u64(teb_va_ + kTebTlsVectorOffset, tls_vector_va_),
-        memory_.write_u64(teb_va_ + kTebPebOffset, peb_va_),
-        memory_.write_u64(teb_va_ + kTebProcessIdOffset, process_id),
-        memory_.write_u64(teb_va_ + kTebThreadIdOffset, thread_id)
+        memory_.write_u64(teb_va_ + kTebPebOffset, process_.peb_base())
     };
     for (const auto& result : writes) {
         if (!result.ok()) {
@@ -85,15 +121,10 @@ Result<void> GuestThreadEnvironment::initialize(std::uint64_t process_id,
     return Result<void>::ok_result();
 }
 
-Result<void> GuestThreadEnvironment::set_image_base(std::uint64_t image_base) {
-    if (!initialized_) return Result<void>(RuntimeErrc::InvalidState, "guest environment not initialized");
-    return memory_.write_u64(peb_va_ + kPebImageBaseOffset, image_base);
-}
-
 Result<std::uint64_t> GuestThreadEnvironment::install_tls_module(
     std::uint32_t index, const std::uint8_t* template_bytes,
     std::size_t template_size, std::size_t zero_fill_bytes) {
-    if (!initialized_) return Result<std::uint64_t>(RuntimeErrc::InvalidState, "guest environment not initialized");
+    if (!initialized_) return Result<std::uint64_t>(RuntimeErrc::InvalidState, "TEB not initialized");
     if (index >= kTlsSlotCount || (template_size != 0 && template_bytes == nullptr) ||
         template_size > (1u << 20) || zero_fill_bytes > (1u << 20) ||
         template_size > std::numeric_limits<std::size_t>::max() - zero_fill_bytes) {

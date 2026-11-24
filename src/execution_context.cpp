@@ -51,7 +51,8 @@ ExecutionContext::ExecutionContext(std::uint64_t process_id,
                                    std::uint64_t thread_id,
                                    AddressSpace& space,
                                    api::ApiRegistry& api_reg,
-                                   ExecutionConfig cfg, std::string name)
+                                   ExecutionConfig cfg, std::string name,
+                                   std::shared_ptr<GuestProcessEnvironment> process_environment)
     : RuntimeObject(static_type_id()),
       process_id_(process_id),
       thread_id_(thread_id),
@@ -59,13 +60,15 @@ ExecutionContext::ExecutionContext(std::uint64_t process_id,
       api_reg_(api_reg),
       cfg_(cfg),
       mem_(space),
+      process_environment_(std::move(process_environment)),
       ctx_name_(std::move(name)) {}
 
 ExecutionContext::ExecutionContext(RtThread& thread, AddressSpace& space,
                                    api::ApiRegistry& api_reg,
-                                   ExecutionConfig cfg, std::string name)
+                                   ExecutionConfig cfg, std::string name,
+                                   std::shared_ptr<GuestProcessEnvironment> process_environment)
     : ExecutionContext(thread.owner_process_id(), thread.thread_id(), space,
-                       api_reg, cfg, std::move(name)) {
+                       api_reg, cfg, std::move(name), std::move(process_environment)) {
     execution_control_ = thread.execution_control();
 }
 
@@ -131,8 +134,18 @@ Result<void> ExecutionContext::initialize() {
     // M11.3: materialize documented user-mode TEB/PEB fields and the
     // per-thread TLS vector in guest memory. This records a guest GS base;
     // host GS is configured only by the later native execution thunk.
-    auto environment = std::make_unique<GuestThreadEnvironment>(space_);
-    auto environment_result = environment->initialize(process_id_, thread_id_);
+    if (process_environment_ == nullptr) {
+        process_environment_ = std::make_shared<GuestProcessEnvironment>(space_);
+    }
+    auto process_result = process_environment_->initialize(process_id_);
+    if (!process_result.ok()) {
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return process_result;
+    }
+    auto environment = std::make_unique<GuestThreadEnvironment>(space_, *process_environment_);
+    auto environment_result = environment->initialize(thread_id_);
     if (!environment_result.ok()) {
         (void)space_.release_region(stack_region_va_);
         stack_region_va_ = 0;
@@ -169,8 +182,8 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
                    "image is not Prepared (M6 requires Prepared state)");
     }
     const auto& exec = image.exec();
-    if (guest_environment_ != nullptr) {
-        auto peb_image = guest_environment_->set_image_base(exec.image_base);
+    if (process_environment_ != nullptr) {
+        auto peb_image = process_environment_->set_image_base(exec.image_base);
         if (!peb_image.ok()) return Ret(peb_image.errc(), peb_image.context());
     }
     // Entry validation: inside the image extent + executable region.

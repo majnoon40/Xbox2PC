@@ -93,12 +93,14 @@ public:
 
     ExecutionContext(std::uint64_t process_id, std::uint64_t thread_id,
                      AddressSpace& space, api::ApiRegistry& api_reg,
-                     ExecutionConfig cfg, std::string name);
+                     ExecutionConfig cfg, std::string name,
+                     std::shared_ptr<GuestProcessEnvironment> process_environment = nullptr);
     // Managed-thread constructor: derives both guest identities and binds
     // the thread's cooperative gate, preventing caller-supplied TID drift.
     ExecutionContext(RtThread& thread, AddressSpace& space,
                      api::ApiRegistry& api_reg, ExecutionConfig cfg,
-                     std::string name);
+                     std::string name,
+                     std::shared_ptr<GuestProcessEnvironment> process_environment = nullptr);
     ~ExecutionContext() override;
 
     // ── lifecycle ──
@@ -154,6 +156,7 @@ private:
     api::ApiRegistry& api_reg_;
     ExecutionConfig cfg_;
     guest::GuestMemory mem_;
+    std::shared_ptr<GuestProcessEnvironment> process_environment_;
     std::unique_ptr<GuestThreadEnvironment> guest_environment_;
     cpu::CpuState cpu_;
     Info info_;

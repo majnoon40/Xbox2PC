@@ -2226,20 +2226,30 @@ TEST(GuestThreadEnvironmentTest, InstallsPerThreadTlsTemplateAndZeroFill) {
 }
 
 
-TEST(ExecutionContextM11Test, InitializationOwnsGuestEnvironmentAndGuestGsBase) {
+TEST(ExecutionContextM11Test, ThreadsShareProcessPebButOwnDistinctTebs) {
     AddressSpace space(32ull << 20, 0x32000000, "execution-context-m11");
     api::ApiRegistry registry;
     ExecutionConfig config;
-    ExecutionContext context(0x91, 0xA2, space, registry, config, "m11-context");
-    EXPECT_EQ(context.guest_gs_base(), 0u);
-    ASSERT_TRUE(context.initialize().ok());
-    ASSERT_NE(context.guest_environment(), nullptr);
-    EXPECT_EQ(context.guest_gs_base(), context.guest_environment()->teb_base());
-    guest::GuestMemory memory(space);
-    EXPECT_EQ(memory.read_u64(context.guest_gs_base() +
-                 GuestThreadEnvironment::kTebPebOffset).value(),
-              context.guest_environment()->peb_base());
-    ASSERT_TRUE(context.destroy().ok());
-    EXPECT_EQ(context.guest_gs_base(), 0u);
+    auto process_environment = std::make_shared<GuestProcessEnvironment>(space);
+    {
+        ExecutionContext first(0x91, 0xA2, space, registry, config, "first",
+                               process_environment);
+        ExecutionContext second(0x91, 0xA3, space, registry, config, "second",
+                                process_environment);
+        ASSERT_TRUE(first.initialize().ok());
+        ASSERT_TRUE(second.initialize().ok());
+        ASSERT_NE(first.guest_environment(), nullptr);
+        ASSERT_NE(second.guest_environment(), nullptr);
+        EXPECT_EQ(first.guest_environment()->peb_base(),
+                  second.guest_environment()->peb_base());
+        EXPECT_NE(first.guest_environment()->teb_base(),
+                  second.guest_environment()->teb_base());
+        EXPECT_EQ(first.guest_gs_base(), first.guest_environment()->teb_base());
+        EXPECT_EQ(second.guest_gs_base(), second.guest_environment()->teb_base());
+        EXPECT_TRUE(first.destroy().ok());
+        EXPECT_TRUE(second.destroy().ok());
+        EXPECT_EQ(space.stats().region_count, 1u); // shared process PEB remains
+    }
+    process_environment.reset();
     EXPECT_EQ(space.stats().region_count, 0u);
 }
