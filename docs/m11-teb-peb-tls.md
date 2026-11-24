@@ -42,8 +42,10 @@ vector slot. Index 0 is valid for this module-vector model.
   operands.
 - The loader retains validated PE TLS template bytes, zero-fill size, and
   the AddressOfIndex RVA. prepare_entry copies the template into a per-thread
-  TLS block and writes the caller-supplied module index into the image slot.
-  A process-wide module-index allocator is not implemented yet.
+  TLS block and writes the process-assigned module index into the image slot.
+  The process environment maintains a stable image-base-to-index mapping;
+  collisions receive another free slot. The registry is bounded to 64 modules
+  and assignments are not recycled during that environment's lifetime.
 - TLS callback execution and compiler-generated TLS reads are not claimed to
   work end to end; native GS setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full

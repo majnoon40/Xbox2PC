@@ -24,6 +24,7 @@
 // for the documented subset — no claim of general emulation).
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -2280,4 +2281,70 @@ TEST(ExecutionContextM11Test, ThreadsShareProcessPebButOwnDistinctTebs) {
     }
     process_environment.reset();
     EXPECT_EQ(space.stats().region_count, 0u);
+}
+
+
+TEST(GuestProcessEnvironmentTest, AllocatesStableUniqueTlsIndexesPerImage) {
+    AddressSpace space(16ull << 20, 0x33000000, "process-tls-index-test");
+    exec::GuestProcessEnvironment process(space);
+    ASSERT_TRUE(process.initialize(0x44).ok());
+    auto first = process.tls_index_for_image(0x140000000ull, 7);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    EXPECT_EQ(first.value(), 7u);
+    auto again = process.tls_index_for_image(0x140000000ull, 12);
+    ASSERT_TRUE(again.ok());
+    EXPECT_EQ(again.value(), first.value());
+    auto collision = process.tls_index_for_image(0x150000000ull, 7);
+    ASSERT_TRUE(collision.ok());
+    EXPECT_EQ(collision.value(), 0u);
+    auto invalid_preference = process.tls_index_for_image(0x160000000ull, 99);
+    ASSERT_TRUE(invalid_preference.ok());
+    EXPECT_EQ(invalid_preference.value(), 1u);
+
+    AddressSpace other_space(16ull << 20, 0x34000000, "other-process-tls-index");
+    exec::GuestProcessEnvironment other(other_space);
+    ASSERT_TRUE(other.initialize(0x45).ok());
+    auto independent = other.tls_index_for_image(0x140000000ull, 7);
+    ASSERT_TRUE(independent.ok());
+    EXPECT_EQ(independent.value(), 7u);
+}
+
+TEST(GuestProcessEnvironmentTest, RejectsUninitializedAndExhaustedTlsRegistry) {
+    AddressSpace space(16ull << 20, 0x35000000, "process-tls-exhaustion-test");
+    exec::GuestProcessEnvironment process(space);
+    EXPECT_EQ(process.tls_index_for_image(0x140000000ull, 0).errc(),
+              RuntimeErrc::InvalidState);
+    ASSERT_TRUE(process.initialize(0x46).ok());
+    for (std::uint32_t i = 0; i < exec::GuestThreadEnvironment::kTlsSlotCount; ++i) {
+        auto result = process.tls_index_for_image(
+            0x140000000ull + static_cast<std::uint64_t>(i) * 0x100000ull, i);
+        ASSERT_TRUE(result.ok()) << result.error_string();
+        EXPECT_EQ(result.value(), i);
+    }
+    EXPECT_EQ(process.tls_index_for_image(0x1F0000000ull, 0).errc(),
+              RuntimeErrc::OutOfResources);
+    auto existing = process.tls_index_for_image(0x140000000ull, 63);
+    ASSERT_TRUE(existing.ok());
+    EXPECT_EQ(existing.value(), 0u);
+}
+
+TEST(GuestProcessEnvironmentTest, ConcurrentRequestsForSameImageReturnOneIndex) {
+    AddressSpace space(16ull << 20, 0x36000000, "process-tls-concurrent-test");
+    exec::GuestProcessEnvironment process(space);
+    ASSERT_TRUE(process.initialize(0x47).ok());
+    std::array<std::uint32_t, 8> indexes{};
+    std::array<bool, 8> succeeded{};
+    std::vector<std::thread> workers;
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        workers.emplace_back([&, i] {
+            auto result = process.tls_index_for_image(
+                0x170000000ull, static_cast<std::uint32_t>(i));
+            if (result.ok()) { indexes[i] = result.value(); succeeded[i] = true; }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        ASSERT_TRUE(succeeded[i]);
+        EXPECT_EQ(indexes[i], indexes[0]);
+    }
 }
