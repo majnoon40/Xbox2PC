@@ -2097,6 +2097,18 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     auto req = ctx->prepare_entry(*loaded, tls_index, {}, spec2);
     ASSERT_TRUE(req.ok()) << req.error_string();
     EXPECT_EQ(ctx->info().tls_index, tls_index);
+    ASSERT_NE(ctx->guest_environment(), nullptr);
+    const std::uint64_t tls_vector_slot =
+        ctx->guest_environment()->tls_vector_base() +
+        static_cast<std::uint64_t>(tls_index) * sizeof(std::uint64_t);
+    auto tls_block = ctx->memory().read_u64(tls_vector_slot);
+    ASSERT_TRUE(tls_block.ok()) << tls_block.error_string();
+    ASSERT_NE(tls_block.value(), 0u);
+    std::uint8_t copied_tls[2] = {};
+    ASSERT_TRUE(ctx->memory().read(tls_block.value(), copied_tls,
+                                   sizeof(copied_tls)).ok());
+    EXPECT_EQ(copied_tls[0], 9u);
+    EXPECT_EQ(copied_tls[1], 9u);
     DeterministicBackend engine(w.reg, cfg);
     engine.bind_space(proc->address_space());
     engine.bind_process(1, 1);
