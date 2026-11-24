@@ -186,6 +186,46 @@ private:
 };
 
 
+class SetLastErrorImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 1 || !ctx.set_last_error) {
+            out.note = "SetLastError requires an initialized guest thread environment";
+            return false;
+        }
+        auto stored = ctx.set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
+        if (!stored.ok()) {
+            out.note = stored.error_string();
+            return false;
+        }
+        out.return_value = 0;
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: SetLastError (per-thread TEB slot)";
+    }
+};
+
+class GetLastErrorImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 0 || !ctx.get_last_error) {
+            out.note = "GetLastError requires an initialized guest thread environment";
+            return false;
+        }
+        auto value = ctx.get_last_error();
+        if (!value.ok()) {
+            out.note = value.error_string();
+            return false;
+        }
+        out.return_value = value.value();
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: GetLastError (per-thread TEB slot)";
+    }
+};
+
 class VirtualAllocImpl : public IApiImplementation {
 public:
     explicit VirtualAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -936,7 +976,9 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r22 = api_reg_.register_implementation("kernel32", "VirtualFree", keep(std::make_shared<VirtualFreeImpl>(*this)), owner);
     auto r23 = api_reg_.register_implementation("kernel32", "VirtualProtect", keep(std::make_shared<VirtualProtectImpl>(*this)), owner);
     auto r24 = api_reg_.register_implementation("kernel32", "WaitForMultipleObjects", keep(std::make_shared<WaitForMultipleObjectsImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24}) {
+    auto r25 = api_reg_.register_implementation("kernel32", "SetLastError", keep(std::make_shared<SetLastErrorImpl>()), owner);
+    auto r26 = api_reg_.register_implementation("kernel32", "GetLastError", keep(std::make_shared<GetLastErrorImpl>()), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
