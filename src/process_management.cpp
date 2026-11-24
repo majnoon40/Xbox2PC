@@ -415,16 +415,30 @@ Result<void> ProcessManager::terminate_process(Handle process,
     auto finished = proc->finish_termination(exit_code);
     if (!finished.ok()) return finished;
 
+    // Pin a snapshot of observers while holding the manager lock, then run
+    // callbacks without it. This permits observers to query/re-enter unrelated
+    // manager operations without deadlocking termination.
+    std::vector<std::shared_ptr<ExitObserverEntry>> observers;
     {
-        // Serialize callback execution with observer removal. This ensures
-        // service shutdown cannot destroy a target while its callback is active.
-        // Observers must not re-enter ProcessManager (see the public contract).
         std::lock_guard lock(lock_);
+        observers.reserve(exit_observers_.size());
         for (const auto& [observer_id, observer] : exit_observers_) {
             (void)observer_id;
-            try { observer(pid); } catch (...) {
-                // A notification cannot undo or escape successful teardown.
-            }
+            if (observer == nullptr) continue;
+            ++observer->active_calls;
+            observers.push_back(observer);
+        }
+    }
+    for (const auto& observer : observers) {
+        try {
+            observer->callback(pid);
+        } catch (...) {
+            // A notification cannot undo or escape successful teardown.
+        }
+        {
+            std::lock_guard lock(lock_);
+            if (observer->active_calls != 0) --observer->active_calls;
+            if (observer->active_calls == 0) observer_changed_.notify_all();
         }
     }
     return Result<void>::ok_result();
@@ -440,17 +454,23 @@ Result<std::uint64_t> ProcessManager::add_process_exit_observer(
                                      "process-exit observer ID space exhausted");
     }
     const std::uint64_t id = next_exit_observer_++;
-    exit_observers_.emplace(id, std::move(observer));
+    auto entry = std::make_shared<ExitObserverEntry>();
+    entry->callback = std::move(observer);
+    exit_observers_.emplace(id, std::move(entry));
     return Result<std::uint64_t>(id);
 }
 
 Result<void> ProcessManager::remove_process_exit_observer(std::uint64_t observer_id) {
     if (observer_id == 0) return Result<void>(RuntimeErrc::InvalidArgument,
                                                "zero process-exit observer ID");
-    std::lock_guard lock(lock_);
-    if (exit_observers_.erase(observer_id) == 0) {
+    std::unique_lock lock(lock_);
+    const auto it = exit_observers_.find(observer_id);
+    if (it == exit_observers_.end()) {
         return Result<void>(RuntimeErrc::NotFound, "process-exit observer not registered");
     }
+    auto entry = it->second;
+    exit_observers_.erase(it);  // no later termination snapshot can acquire it
+    observer_changed_.wait(lock, [&] { return entry->active_calls == 0; });
     return Result<void>::ok_result();
 }
 
