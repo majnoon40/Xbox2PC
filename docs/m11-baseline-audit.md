@@ -266,8 +266,12 @@ implemented at this baseline.
 
 ## 6. What happens if a process terminates while a thread is blocked in a wait?
 
-**Answer: Win32 synchronization waits are designed to observe cancellation;
-task-queue dispatch has a significant cancellation gap.**
+**Historical baseline finding:** Win32 synchronization waits already had
+cooperative cancellation; task-queue dispatch did not. The task-queue gap has
+since been addressed by propagating the managed execution gate's cancellation
+predicate through `ApiContext` and checking it during bounded 2 ms wait
+intervals. This is polling rather than a registered task-queue waker; the
+regression test and current CI run provide the required validation evidence.
 
 For Win32 synchronization objects:
 
@@ -287,24 +291,19 @@ For Win32 synchronization objects:
 
 For task queues:
 
-- `TaskQueueService::dispatch` can wait on `queue_cv_` for an infinite
-  timeout. Its predicate checks for queued callbacks, queue termination, or
-  loss of all public handles.
-- The dispatch wait does not take the guest thread's stop token or register a
-  cancellation waker.
-- The process-exit observer that calls `TaskQueueService::release_process`
-  runs only after ProcessManager has joined all process threads.
-- Therefore, if a process thread is blocked indefinitely in task-queue
-  dispatch with no callback arriving, termination may wait for that thread;
-  the observer that would terminate and notify the queue cannot run until
-  after the join. The 50 ms join attempt can return deferred, leaving the
-  process in Terminating until the blocked dispatch is independently woken.
+- `TaskQueueService::dispatch` still waits on `queue_cv_`, but it now receives
+  the guest thread's cooperative cancellation predicate through the execution
+  bridge and `ApiContext`.
+- Infinite and finite waits use bounded 2 ms slices and re-check cancellation
+  before returning or dispatching a callback.
+- Cancellation returns a typed `ThreadTerminated` result, allowing the guest
+  execution path to unwind so ProcessManager can complete its join.
+- This does not register an `RtThread` cancellation waker with the queue;
+  wake latency is bounded by the polling interval.
 
-**Conclusion:** The M11 Phase 7 infinite-`WaitForSingleObject` test should be
-supported by the existing cancellation polling, but it still needs an
-end-to-end regression test under TSAN. The task-queue dispatch cancellation
-cycle is a concrete defect to fix: process termination must wake it before
-joining, or dispatch must observe the managed thread's cancellation state.
+**Remaining validation:** the dedicated idle/infinite-dispatch cancellation
+regression exists. It still needs confirmation on the current CI run and
+end-to-end stress coverage under TSAN.
 
 ## 7. Loader performance and memory at ~600k relocations / ~180 MB images
 
@@ -370,11 +369,12 @@ space is an abstraction over a separate host mapping.
 4. **Guest handles are split across services.** The M4 handle table is a
    strong foundation, but task queues remain outside its namespace and
    `CloseHandle` is synchronization-only.
-5. **Global lock ordering is undocumented.** Observer callbacks run under the
-   ProcessManager lock; Phase 7 should move cleanup outside that lock.
-6. **Task-queue waits are not termination-aware.** This is a concrete lifecycle
-   issue; Win32 synchronization waits already have cooperative cancellation
-   polling but need end-to-end validation.
+5. **Global lock ordering is undocumented.** The process-exit observer path
+   now invokes callbacks outside the ProcessManager lock and drains active
+   callbacks on removal; the broader lock-order audit remains open.
+6. **Task-queue waits were not termination-aware at baseline.** They now
+   observe managed-thread cancellation in bounded polling intervals; current
+   CI and end-to-end TSAN validation remain required.
 7. **Large-image performance is unproven.** The relocation decoder retains
    all entries and application linearly scans sections for each relocation.
 
