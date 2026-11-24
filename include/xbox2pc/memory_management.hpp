@@ -231,4 +231,61 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+ // ── guest virtual-address allocator / XMem seam ──────────────────────────
+ //
+ // Internal guest-visible allocation contract. It deliberately does not
+ // claim undocumented XMem API semantics.
+struct XMemAllocation {
+    std::uint64_t address = 0;
+    std::uint64_t size = 0;
+    std::uint64_t alignment = 0;
+    std::string tag;
+};
+
+class IXMemAllocator {
+public:
+    virtual ~IXMemAllocator() = default;
+    virtual Result<std::uint64_t> allocate(std::uint64_t size,
+                                           std::uint64_t alignment,
+                                           std::string tag,
+                                           bool zero_initialize) = 0;
+    virtual Result<void> free(std::uint64_t guest_address,
+                              bool scrub = false) = 0;
+    virtual Result<XMemAllocation> query(std::uint64_t guest_address) const = 0;
+    virtual MemoryAllocator::Stats stats() const = 0;
+    virtual std::uint64_t arena_base() const = 0;
+};
+
+class GuestXMemAllocator final : public IXMemAllocator {
+public:
+    static Result<std::unique_ptr<GuestXMemAllocator>> create(
+        AddressSpace& space, std::uint64_t arena_size, std::string arena_name,
+        std::uint64_t max_bytes = 0);
+    ~GuestXMemAllocator() override;
+    GuestXMemAllocator(const GuestXMemAllocator&) = delete;
+    GuestXMemAllocator& operator=(const GuestXMemAllocator&) = delete;
+
+    Result<std::uint64_t> allocate(std::uint64_t size,
+                                   std::uint64_t alignment,
+                                   std::string tag,
+                                   bool zero_initialize) override;
+    Result<void> free(std::uint64_t guest_address,
+                      bool scrub = false) override;
+    Result<XMemAllocation> query(std::uint64_t guest_address) const override;
+    MemoryAllocator::Stats stats() const override;
+    std::uint64_t arena_base() const override { return arena_base_; }
+
+private:
+    GuestXMemAllocator(AddressSpace& space, std::uint64_t arena_base,
+                       std::uint64_t arena_size, void* host_base,
+                       std::uint64_t max_bytes);
+    AddressSpace& space_;
+    const std::uint64_t arena_base_;
+    const std::uint64_t arena_size_;
+    void* const host_base_;
+    std::unique_ptr<MemoryAllocator> allocator_;
+    mutable std::mutex lock_;
+    std::map<std::uint64_t, std::uint64_t> guest_to_allocation_;
+};
+
 }  // namespace xbox2pc::rt

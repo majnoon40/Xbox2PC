@@ -72,6 +72,71 @@ public:
 
 }  // namespace
 
+// ── M11: guest VA XMem allocator seam ──────────────────────────────────────
+
+TEST(MemoryTest, GuestXMemAllocatorReturnsGuestAddressesAndTracksAllocations) {
+    AddressSpace space(256 * 4096, 0x50000000, "xmem-test");
+    auto allocator = rt::GuestXMemAllocator::create(
+        space, 64 * 4096, "guest-xmem", 48 * 4096);
+    ASSERT_TRUE(allocator.ok()) << allocator.error_string();
+    auto& heap = *allocator.value();
+
+    auto first = heap.allocate(333, 16, "tls", true);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    EXPECT_EQ(first.value() % 16, 0u);
+    EXPECT_GE(first.value(), heap.arena_base());
+
+    auto region = space.find_containing(first.value());
+    ASSERT_TRUE(region.ok());
+    EXPECT_EQ(region.value().state, RegionState::Committed);
+    auto host = space.translate(first.value());
+    ASSERT_TRUE(host.ok());
+    const auto* bytes = static_cast<const std::uint8_t*>(host.value());
+    for (std::size_t i = 0; i < 333; ++i) EXPECT_EQ(bytes[i], 0u);
+
+    auto info = heap.query(first.value());
+    ASSERT_TRUE(info.ok());
+    EXPECT_EQ(info.value().address, first.value());
+    EXPECT_EQ(info.value().size, 333u);
+    EXPECT_EQ(info.value().alignment, 16u);
+    EXPECT_EQ(info.value().tag, "tls");
+
+    auto second = heap.allocate(1024, 256, "heap-block", false);
+    ASSERT_TRUE(second.ok()) << second.error_string();
+    EXPECT_EQ(second.value() % 256, 0u);
+    EXPECT_NE(second.value(), first.value());
+    EXPECT_EQ(heap.stats().allocation_count, 2u);
+
+    ASSERT_TRUE(heap.free(first.value(), true).ok());
+    EXPECT_FALSE(heap.query(first.value()).ok());
+    EXPECT_FALSE(heap.free(first.value()).ok());
+    ASSERT_TRUE(heap.free(second.value()).ok());
+    EXPECT_EQ(heap.stats().used_bytes, 0u);
+    EXPECT_EQ(heap.stats().allocation_count, 0u);
+}
+
+TEST(MemoryTest, GuestXMemAllocatorEnforcesBoundsAndRejectsBadRequests) {
+    AddressSpace space(64 * 4096, 0x60000000, "xmem-limits");
+    auto allocator = rt::GuestXMemAllocator::create(
+        space, 8 * 4096, "small-xmem", 2 * 4096);
+    ASSERT_TRUE(allocator.ok());
+    auto& heap = *allocator.value();
+
+    EXPECT_FALSE(heap.allocate(0, 16, "zero", false).ok());
+    EXPECT_FALSE(heap.allocate(128, 3, "bad-alignment", false).ok());
+    EXPECT_FALSE(heap.allocate(3 * 4096, 16, "over-limit", false).ok());
+    auto allocation = heap.allocate(1024, 16, "valid", false);
+    ASSERT_TRUE(allocation.ok());
+    EXPECT_FALSE(heap.free(allocation.value() + 1).ok());
+    EXPECT_FALSE(heap.query(allocation.value() + 1).ok());
+    EXPECT_FALSE(heap.allocate(2048, 16, "over-budget", false).ok());
+    ASSERT_TRUE(heap.free(allocation.value()).ok());
+    auto after_free = heap.allocate(2048, 16, "after-free", false);
+    ASSERT_TRUE(after_free.ok());
+    EXPECT_TRUE(heap.free(after_free.value()).ok());
+}
+
+
 // ── memory: address spaces ────────────────────────────────────────────────
 
 TEST(MemoryTest, ReserveCommitProtectRelease) {

@@ -126,7 +126,7 @@ target_compile_features(xbox2pc_rt_services PUBLIC cxx_std_20)
 # sits above rt_memory/rt_process/rt_thread. The facade keeps its M3
 # surface and additionally exposes the manager.
 
-add_library(xbox2pc_rt_memory STATIC memory_management.cpp)
+add_library(xbox2pc_rt_memory STATIC memory_management.cpp xmem_allocator.cpp)
 target_include_directories(xbox2pc_rt_memory PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_memory PUBLIC xbox2pc_rt_pal xbox2pc_rt_error)
 target_compile_features(xbox2pc_rt_memory PUBLIC cxx_std_20)
