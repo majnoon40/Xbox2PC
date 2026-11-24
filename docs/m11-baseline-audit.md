@@ -213,8 +213,12 @@ The consolidated M11 branch now changes one Phase 7 item:
   its own active invocation.
 
 This does **not** complete Phase 7. The task-queue infinite-wait termination
-problem described below remains a separate unresolved lifecycle issue, and
-the global lock-order policy still needs a broader audit and tests.
+problem described below was addressed in a later M11 implementation update:
+the execution bridge now propagates the cooperative cancellation state into
+API dispatch, and manual task-queue dispatch checks it on bounded 2 ms wait
+intervals. A regression test covers cancellation of an otherwise idle
+infinite dispatch. The global lock-order policy still needs a broader audit
+and tests.
 
 ## 5. Lock order across ProcessManager, services, and observers
 
