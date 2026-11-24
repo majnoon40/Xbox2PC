@@ -20,6 +20,7 @@ This report records repository-verifiable compatibility gaps carried into M11. I
 - Process-exit observers were moved out of the ProcessManager critical section. Observer removal prevents future snapshots and waits for active callbacks.
 - Manual task-queue dispatch now checks the managed execution cancellation predicate during bounded wait slices. This is polling, not a registered cancellation waker.
 - TLS callback planning now fails atomically if any non-null callback target is not executable mapped guest memory. This prevents silently running only a subset of a module's callback array.
+- `kernel32!SetLastError` and `kernel32!GetLastError` now read/write the calling guest thread's TEB-backed last-error slot through `ApiContext`; calls without that thread environment are rejected.
 
 These changes address specific failure modes; none proves the corresponding M11 phase complete by itself.
 
