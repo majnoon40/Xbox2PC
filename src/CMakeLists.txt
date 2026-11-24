@@ -249,7 +249,7 @@ target_include_directories(xbox2pc_rt_exceptions PUBLIC ${PROJECT_SOURCE_DIR}/in
 target_link_libraries(xbox2pc_rt_exceptions PUBLIC xbox2pc_rt_error)
 target_compile_features(xbox2pc_rt_exceptions PUBLIC cxx_std_20)
 
-add_library(xbox2pc_rt_execution STATIC execution_engine.cpp execution_context.cpp guest_environment.cpp)
+add_library(xbox2pc_rt_execution STATIC execution_engine.cpp execution_context.cpp guest_environment.cpp native_execution.cpp)
 target_include_directories(xbox2pc_rt_execution PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_execution PUBLIC
     xbox2pc_rt_cpu xbox2pc_rt_abi xbox2pc_rt_guestmem
@@ -308,3 +308,11 @@ target_link_libraries(xbox2pc_core INTERFACE
     xbox2pc_rt_api
     xbox2pc_rt_gdk
     xbox2pc_rt_compat_report)
+
+# M11.5.1: minimal native leaf-call thunk. This is deliberately Linux/x86-64
+# only; other hosts compile the backend's typed Unsupported path.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    target_sources(xbox2pc_rt_execution PRIVATE native_call_linux_x64.S)
+    target_compile_definitions(xbox2pc_rt_execution PUBLIC XBOX2PC_NATIVE_LINUX_X64=1)
+endif()

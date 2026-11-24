@@ -4,6 +4,12 @@ project(xbox2pc
     DESCRIPTION "Xbox2PC — PE32+ inspection and Xbox-to-PC compatibility layer"
     LANGUAGES CXX)
 
+# M11.5 native leaf thunk is assembled only on Linux x86-64.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    enable_language(ASM)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
