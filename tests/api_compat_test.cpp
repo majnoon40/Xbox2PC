@@ -1050,7 +1050,9 @@ TEST(GdkServiceTest, DocumentedIdFallbacks) {
 
 TEST(GdkServiceTest, TaskQueueLifecycle) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 77;
+    auto* process = w.new_process("task-queue-lifecycle.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto q = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1095,6 +1097,67 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(gone.ok());   // unknown handle now
     // Unknown mode values rejected.
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
+}
+
+TEST(GdkServiceTest, Win32CloseHandleDispatchesTaskQueueType) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-closehandle.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = process->pid_value();
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    const auto queue = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(queue.ok()) << queue.error_string();
+
+    ApiContext close;
+    close.process_id = pid;
+    close.arg_count = 1;
+    close.args[0] = queue.value();
+    const auto result = w.reg.dispatch("kernel32", "CloseHandle", close);
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.return_value, 1u);
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(w.tq->dispatch(pid, queue.value(), XTaskQueuePort::Work, 0).ok());
+}
+
+TEST(GdkServiceTest, TaskQueueHandlesUseTheProcessHandleTable) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-handle-table.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = process->pid_value();
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    const auto first = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    const auto first_handle = xbox2pc::rt::Handle::from_raw(first.value());
+    EXPECT_EQ(first_handle.type(), static_cast<std::uint16_t>(xbox2pc::rt::TypeId::TaskQueue));
+    auto first_object = process->handle_table().lookup(first_handle);
+    ASSERT_TRUE(first_object.ok()) << first_object.error_string();
+    const auto object_id = first_object.value().get()->id();
+
+    const auto duplicate = w.tq->duplicate_queue(pid, first.value());
+    ASSERT_TRUE(duplicate.ok()) << duplicate.error_string();
+    EXPECT_NE(duplicate.value(), first.value());
+    auto duplicate_object = process->handle_table().lookup(xbox2pc::rt::Handle::from_raw(duplicate.value()));
+    ASSERT_TRUE(duplicate_object.ok()) << duplicate_object.error_string();
+    EXPECT_EQ(duplicate_object.value().get()->id(), object_id);
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+
+    auto* other_process = w.new_process("task-queue-handle-table-other.exe");
+    ASSERT_NE(other_process, nullptr);
+    EXPECT_FALSE(w.tq->dispatch(other_process->pid_value(), duplicate.value(),
+                                XTaskQueuePort::Work, 0).ok());
+
+    first_object.value().release();
+    duplicate_object.value().release();
+    ASSERT_TRUE(w.tq->close_queue(pid, first.value()).ok());
+    EXPECT_TRUE(w.tq->dispatch(pid, duplicate.value(), XTaskQueuePort::Work, 0).ok());
+    ASSERT_TRUE(w.tq->close_queue(pid, duplicate.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(process->handle_table().lookup(first_handle).ok());
+
+    const auto reused = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(reused.ok()) << reused.error_string();
+    EXPECT_NE(reused.value(), first.value());
+    ASSERT_TRUE(w.tq->close_queue(pid, reused.value()).ok());
 }
 
 TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) {
@@ -1305,7 +1368,9 @@ TEST(GdkServiceTest, TaskQueueCallbackInvokerExceptionDoesNotLeakActiveDispatch)
 
 TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 303;
+    auto* process = w.new_process("task-queue-duplicate-lifetime.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto created = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1427,7 +1492,9 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
 
 TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 404;
+    auto* process = w.new_process("task-queue-final-close.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto created = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1460,8 +1527,12 @@ TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
 
 TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 101;
-    constexpr std::uint64_t foreign_pid = 202;
+    auto* owner_process = w.new_process("task-queue-owner.exe");
+    auto* foreign_process = w.new_process("task-queue-foreign.exe");
+    ASSERT_NE(owner_process, nullptr);
+    ASSERT_NE(foreign_process, nullptr);
+    const std::uint64_t owner_pid = owner_process->pid_value();
+    const std::uint64_t foreign_pid = foreign_process->pid_value();
     auto q = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),

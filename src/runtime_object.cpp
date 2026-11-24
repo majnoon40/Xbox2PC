@@ -32,6 +32,7 @@ const char* type_id_to_name(TypeId t) {
         case TypeId::File: return "file";
         case TypeId::MemoryRegion: return "memory_region";
         case TypeId::RuntimeService: return "runtime_service";
+        case TypeId::TaskQueue: return "task_queue";
     }
     return "unregistered-type";
 }
@@ -55,6 +56,7 @@ ObjectTypeRegistry::ObjectTypeRegistry() : impl_(std::make_unique<Impl>()) {
     seed(TypeId::File);
     seed(TypeId::MemoryRegion);
     seed(TypeId::RuntimeService);
+    seed(TypeId::TaskQueue);
 }
 
 ObjectTypeRegistry& ObjectTypeRegistry::instance() {

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries]
+    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls]
   workflow_dispatch:
 
 jobs:
@@ -197,6 +197,7 @@ jobs:
           PY
 
       - name: Upload PE fixtures, hashes, and golden outputs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: m11-phase1-pe-fixtures

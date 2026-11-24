@@ -52,6 +52,7 @@
 #include "xbox2pc/guest_cpu_state.hpp"
 #include "xbox2pc/guest_memory.hpp"
 #include "xbox2pc/guest_exceptions.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/memory_management.hpp"
 #include "xbox2pc/runtime_object.hpp"
@@ -92,12 +93,14 @@ public:
 
     ExecutionContext(std::uint64_t process_id, std::uint64_t thread_id,
                      AddressSpace& space, api::ApiRegistry& api_reg,
-                     ExecutionConfig cfg, std::string name);
+                     ExecutionConfig cfg, std::string name,
+                     std::shared_ptr<GuestProcessEnvironment> process_environment = nullptr);
     // Managed-thread constructor: derives both guest identities and binds
     // the thread's cooperative gate, preventing caller-supplied TID drift.
     ExecutionContext(RtThread& thread, AddressSpace& space,
                      api::ApiRegistry& api_reg, ExecutionConfig cfg,
-                     std::string name);
+                     std::string name,
+                     std::shared_ptr<GuestProcessEnvironment> process_environment = nullptr);
     ~ExecutionContext() override;
 
     // ── lifecycle ──
@@ -142,6 +145,10 @@ public:
     guest::GuestMemory& memory() { return mem_; }
     std::shared_ptr<ExecutionControl> execution_control() const;
     std::uint32_t run_count() const { return runs_; }
+    const GuestThreadEnvironment* guest_environment() const { return guest_environment_.get(); }
+    GuestThreadEnvironment* guest_environment_mut() { return guest_environment_.get(); }
+    // Guest GS base for the future native-entry thunk; the interpreter does not consume it.
+    std::uint64_t guest_gs_base() const { return guest_environment_ ? guest_environment_->teb_base() : 0; }
 
 private:
     std::uint64_t process_id_;
@@ -150,6 +157,8 @@ private:
     api::ApiRegistry& api_reg_;
     ExecutionConfig cfg_;
     guest::GuestMemory mem_;
+    std::shared_ptr<GuestProcessEnvironment> process_environment_;
+    std::unique_ptr<GuestThreadEnvironment> guest_environment_;
     cpu::CpuState cpu_;
     Info info_;
     ContextState state_ = ContextState::Created;
@@ -196,6 +205,13 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
 // per-callback results; a callback failure is reported, NOT silently
 // ignored; recursion is impossible (one pass, plan-level guard), and
 // partial failure still completes the remaining cleanup.
+enum class TlsCallbackReason : std::uint32_t {
+    ProcessDetach = 0,
+    ProcessAttach = 1,
+    ThreadAttach = 2,
+    ThreadDetach = 3,
+};
+
 struct TlsCallbackResult {
     std::uint32_t executed = 0;
     std::uint32_t failed = 0;
@@ -203,7 +219,8 @@ struct TlsCallbackResult {
 };
 Result<TlsCallbackResult> execute_tls_callbacks(
     ExecutionContext& ctx, const TlsCallbackPlan& plan,
-    IExecutionEngine& engine, std::uint64_t image_handle_va);
+    IExecutionEngine& engine, std::uint64_t image_handle_va,
+    TlsCallbackReason reason = TlsCallbackReason::ProcessAttach);
 
 // ── limits registry (runtime-wide, thread-safe) ─────────────────────────
 

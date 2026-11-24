@@ -787,10 +787,15 @@ TEST(LoaderTlsTest, DecodeDirectoryAndCountCallbacksNeverRun) {
     ASSERT_TRUE(tls.value().has_value());
     const auto& t = *tls.value();
     EXPECT_EQ(t.template_size, 5u);
+    EXPECT_EQ(t.template_bytes,
+              (std::vector<std::uint8_t>{0x11, 0x22, 0x33, 0x44, 0x55}));
     EXPECT_EQ(t.zero_fill_size, 64u);
     EXPECT_EQ(t.callback_count, 3u);  // counted, NEVER executed
     EXPECT_TRUE(ld.has_tls);
     EXPECT_EQ(ld.tls_callbacks, 3u);
+    EXPECT_EQ(ld.tls_template_bytes, t.template_bytes);
+    EXPECT_EQ(ld.tls_zero_fill_size, 64u);
+    EXPECT_EQ(ld.tls_index_slot_rva, t.index_slot_rva);
 }
 
 TEST(LoaderTlsTest, AcceptsExactPe32PlusDirectorySize) {
@@ -979,7 +984,7 @@ TEST(LoaderIntegrationTest, FullFifteenStepPath) {
     // The TLS metadata was reported (callbacks counted; NEVER executed).
     EXPECT_TRUE(diag.has_tls);
     EXPECT_EQ(diag.tls_callbacks, 1u);
-    EXPECT_EQ(diag.unsupported.size(), 1u);  // per-thread TLS init deferred
+    EXPECT_TRUE(diag.unsupported.empty());  // template materialization is supported
 
     // Entry-point accessibility under final protections.
     auto acc = proc->address_space().validate_access(out.exec.entry_va,

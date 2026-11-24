@@ -224,6 +224,14 @@ private:
 
 class ObjectManager;  // fwd
 
+class IGuestHandleCloser {
+public:
+    virtual ~IGuestHandleCloser() = default;
+    virtual Result<void> close_guest_handle(std::uint64_t process_id,
+                                            std::uint64_t raw_handle,
+                                            RefGuard&& object_pin) = 0;
+};
+
 class HandleTable {
 public:
     static constexpr std::uint32_t kMaxSlots = 1u << 15;   // 32K (M4 layout)

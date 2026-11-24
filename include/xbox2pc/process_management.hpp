@@ -82,6 +82,21 @@ public:
     AddressSpace& address_space() { return *space_; }
     const AddressSpace& address_space() const { return *space_; }
 
+    // Process-serialized XMem operations. The first successful allocation
+    // creates the process-owned arena; later arena-size/budget arguments are
+    // ignored because the process has one allocator for its lifetime.
+    Result<std::uint64_t> allocate_xmem(
+        std::uint64_t size, std::uint64_t alignment, std::string tag,
+        bool zero_initialize, std::uint64_t arena_size = 4ull << 20,
+        std::uint64_t max_bytes = 0);
+    Result<void> free_xmem(std::uint64_t guest_address, bool scrub = false);
+    Result<XMemAllocation> query_xmem(std::uint64_t guest_address) const;
+    Result<MemoryAllocator::Stats> xmem_stats() const;
+
+    // ProcessManager calls this only after all guest threads have exited and
+    // before releasing the process AddressSpace.
+    void release_process_allocators();
+
     // Modules (M1/M2 descriptors).
     Result<void> add_module_descriptor(const ModuleDescriptor& mod);
     std::vector<ModuleDescriptor> module_descriptors() const;
@@ -107,6 +122,8 @@ private:
     const std::uint64_t pid_;
     const std::string image_name_;
     std::unique_ptr<AddressSpace> space_;
+    // Destroyed before space_: GuestXMemAllocator borrows the AddressSpace.
+    std::unique_ptr<IXMemAllocator> xmem_allocator_;
     mutable std::mutex detail_lock_;
     std::vector<ModuleDescriptor> modules_;
     std::vector<std::uint64_t> threads_;

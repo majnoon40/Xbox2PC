@@ -24,6 +24,7 @@
 // for the documented subset — no claim of general emulation).
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <string>
@@ -37,6 +38,7 @@
 #include "xbox2pc/gdk_services.hpp"
 #include "xbox2pc/guest_cpu_state.hpp"
 #include "xbox2pc/guest_memory.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/package_vfs.hpp"
 #include "xbox2pc/packages.hpp"
@@ -1854,11 +1856,11 @@ TEST(ContextTest, LifecycleTransitionsAndCleanup) {
     EXPECT_GE(regions_before, 1u);   // stack region exists
     // Double initialize refused.
     EXPECT_FALSE(ctx.initialize().ok());
-    // Destroy: releases the stack region.
+    // Destroy releases stack + TEB + TLS vector + the final shared PEB.
     ASSERT_TRUE(ctx.destroy().ok());
     EXPECT_EQ(ctx.context_state(), ContextState::Destroyed);
     EXPECT_EQ(proc->address_space().stats().region_count,
-              regions_before - 1u);
+              regions_before - 4u);
     // Destroyed context refuses everything except idempotent destroy.
     EXPECT_FALSE(ctx.initialize().ok());
     EXPECT_TRUE(ctx.destroy().ok());   // documented idempotent
@@ -1895,6 +1897,215 @@ TEST(ContextTest, ValidationAndLimits) {
     (void)w.pm.terminate_process(ph, 0);
 }
 
+// ── M11 native-host execution slice ───────────────────────────────────────
+
+TEST(NativeExecutionTest, RunsPositionIndependentReturnStubInFaultContainedChild) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if !defined(__linux__) || !defined(__x86_64__)
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#else
+    AddressSpace space(4ull << 20, 0x51000000, "native-return-stub");
+    auto region = space.reserve_region_auto(space.page_size(), "native-code");
+    ASSERT_TRUE(region.ok()) << region.error_string();
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok()) << host.error_string();
+    const std::uint8_t code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+    std::memcpy(host.value(), code, sizeof(code)); // mov eax, 42; ret
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x71, 0x81, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    req.completion_va = kCompletionSentinel;
+    req.entry_spec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    auto result = backend.run(req, cpu, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? result.exception->detail : "no native execution exception");
+    EXPECT_EQ(result.return_value, 42u);
+    EXPECT_EQ(result.cpu.state.reg(cpu::Gpr::Rax), 42u);
+    EXPECT_EQ(result.final_rip, kCompletionSentinel);
+#endif
+}
+
+TEST(NativeExecutionTest, PassesIntegerArgumentsInMicrosoftX64Registers) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x54000000, "native-integer-args");
+    auto region = space.reserve_region_auto(space.page_size(), "native-args-code");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    // mov eax, ecx ; add eax, edx ; ret
+    const std::uint8_t code[] = {0x89, 0xC8, 0x01, 0xD0, 0xC3};
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x74, 0x84, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    req.completion_va = kCompletionSentinel;
+    req.entry_spec.args = {{xbox2pc::rt::abi::ArgKind::Int}, {xbox2pc::rt::abi::ArgKind::Int}};
+    req.entry_spec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
+    req.entry_args = {{xbox2pc::rt::abi::ArgKind::Int, 19}, {xbox2pc::rt::abi::ArgKind::Int, 23}};
+    cpu::CpuState cpu;
+    cpu.reset();
+    cpu.set_reg(cpu::Gpr::Rcx, 19);
+    cpu.set_reg(cpu::Gpr::Rdx, 23);
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? result.exception->detail : "no native execution exception");
+    EXPECT_EQ(result.return_value, 42u);
+    EXPECT_EQ(result.cpu.state.reg(cpu::Gpr::Rax), 42u);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
+TEST(NativeExecutionTest, CapturesInvalidInstructionWithoutCrashingParent) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x52000000, "native-invalid-opcode");
+    auto region = space.reserve_region_auto(space.page_size(), "native-ud2");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    const std::uint8_t code[] = {0x0F, 0x0B}; // UD2
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x72, 0x82, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::InvalidInstruction);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
+TEST(NativeExecutionTest, EnforcesChildExecutionDeadline) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x53000000, "native-timeout");
+    auto region = space.reserve_region_auto(space.page_size(), "native-loop");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    const std::uint8_t code[] = {0xEB, 0xFE}; // jmp $
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+    NativeExecutionBackend backend(std::chrono::milliseconds(50));
+    ASSERT_TRUE(backend.bind_execution_context(0x73, 0x83, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::BudgetExceeded);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
+TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    ExecWorld world;
+    auto [process_handle, process] = world.new_process("native-pe-return.exe");
+    ASSERT_NE(process, nullptr);
+
+    test::PeBuildSpec spec;
+    spec.image_base = process->address_space().base();
+    spec.text_payloads.push_back(
+        {0x1000, {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3}}); // mov eax, 42; ret
+    auto image = test::PeBuilder(spec).build();
+    diag::Diagnostics parse_diagnostics;
+    auto parsed = pe::parse(image.data(), image.size(), "native-pe-return.exe",
+                            parse_diagnostics);
+    loader::ImageLoader loader;
+    api::ApiResolver resolver(world.reg);
+    loader::LoadDiagnostics load_diagnostics;
+    loader::LoadResult loaded;
+    auto image_handle = loader.load_image(
+        world.pm, world.core.objects(), process_handle, parsed, image.data(),
+        image.size(), &resolver, load_diagnostics, loaded);
+    ASSERT_TRUE(image_handle.ok()) << loaded.error;
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(
+        process->pid_value(), 0x84, process->address_space()).ok());
+    ExecutionRequest req;
+    req.entry_va = loaded.exec.entry_va;
+    req.completion_va = kCompletionSentinel;
+    req.entry_spec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? result.exception->detail : "no native execution exception");
+    EXPECT_EQ(result.return_value, 42u);
+    ASSERT_TRUE(loader.unload_image(world.pm, world.core.objects(),
+                                    process_handle, image_handle.value()).ok());
+    ASSERT_TRUE(world.pm.terminate_process(process_handle, 0).ok());
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
 // ── TLS callbacks ─────────────────────────────────────────────────────────
 
 TEST(TlsExecTest, PlanValidationAndExecution) {
@@ -1913,6 +2124,9 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     blob.push_back(0xC3);   // cb1 @ 0x1100
     while (blob.size() < 0x110) blob.push_back(0x90);
     blob.push_back(0xC3);   // cb2 @ 0x1110
+    // The decoder may inspect up to 15 bytes from an instruction start.
+    // Keep the final callback away from the virtual end of the RX section.
+    while (blob.size() < 0x200) blob.push_back(0x90);
     spec.text_payloads.push_back({0x1000, blob});
     spec.tls.template_data = {1, 2, 3, 4};
     spec.tls.callback_vas = {0x140001100, 0x140001110};   // preferred base VAs
@@ -1934,24 +2148,35 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     ASSERT_TRUE(tls.ok() && tls.value().has_value());
     auto cfg = ExecutionConfig::default_validated().value();
     guest::GuestMemory mem(proc->address_space());
+    // This test fixture does not synthesize relocation entries for its TLS
+    // callback array. Apply the equivalent of the loader's DIR64 fixups to
+    // the array VA and entries so the execution test exercises real callbacks
+    // at the relocated image address rather than passing an empty plan.
+    ASSERT_GE(tls.value()->callbacks_va, spec.image_base);
+    const auto callback_array_rva =
+        tls.value()->callbacks_va - spec.image_base;
+    tls.value()->callbacks_va = out.exec.image_base + callback_array_rva;
+    ASSERT_TRUE(mem.write_u64(tls.value()->callbacks_va,
+                              out.exec.image_base + 0x1100).ok());
+    ASSERT_TRUE(mem.write_u64(tls.value()->callbacks_va + sizeof(std::uint64_t),
+                              out.exec.image_base + 0x1110).ok());
     auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
     ASSERT_TRUE(plan.ok()) << plan.error_string();
-    // The image base is relocated (preferred 0x140000000 is outside the
-    // space) — callback VAs in the TLS directory are ABSOLUTE VAs that
-    // relocation fixed up only for DIR64-referenced slots. The builder
-    // plants preferred-base VAs; the loader's DIR64 relocs fix the IAT,
-    // NOT the callback array (documented: the callback array entries are
-    // absolute VAs fixed by relocations in a real toolchain).
-    // The runtime's validation must therefore REJECT the un-relocated
-    // (out-of-space) callback VAs honestly — rejecting_count > 0 or
-    // typed failure. Both are honest outcomes; assert we don't crash and
-    // the note explains.
-    EXPECT_TRUE(plan.value().note.find("validated") != std::string::npos ||
-                plan.value().note.find("rejected") != std::string::npos);
+    ASSERT_EQ(plan.value().callbacks.size(), 2u);
+    EXPECT_EQ(plan.value().rejected_count, 0u);
+    // Decoder fetch is bounded to the x64 architectural maximum of 15 bytes.
+    // Verify each synthetic callback has a readable executable fetch window.
+    for (const auto& callback : plan.value().callbacks) {
+        for (std::uint64_t offset = 0; offset < 15; ++offset) {
+            const auto va = callback.va + offset;
+            EXPECT_TRUE(mem.validate_exec(va).ok()) << "callback fetch VA " << va;
+            const auto byte = mem.read_u8(va);
+            ASSERT_TRUE(byte.ok()) << "callback fetch VA " << va << ": " << byte.error_string();
+        }
+    }
 
-    // Execute whatever validated (0 or 2 callbacks) through the engine:
-    // the deterministic backend runs RET-only callback programs to
-    // completion; the documented callback ABI is prepared on the stack.
+    // Execute both synthetic RET-only callbacks through the deterministic
+    // backend; the documented callback ABI is prepared on the guest stack.
     ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg, "tls-ctx");
     ASSERT_TRUE(ctx.initialize().ok());
     DeterministicBackend engine(w.reg, cfg);
@@ -1961,10 +2186,66 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
                                      out.exec.image_base);
     ASSERT_TRUE(res.ok());
     // Executed + failed == callbacks in the plan (nothing silently lost).
-    EXPECT_EQ(res.value().executed + res.value().failed,
-              plan.value().callbacks.size());
+    ASSERT_EQ(res.value().executed, 2u)
+        << (res.value().first_failure.has_value()
+                ? res.value().first_failure->detail + " rip=" +
+                      std::to_string(res.value().first_failure->rip) + " fault=" +
+                      std::to_string(res.value().first_failure->fault_address)
+                : "no callback failure detail");
+    EXPECT_EQ(res.value().failed, 0u) << (res.value().first_failure.has_value() ? res.value().first_failure->detail + " rip=" + std::to_string(res.value().first_failure->rip) + " fault=" + std::to_string(res.value().first_failure->fault_address) : "no callback exception recorded");
+    auto thread_attach = execute_tls_callbacks(
+        ctx, plan.value(), engine, out.exec.image_base,
+        TlsCallbackReason::ThreadAttach);
+    ASSERT_TRUE(thread_attach.ok()) << thread_attach.error_string();
+    EXPECT_EQ(thread_attach.value().executed, 2u);
+    EXPECT_EQ(thread_attach.value().failed, 0u);
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph, h.value());
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsExecTest, RejectsUnknownCallbackReason) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-invalid-reason.exe");
+    auto cfg = ExecutionConfig::default_validated().value();
+    ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg, "tls-invalid-reason");
+    DeterministicBackend engine(w.reg, cfg);
+    TlsCallbackPlan empty_plan;
+    auto result = execute_tls_callbacks(
+        ctx, empty_plan, engine, 0,
+        static_cast<TlsCallbackReason>(99));
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.errc(), RuntimeErrc::InvalidArgument);
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsExecTest, CallbackArrayAddressOverflowRejected) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-overflow.exe");
+    guest::GuestMemory mem(proc->address_space());
+    loader::TlsInfo tls;
+    tls.present = true;
+    tls.callbacks_va = UINT64_MAX - 7;
+    tls.callback_count = 2;
+    auto cfg = ExecutionConfig::default_validated().value();
+    auto plan = plan_tls_callbacks(mem, tls, cfg);
+    EXPECT_FALSE(plan.ok());
+    EXPECT_EQ(plan.errc(), RuntimeErrc::InvalidArgument);
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsExecTest, UnreadableCallbackArrayRejectsWholePlan) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-unreadable.exe");
+    guest::GuestMemory mem(proc->address_space());
+    loader::TlsInfo tls;
+    tls.present = true;
+    tls.callbacks_va = UINT64_MAX - 0x1000;
+    tls.callback_count = 1;
+    auto cfg = ExecutionConfig::default_validated().value();
+    auto plan = plan_tls_callbacks(mem, tls, cfg);
+    EXPECT_FALSE(plan.ok());
+    EXPECT_EQ(plan.errc(), RuntimeErrc::NotFound);
     (void)w.pm.terminate_process(ph, 0);
 }
 
@@ -2009,6 +2290,7 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     spec.imports = {{"xgameruntime", {{"XGameRuntimeInitialize", 1}}}};
     spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
     spec.tls.template_data = {9, 9};
+    spec.tls.zero_fill = 3;
     auto image = test::PeBuilder(spec).build();
     entries[1].data = std::string(reinterpret_cast<const char*>(image.data()),
                                  image.size());
@@ -2096,6 +2378,30 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     auto req = ctx->prepare_entry(*loaded, tls_index, {}, spec2);
     ASSERT_TRUE(req.ok()) << req.error_string();
     EXPECT_EQ(ctx->info().tls_index, tls_index);
+    ASSERT_NE(ctx->guest_environment(), nullptr);
+    const std::uint64_t tls_vector_slot =
+        ctx->guest_environment()->tls_vector_base() +
+        static_cast<std::uint64_t>(tls_index) * sizeof(std::uint64_t);
+    auto tls_block = ctx->memory().read_u64(tls_vector_slot);
+    ASSERT_TRUE(tls_block.ok()) << tls_block.error_string();
+    ASSERT_NE(tls_block.value(), 0u);
+    std::uint8_t copied_tls[2] = {};
+    ASSERT_TRUE(ctx->memory().read(tls_block.value(), copied_tls,
+                                   sizeof(copied_tls)).ok());
+    EXPECT_EQ(copied_tls[0], 9u);
+    EXPECT_EQ(copied_tls[1], 9u);
+    std::uint8_t tls_tail[3] = {0xFF, 0xFF, 0xFF};
+    ASSERT_TRUE(ctx->memory().read(tls_block.value() + 2, tls_tail,
+                                   sizeof(tls_tail)).ok());
+    EXPECT_EQ(tls_tail[0], 0u);
+    EXPECT_EQ(tls_tail[1], 0u);
+    EXPECT_EQ(tls_tail[2], 0u);
+    if (loaded->diagnostics().tls_index_slot_rva != 0) {
+        auto stored_index = ctx->memory().read_u32(
+            loaded->exec().image_base + loaded->diagnostics().tls_index_slot_rva);
+        ASSERT_TRUE(stored_index.ok());
+        EXPECT_EQ(stored_index.value(), tls_index);
+    }
     DeterministicBackend engine(w.reg, cfg);
     engine.bind_space(proc->address_space());
     engine.bind_process(1, 1);
@@ -2169,4 +2475,245 @@ TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+
+// ── M11.3 guest TEB/PEB and implicit TLS storage ──────────────────────────
+
+TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
+    AddressSpace space(16ull << 20, 0x30000000, "guest-env-test");
+    guest::GuestMemory mem(space);
+    {
+        exec::GuestProcessEnvironment process(space);
+        ASSERT_TRUE(process.initialize(0x1234).ok());
+        exec::GuestThreadEnvironment env(space, process);
+        ASSERT_TRUE(env.initialize(0x5678).ok());
+        EXPECT_NE(env.teb_base(), 0u);
+        EXPECT_NE(env.peb_base(), 0u);
+        EXPECT_NE(env.tls_vector_base(), 0u);
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebSelfOffset).value(),
+                  env.teb_base());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebTlsVectorOffset).value(),
+                  env.tls_vector_base());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebPebOffset).value(),
+                  env.peb_base());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebProcessIdOffset).value(),
+                  0x1234u);
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebThreadIdOffset).value(),
+                  0x5678u);
+        ASSERT_TRUE(process.set_image_base(0x180000000ull).ok());
+        EXPECT_EQ(mem.read_u64(env.peb_base() + exec::GuestProcessEnvironment::kPebImageBaseOffset).value(),
+                  0x180000000ull);
+    }
+    EXPECT_EQ(space.stats().region_count, 0u);
+}
+
+TEST(GuestThreadEnvironmentTest, InstallsPerThreadTlsTemplateAndZeroFill) {
+    AddressSpace space(16ull << 20, 0x31000000, "guest-tls-test");
+    guest::GuestMemory mem(space);
+    exec::GuestProcessEnvironment process(space);
+    ASSERT_TRUE(process.initialize(1).ok());
+    exec::GuestThreadEnvironment env(space, process);
+    ASSERT_TRUE(env.initialize(2).ok());
+    const std::uint8_t image_template[] = {0x11, 0x22, 0x33, 0x44};
+    auto block = env.install_tls_module(3, image_template, sizeof(image_template), 12);
+    ASSERT_TRUE(block.ok()) << block.error_string();
+    EXPECT_EQ(mem.read_u64(env.tls_vector_base() + 3 * 8).value(), block.value());
+    std::uint8_t contents[16] = {};
+    ASSERT_TRUE(env.read_tls(3, 0, contents, sizeof(contents)).ok());
+    EXPECT_EQ(contents[0], 0x11);
+    EXPECT_EQ(contents[1], 0x22);
+    EXPECT_EQ(contents[2], 0x33);
+    EXPECT_EQ(contents[3], 0x44);
+    for (std::size_t i = 4; i < sizeof(contents); ++i) EXPECT_EQ(contents[i], 0);
+    EXPECT_EQ(env.install_tls_module(3, image_template, sizeof(image_template), 0).errc(),
+              RuntimeErrc::AlreadyExists);
+    EXPECT_EQ(env.install_tls_module(64, image_template, sizeof(image_template), 0).errc(),
+              RuntimeErrc::InvalidArgument);
+    EXPECT_EQ(env.read_tls(3, 15, contents, 2).errc(), RuntimeErrc::InvalidArgument);
+    EXPECT_EQ(env.read_tls(4, 0, contents, 1).errc(), RuntimeErrc::NotFound);
+}
+
+TEST(ExecutionContextM11Test, ThreadsShareProcessPebButOwnDistinctTebs) {
+    AddressSpace space(32ull << 20, 0x32000000, "execution-context-m11");
+    api::ApiRegistry registry;
+    ExecutionConfig config;
+    auto process_environment = std::make_shared<GuestProcessEnvironment>(space);
+    {
+        ExecutionContext first(0x91, 0xA2, space, registry, config, "first",
+                               process_environment);
+        ExecutionContext second(0x91, 0xA3, space, registry, config, "second",
+                                process_environment);
+        ASSERT_TRUE(first.initialize().ok());
+        ASSERT_TRUE(second.initialize().ok());
+        ASSERT_NE(first.guest_environment(), nullptr);
+        ASSERT_NE(second.guest_environment(), nullptr);
+        EXPECT_EQ(first.guest_environment()->peb_base(),
+                  second.guest_environment()->peb_base());
+        EXPECT_NE(first.guest_environment()->teb_base(),
+                  second.guest_environment()->teb_base());
+        EXPECT_EQ(first.guest_gs_base(), first.guest_environment()->teb_base());
+        EXPECT_EQ(second.guest_gs_base(), second.guest_environment()->teb_base());
+        EXPECT_TRUE(first.destroy().ok());
+        EXPECT_TRUE(second.destroy().ok());
+        EXPECT_EQ(space.stats().region_count, 1u); // external shared PEB owner remains
+    }
+    process_environment.reset();
+    EXPECT_EQ(space.stats().region_count, 0u);
+}
+
+
+TEST(GuestProcessEnvironmentTest, AllocatesStableUniqueTlsIndexesPerImage) {
+    AddressSpace space(16ull << 20, 0x33000000, "process-tls-index-test");
+    exec::GuestProcessEnvironment process(space);
+    ASSERT_TRUE(process.initialize(0x44).ok());
+    auto first = process.tls_index_for_image(0x140000000ull, 7);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    EXPECT_EQ(first.value(), 7u);
+    auto again = process.tls_index_for_image(0x140000000ull, 12);
+    ASSERT_TRUE(again.ok());
+    EXPECT_EQ(again.value(), first.value());
+    auto collision = process.tls_index_for_image(0x150000000ull, 7);
+    ASSERT_TRUE(collision.ok());
+    EXPECT_EQ(collision.value(), 0u);
+    auto invalid_preference = process.tls_index_for_image(0x160000000ull, 99);
+    ASSERT_TRUE(invalid_preference.ok());
+    EXPECT_EQ(invalid_preference.value(), 1u);
+
+    AddressSpace other_space(16ull << 20, 0x34000000, "other-process-tls-index");
+    exec::GuestProcessEnvironment other(other_space);
+    ASSERT_TRUE(other.initialize(0x45).ok());
+    auto independent = other.tls_index_for_image(0x140000000ull, 7);
+    ASSERT_TRUE(independent.ok());
+    EXPECT_EQ(independent.value(), 7u);
+}
+
+TEST(GuestProcessEnvironmentTest, RejectsUninitializedAndExhaustedTlsRegistry) {
+    AddressSpace space(16ull << 20, 0x35000000, "process-tls-exhaustion-test");
+    exec::GuestProcessEnvironment process(space);
+    EXPECT_EQ(process.tls_index_for_image(0x140000000ull, 0).errc(),
+              RuntimeErrc::InvalidState);
+    ASSERT_TRUE(process.initialize(0x46).ok());
+    for (std::uint32_t i = 0; i < exec::GuestThreadEnvironment::kTlsSlotCount; ++i) {
+        auto result = process.tls_index_for_image(
+            0x140000000ull + static_cast<std::uint64_t>(i) * 0x100000ull, i);
+        ASSERT_TRUE(result.ok()) << result.error_string();
+        EXPECT_EQ(result.value(), i);
+    }
+    EXPECT_EQ(process.tls_index_for_image(0x1F0000000ull, 0).errc(),
+              RuntimeErrc::OutOfResources);
+    auto existing = process.tls_index_for_image(0x140000000ull, 63);
+    ASSERT_TRUE(existing.ok());
+    EXPECT_EQ(existing.value(), 0u);
+}
+
+TEST(GuestProcessEnvironmentTest, ConcurrentRequestsForSameImageReturnOneIndex) {
+    AddressSpace space(16ull << 20, 0x36000000, "process-tls-concurrent-test");
+    exec::GuestProcessEnvironment process(space);
+    ASSERT_TRUE(process.initialize(0x47).ok());
+    std::array<std::uint32_t, 8> indexes{};
+    std::array<bool, 8> succeeded{};
+    std::vector<std::thread> workers;
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        workers.emplace_back([&, i] {
+            auto result = process.tls_index_for_image(
+                0x170000000ull, static_cast<std::uint32_t>(i));
+            if (result.ok()) { indexes[i] = result.value(); succeeded[i] = true; }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    for (std::size_t i = 0; i < indexes.size(); ++i) {
+        ASSERT_TRUE(succeeded[i]);
+        EXPECT_EQ(indexes[i], indexes[0]);
+    }
+}
+
+
+TEST(BridgeTest, SetAndGetLastErrorUseTheBoundGuestTeb) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("last-error-api.exe");
+    (void)process_handle;
+    auto process_environment = std::make_shared<GuestProcessEnvironment>(process->address_space());
+    ExecutionContext context(0x501, 0x601, process->address_space(), w.reg,
+        ExecutionConfig::default_validated().value(), "last-error-api", process_environment);
+    ASSERT_TRUE(context.initialize().ok());
+
+    api::TimingService timing(w.reg);
+    ASSERT_TRUE(timing.on_initialize().ok());
+
+    guest::GuestMemory mem(process->address_space());
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack stack(0x2003F000ull, 0x1000);
+
+    const auto* set_desc = w.reg.find("kernel32", "SetLastError");
+    const auto* get_desc = w.reg.find("kernel32", "GetLastError");
+    ASSERT_NE(set_desc, nullptr);
+    ASSERT_NE(get_desc, nullptr);
+    auto set_plan = plan_for_descriptor(*set_desc);
+    auto get_plan = plan_for_descriptor(*get_desc);
+    ASSERT_TRUE(set_plan.ok()) << set_plan.error_string();
+    ASSERT_TRUE(get_plan.ok()) << get_plan.error_string();
+
+    std::vector<xbox2pc::rt::abi::ArgValue> set_args(1);
+    set_args[0].kind = xbox2pc::rt::abi::ArgKind::Int;
+    set_args[0].int_v = 0x1234ABCDu;
+    auto prepared = xbox2pc::rt::abi::prepare_call(cpu_state, 0x51000001,
+        set_plan.value().call, set_args, HostStack::writer(&stack));
+    ASSERT_TRUE(prepared.ok()) << prepared.error_string();
+    auto set_result = marshal_and_dispatch(cpu_state, mem, w.reg,
+        set_plan.value(), 0x501, 0, 64, 0x601, {}, context.guest_environment_mut());
+    ASSERT_TRUE(set_result.ok()) << set_result.error_string();
+    EXPECT_TRUE(set_result.value().api_result.ok);
+    EXPECT_EQ(context.guest_environment()->last_error().value(), 0x1234ABCDu);
+
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack get_stack(0x2003F000ull, 0x1000);
+    auto get_prepared = xbox2pc::rt::abi::prepare_call(cpu_state, 0x51000002,
+        get_plan.value().call, {}, HostStack::writer(&get_stack));
+    ASSERT_TRUE(get_prepared.ok()) << get_prepared.error_string();
+    auto get_result = marshal_and_dispatch(cpu_state, mem, w.reg,
+        get_plan.value(), 0x501, 0, 64, 0x601, {}, context.guest_environment_mut());
+    ASSERT_TRUE(get_result.ok()) << get_result.error_string();
+    EXPECT_TRUE(get_result.value().api_result.ok);
+    EXPECT_EQ(get_result.value().api_result.return_value, 0x1234ABCDu);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 0x1234ABCDu);
+
+    ASSERT_TRUE(timing.on_shutdown().ok());
+    ASSERT_TRUE(context.destroy().ok());
+}
+
+TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
+    AddressSpace space(16ull << 20, 0x37000000, "guest-last-error-test");
+    api::ApiRegistry registry;
+    auto process = std::make_shared<exec::GuestProcessEnvironment>(space);
+    exec::ExecutionContext first(0x81, 0x91, space, registry,
+        ExecutionConfig::default_validated().value(), "last-error-first", process);
+    exec::ExecutionContext second(0x81, 0x92, space, registry,
+        ExecutionConfig::default_validated().value(), "last-error-second", process);
+    ASSERT_TRUE(first.initialize().ok());
+    ASSERT_TRUE(second.initialize().ok());
+    ASSERT_NE(first.guest_environment(), nullptr);
+    ASSERT_NE(second.guest_environment(), nullptr);
+
+    EXPECT_EQ(first.guest_environment()->last_error().value(), 0u);
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 0u);
+    ASSERT_TRUE(first.guest_environment_mut()->set_last_error(0x12345678u).ok());
+    EXPECT_EQ(first.guest_environment()->last_error().value(), 0x12345678u);
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 0u);
+    ASSERT_TRUE(second.guest_environment_mut()->set_last_error(5u).ok());
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
+    EXPECT_EQ(first.guest_environment()->last_error().value(), 0x12345678u);
+
+    const auto raw = first.memory().read_u32(
+        first.guest_gs_base() + exec::GuestThreadEnvironment::kTebLastErrorValueOffset);
+    ASSERT_TRUE(raw.ok());
+    EXPECT_EQ(raw.value(), 0x12345678u);
+    // The second thread's value remains independent of the first thread.
+    ASSERT_TRUE(first.destroy().ok());
+    EXPECT_EQ(first.guest_environment(), nullptr);
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
+    ASSERT_TRUE(second.destroy().ok());
 }

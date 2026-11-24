@@ -21,6 +21,67 @@ ManagedProcess::ManagedProcess(std::uint64_t pid, std::string image_name,
 
 ManagedProcess::~ManagedProcess() = default;
 
+Result<std::uint64_t> ManagedProcess::allocate_xmem(
+    std::uint64_t size, std::uint64_t alignment, std::string tag,
+    bool zero_initialize, std::uint64_t arena_size, std::uint64_t max_bytes) {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
+                                     "cannot allocate XMem for a terminating process");
+    if (xmem_allocator_ == nullptr) {
+        auto created = GuestXMemAllocator::create(
+            *space_, arena_size, "proc-" + std::to_string(pid_) + "-xmem",
+            max_bytes);
+        if (!created.ok())
+            return Result<std::uint64_t>(created.errc(), created.context());
+        xmem_allocator_ = std::move(created.value());
+    }
+    return xmem_allocator_->allocate(size, alignment, std::move(tag), zero_initialize);
+}
+
+Result<void> ManagedProcess::free_xmem(std::uint64_t guest_address, bool scrub) {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<void>(RuntimeErrc::ProcessTerminated,
+                            "cannot free XMem for a terminating process");
+    if (xmem_allocator_ == nullptr)
+        return Result<void>(RuntimeErrc::NotInitialized, "process XMem allocator is not initialized");
+    return xmem_allocator_->free(guest_address, scrub);
+}
+
+Result<XMemAllocation> ManagedProcess::query_xmem(std::uint64_t guest_address) const {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<XMemAllocation>(RuntimeErrc::ProcessTerminated,
+                                      "cannot query XMem for a terminating process");
+    if (xmem_allocator_ == nullptr)
+        return Result<XMemAllocation>(RuntimeErrc::NotInitialized, "process XMem allocator is not initialized");
+    return xmem_allocator_->query(guest_address);
+}
+
+Result<MemoryAllocator::Stats> ManagedProcess::xmem_stats() const {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<MemoryAllocator::Stats>(RuntimeErrc::ProcessTerminated,
+                                              "process XMem allocator is terminating");
+    if (xmem_allocator_ == nullptr)
+        return Result<MemoryAllocator::Stats>(RuntimeErrc::NotInitialized, "process XMem allocator is not initialized");
+    return Result<MemoryAllocator::Stats>(xmem_allocator_->stats());
+}
+
+void ManagedProcess::release_process_allocators() {
+    std::lock_guard lock(detail_lock_);
+    xmem_allocator_.reset();
+}
+
 Result<void> ManagedProcess::add_module_descriptor(const ModuleDescriptor& mod) {
     std::lock_guard lock(detail_lock_);
     const ProcessState cur = state();
@@ -145,6 +206,9 @@ ProcessManager::~ProcessManager() {
             }
         }
         (void)proc->handle_table().close_all();
+        // Guest threads have all exited: destroy process-owned allocators
+        // while their AddressSpace is intact, then release all regions.
+        proc->release_process_allocators();
         (void)proc->address_space().release_all();
         for (const auto tid : tids) (void)proc->detach_thread(tid);
         (void)proc->terminate(0);

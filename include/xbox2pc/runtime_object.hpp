@@ -53,6 +53,7 @@ enum class TypeId : std::uint16_t {
     File = 6,
     MemoryRegion = 7,
     RuntimeService = 8,
+    TaskQueue = 9,
     // built-in range ends at 999
 };
 
