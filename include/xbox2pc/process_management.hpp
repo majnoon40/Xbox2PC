@@ -87,6 +87,10 @@ public:
     Result<IXMemAllocator*> ensure_xmem_allocator(
         std::uint64_t arena_size, std::uint64_t max_bytes = 0);
 
+    // ProcessManager calls this only after all guest threads have exited and
+    // before releasing the process AddressSpace.
+    void release_process_allocators();
+
     // Modules (M1/M2 descriptors).
     Result<void> add_module_descriptor(const ModuleDescriptor& mod);
     std::vector<ModuleDescriptor> module_descriptors() const;

@@ -11,4 +11,6 @@
 - Allocation metadata and byte limits are tracked; statistics expose used, capacity, allocation count, and peak usage.
 - Destroying the allocator releases its entire arena reservation.
 
+`ManagedProcess::ensure_xmem_allocator` lazily attaches one allocator to each process. The first successful call fixes its arena size and byte budget; later calls return that same allocator. After all guest threads have exited, process termination destroys the allocator before releasing the address space.
+
 This is an allocator seam for later XMem adapters, not a claim about undocumented Xbox XMem flags, heap policies, quotas, or ABI behavior. It is not yet connected to `XMemAlloc`/`XMemFree` imports.

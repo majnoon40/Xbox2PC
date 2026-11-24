@@ -42,6 +42,11 @@ Result<IXMemAllocator*> ManagedProcess::ensure_xmem_allocator(
     return Result<IXMemAllocator*>(xmem_allocator_.get());
 }
 
+void ManagedProcess::release_process_allocators() {
+    std::lock_guard lock(detail_lock_);
+    xmem_allocator_.reset();
+}
+
 Result<void> ManagedProcess::add_module_descriptor(const ModuleDescriptor& mod) {
     std::lock_guard lock(detail_lock_);
     const ProcessState cur = state();
@@ -166,6 +171,9 @@ ProcessManager::~ProcessManager() {
             }
         }
         (void)proc->handle_table().close_all();
+        // Guest threads have all exited: destroy process-owned allocators
+        // while their AddressSpace is intact, then release all regions.
+        proc->release_process_allocators();
         (void)proc->address_space().release_all();
         for (const auto tid : tids) (void)proc->detach_thread(tid);
         (void)proc->terminate(0);
