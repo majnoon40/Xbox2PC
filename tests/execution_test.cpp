@@ -1926,8 +1926,6 @@ TEST(NativeExecutionTest, RunsPositionIndependentReturnStubInFaultContainedChild
     ExecutionRequest req;
     req.entry_va = region.value();
     req.completion_va = kCompletionSentinel;
-    xbox2pc::rt::abi::CallSpec::ReturnKind unused_return_kind;
-    (void)unused_return_kind;
     req.entry_spec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
     cpu::CpuState cpu;
     cpu.reset();
