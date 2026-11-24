@@ -1955,6 +1955,16 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     ASSERT_TRUE(plan.ok()) << plan.error_string();
     ASSERT_EQ(plan.value().callbacks.size(), 2u);
     EXPECT_EQ(plan.value().rejected_count, 0u);
+    // Decoder fetch is bounded to the x64 architectural maximum of 15 bytes.
+    // Verify each synthetic callback has a readable executable fetch window.
+    for (const auto& callback : plan.value().callbacks) {
+        for (std::uint64_t offset = 0; offset < 15; ++offset) {
+            const auto va = callback.va + offset;
+            EXPECT_TRUE(mem.validate_exec(va).ok()) << "callback fetch VA " << va;
+            const auto byte = mem.read_u8(va);
+            ASSERT_TRUE(byte.ok()) << "callback fetch VA " << va << ": " << byte.error_string();
+        }
+    }
 
     // Execute both synthetic RET-only callbacks through the deterministic
     // backend; the documented callback ABI is prepared on the guest stack.
@@ -1970,7 +1980,7 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     ASSERT_EQ(res.value().executed, 2u)
         << (res.value().first_failure.has_value()
                 ? res.value().first_failure->detail : "no callback failure detail");
-    EXPECT_EQ(res.value().failed, 0u) << (res.value().first_failure.has_value() ? res.value().first_failure->detail : "no callback exception recorded");
+    EXPECT_EQ(res.value().failed, 0u) << (res.value().first_failure.has_value() ? res.value().first_failure->detail + " rip=" + std::to_string(res.value().first_failure->rip) + " fault=" + std::to_string(res.value().first_failure->fault_address) : "no callback exception recorded");
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph, h.value());
     (void)w.pm.terminate_process(ph, 0);
