@@ -51,6 +51,8 @@ class GuestThreadEnvironment {
 public:
     static constexpr std::uint64_t kPageBytes = 4096;
     static constexpr std::uint32_t kTlsSlotCount = 64;
+    static constexpr std::uint64_t kTebStackBaseOffset = 0x08;
+    static constexpr std::uint64_t kTebStackLimitOffset = 0x10;
     static constexpr std::uint64_t kTebSelfOffset = 0x30;
     static constexpr std::uint64_t kTebProcessIdOffset = 0x40;
     static constexpr std::uint64_t kTebThreadIdOffset = 0x48;
@@ -64,6 +66,10 @@ public:
     GuestThreadEnvironment& operator=(const GuestThreadEnvironment&) = delete;
 
     Result<void> initialize(std::uint64_t thread_id);
+    // Populate NT_TIB stack bounds after the owning execution context has
+    // reserved its M4 stack region. StackBase is the exclusive high address.
+    Result<void> set_stack_bounds(std::uint64_t stack_base,
+                                  std::uint64_t stack_limit);
     Result<std::uint64_t> install_tls_module(std::uint32_t index,
                                              const std::uint8_t* template_bytes,
                                              std::size_t template_size,
