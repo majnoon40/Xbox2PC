@@ -2089,6 +2089,7 @@ TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
     ExecutionRequest req;
     req.entry_va = loaded.exec.entry_va;
     req.completion_va = kCompletionSentinel;
+    req.entry_spec.ret = abi::CallSpec::ReturnKind::Int;
     cpu::CpuState cpu;
     cpu.reset();
     std::atomic<bool> interrupted{false};
