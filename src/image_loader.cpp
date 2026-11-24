@@ -1301,11 +1301,10 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
     }
     info.callbacks_va = cb_va;
     info.zero_fill_size = zero_fill;
-    if (zero_fill > kMaxTlsTemplate ||
-        info.template_size > kMaxTlsTemplate - zero_fill) {
-        return Ret(RuntimeErrc::OutOfResources,
-                   "TLS template plus zero-fill exceeds the 1 MiB limit");
-    }
+    // Keep SizeOfZeroFill as validated metadata here. The per-thread
+    // allocator enforces its allocation cap and returns OutOfResources;
+    // rejecting it during directory decoding would prevent callers from
+    // reporting the correct resource failure.
     if (info.template_size != 0) {
         bool template_ok = false;
         const std::uint64_t template_off = checked_rva_to_offset(
