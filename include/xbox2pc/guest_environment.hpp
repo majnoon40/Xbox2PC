@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <vector>
 
 #include "xbox2pc/guest_memory.hpp"
@@ -23,6 +24,11 @@ public:
 
     Result<void> initialize(std::uint64_t process_id);
     Result<void> set_image_base(std::uint64_t image_base);
+    // Allocate one stable TLS module index per image in this process. The
+    // preferred value is honored only when it is free; otherwise the lowest
+    // free slot is selected. Indices are not recycled before process exit.
+    Result<std::uint32_t> tls_index_for_image(std::uint64_t image_base,
+                                               std::uint32_t preferred_index);
     std::uint64_t peb_base() const { return peb_va_; }
     std::uint64_t process_id() const { return process_id_; }
     std::uint64_t space_id() const { return space_.space_id(); }
@@ -34,6 +40,9 @@ private:
     std::uint64_t peb_va_ = 0;
     std::uint64_t process_id_ = 0;
     bool initialized_ = false;
+    std::mutex tls_index_lock_;
+    std::map<std::uint64_t, std::uint32_t> image_tls_indices_;
+    bool tls_index_used_[64]{};
 };
 
 // Per-thread TEB and TLS vector. The PEB is borrowed from the shared

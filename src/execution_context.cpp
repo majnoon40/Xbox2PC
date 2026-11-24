@@ -198,11 +198,22 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         auto v = validate_entry_point(exec, space_);
         if (!v.ok()) return Ret(v.errc(), v.context());
     }
-    // Materialize the PE TLS block for this thread. The module index remains
-    // caller-supplied until the process-wide module registry is implemented.
+    // Materialize the PE TLS block for this thread. Resolve the module index
+    // through the process-shared registry so every thread uses the same slot.
     const auto& image_diag = image.diagnostics();
+    std::uint32_t module_tls_index = tls_index;
     if (image_diag.has_tls) {
-        if (tls_index >= GuestThreadEnvironment::kTlsSlotCount ||
+        if (!process_environment_ || !process_environment_->initialized()) {
+            return Ret(RuntimeErrc::InvalidState,
+                       "process TLS registry is not initialized");
+        }
+        auto assigned_index = process_environment_->tls_index_for_image(
+            exec.image_base, tls_index);
+        if (!assigned_index.ok()) {
+            return Ret(assigned_index.errc(), assigned_index.context());
+        }
+        module_tls_index = assigned_index.value();
+        if (module_tls_index >= GuestThreadEnvironment::kTlsSlotCount ||
             image_diag.tls_template_bytes.size() != image_diag.tls_template_size ||
             image_diag.tls_template_size > loader::kMaxTlsTemplate ||
             image_diag.tls_zero_fill_size > loader::kMaxTlsTemplate ||
@@ -216,12 +227,12 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
                        "guest TEB/TLS environment is not initialized");
         }
         const std::uint64_t slot_va = guest_environment_->tls_vector_base() +
-            static_cast<std::uint64_t>(tls_index) * sizeof(std::uint64_t);
+            static_cast<std::uint64_t>(module_tls_index) * sizeof(std::uint64_t);
         auto current = mem_.read_u64(slot_va);
         if (!current.ok()) return Ret(current.errc(), current.context());
         if (current.value() == 0) {
             auto installed = guest_environment_->install_tls_module(
-                tls_index, image_diag.tls_template_bytes.data(),
+                module_tls_index, image_diag.tls_template_bytes.data(),
                 image_diag.tls_template_bytes.size(),
                 image_diag.tls_zero_fill_size);
             if (!installed.ok()) return Ret(installed.errc(), installed.context());
@@ -254,7 +265,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
                 auto changed = space_.protect_region(owner->mapped_base, MemProtect::ReadWrite);
                 if (!changed.ok()) return Ret(changed.errc(), changed.context());
             }
-            auto written = mem_.write_u32(index_va, tls_index);
+            auto written = mem_.write_u32(index_va, module_tls_index);
             if (!was_writable) {
                 auto restored = space_.protect_region(owner->mapped_base, owner->protection);
                 if (!restored.ok()) return Ret(restored.errc(), restored.context());
@@ -325,7 +336,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         req.api_binding_values.push_back(binding.value);
         req.api_bindings.push_back(std::move(binding));
     }
-    info_.tls_index = tls_index;
+    info_.tls_index = module_tls_index;
     return Ret(req);
 }
 

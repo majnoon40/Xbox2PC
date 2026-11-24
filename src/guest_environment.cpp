@@ -64,6 +64,35 @@ Result<void> GuestProcessEnvironment::set_image_base(std::uint64_t image_base) {
     return memory_.write_u64(peb_va_ + kPebImageBaseOffset, image_base);
 }
 
+Result<std::uint32_t> GuestProcessEnvironment::tls_index_for_image(
+    std::uint64_t image_base, std::uint32_t preferred_index) {
+    using Ret = Result<std::uint32_t>;
+    if (!initialized_) return Ret(RuntimeErrc::InvalidState, "PEB not initialized");
+    if (image_base == 0) return Ret(RuntimeErrc::InvalidArgument, "TLS image base must be nonzero");
+    std::lock_guard<std::mutex> guard(tls_index_lock_);
+    const auto existing = image_tls_indices_.find(image_base);
+    if (existing != image_tls_indices_.end()) return Ret(existing->second);
+
+    std::uint32_t selected = GuestThreadEnvironment::kTlsSlotCount;
+    if (preferred_index < GuestThreadEnvironment::kTlsSlotCount &&
+        !tls_index_used_[preferred_index]) {
+        selected = preferred_index;
+    } else {
+        for (std::uint32_t i = 0; i < GuestThreadEnvironment::kTlsSlotCount; ++i) {
+            if (!tls_index_used_[i]) {
+                selected = i;
+                break;
+            }
+        }
+    }
+    if (selected >= GuestThreadEnvironment::kTlsSlotCount) {
+        return Ret(RuntimeErrc::OutOfResources, "process TLS module index table is full");
+    }
+    tls_index_used_[selected] = true;
+    image_tls_indices_.emplace(image_base, selected);
+    return Ret(selected);
+}
+
 GuestThreadEnvironment::GuestThreadEnvironment(AddressSpace& space,
                                                  GuestProcessEnvironment& process)
     : space_(space), process_(process), memory_(space) {}
