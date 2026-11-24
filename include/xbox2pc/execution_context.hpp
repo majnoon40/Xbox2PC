@@ -193,7 +193,9 @@ struct TlsCallback {
 // mapped regions, preserves order, and reports problems typed.
 struct TlsCallbackPlan {
     std::vector<TlsCallback> callbacks;
-    std::uint32_t rejected_count = 0;   // invalid entries dropped
+    // Retained for source compatibility; malformed entries reject the whole plan,
+    // so a successful plan always has rejected_count == 0.
+    std::uint32_t rejected_count = 0;
     std::string note;                    // validation summary
 };
 Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
