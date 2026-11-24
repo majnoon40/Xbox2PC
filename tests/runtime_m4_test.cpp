@@ -118,7 +118,7 @@ TEST(MemoryTest, GuestXMemAllocatorReturnsGuestAddressesAndTracksAllocations) {
 TEST(MemoryTest, GuestXMemAllocatorEnforcesBoundsAndRejectsBadRequests) {
     AddressSpace space(64 * 4096, 0x60000000, "xmem-limits");
     auto allocator = rt::GuestXMemAllocator::create(
-        space, 8 * 4096, "small-xmem", 2 * 4096);
+        space, 8 * 4096, "small-xmem", 2 * 1024);
     ASSERT_TRUE(allocator.ok());
     auto& heap = *allocator.value();
 

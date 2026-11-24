@@ -82,7 +82,19 @@ Result<std::uint64_t> GuestXMemAllocator::allocate(
     const auto offset = static_cast<std::uint64_t>(host - base);
     const auto guest_address = arena_base_ + offset;
     if (zero_initialize) std::memset(pointer.value(), 0, static_cast<std::size_t>(size));
-    guest_to_allocation_.emplace(guest_address, id.value());
+    try {
+        const auto [it, inserted] = guest_to_allocation_.emplace(guest_address, id.value());
+        (void)it;
+        if (!inserted) {
+            (void)allocator_->free(id.value());
+            return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                         "guest allocation base is already tracked");
+        }
+    } catch (const std::bad_alloc&) {
+        (void)allocator_->free(id.value());
+        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
+                                     "unable to track guest allocation metadata");
+    }
     return Result<std::uint64_t>(guest_address);
 }
 
