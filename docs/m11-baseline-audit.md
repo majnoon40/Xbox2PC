@@ -405,3 +405,16 @@ found no runtime implementations at this baseline.
 ### TLS callback validation hardening (2026-11-24)
 
 The M11 follow-up now rejects the complete TLS callback plan if any non-null callback VA is not executable mapped guest memory. The previous behavior counted and skipped invalid entries, which could silently run a partial callback sequence and leave module initialization inconsistent. A regression test covers a readable callback array containing a non-executable target. This does not complete automatic process/thread attach-detach lifecycle wiring; callback execution is still an explicit helper and must be integrated by the process/thread lifecycle owner.
+
+
+### TEB-backed last-error APIs (2026-11-24)
+
+The M11 branch now registers `kernel32!SetLastError` and
+`kernel32!GetLastError` implementations. They use the per-call
+`ApiContext` accessors wired by the execution engine to the calling
+`GuestThreadEnvironment`; calls without an initialized guest TEB are
+rejected instead of silently using process-global or host-thread state.
+The descriptors are marked fully implemented for this modeled per-thread
+contract, and dispatch tests verify independent values for two guest threads
+plus rejection when no TEB-backed accessors are supplied. This does not imply
+that native GS-relative guest execution is implemented.
