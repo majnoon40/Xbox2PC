@@ -21,6 +21,8 @@ AddressSpace identity. A mismatched environment is rejected.
 
 | Structure | Offset | Meaning |
 |---|---:|---|
+| TEB | 0x08 | StackBase (exclusive high address) |
+| TEB | 0x10 | StackLimit (low address) |
 | TEB | 0x30 | Self pointer (NT_TIB.Self) |
 | TEB | 0x40 | ClientId.UniqueProcess |
 | TEB | 0x48 | ClientId.UniqueThread |
@@ -36,6 +38,7 @@ vector slot. Index 0 is valid for this module-vector model.
 
 ## Explicit limitations
 
+- The owning M4 stack region populates NT_TIB StackBase and StackLimit for each guest thread.
 - This is not a full TEB or PEB; unmodeled fields remain zero.
 - The runtime records the guest TEB VA as the guest GS base for later native
   entry thunks. It does not change the host thread's GS base.
