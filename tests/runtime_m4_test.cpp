@@ -995,6 +995,8 @@ TEST(ProcessMgmtTest, ExitObserversRunUnlockedAndRemovalDrainsActiveCalls) {
     ASSERT_TRUE(pm.initialize_process(process.value(), module,
                                       rt::RuntimeConfig{}).ok());
     ASSERT_TRUE(pm.start_process(process.value()).ok());
+    auto expected_pid = pm.resolve_pid(process.value());
+    ASSERT_TRUE(expected_pid.ok());
 
     std::mutex callback_mutex;
     std::condition_variable callback_changed;
@@ -1046,10 +1048,7 @@ TEST(ProcessMgmtTest, ExitObserversRunUnlockedAndRemovalDrainsActiveCalls) {
 
     EXPECT_TRUE(remove_finished.load(std::memory_order_acquire));
     EXPECT_NE(observed_pid.load(std::memory_order_acquire), 0u);
-    EXPECT_EQ(observed_pid.load(std::memory_order_acquire),
-              pm.resolve_pid(process.value()).ok()
-                  ? pm.resolve_pid(process.value()).value()
-                  : 0u);
+    EXPECT_EQ(observed_pid.load(std::memory_order_acquire), expected_pid.value());
     ASSERT_TRUE(core.shutdown().ok());
 }
 
