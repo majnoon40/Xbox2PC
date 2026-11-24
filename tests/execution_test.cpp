@@ -1855,11 +1855,11 @@ TEST(ContextTest, LifecycleTransitionsAndCleanup) {
     EXPECT_GE(regions_before, 1u);   // stack region exists
     // Double initialize refused.
     EXPECT_FALSE(ctx.initialize().ok());
-    // Destroy: releases the stack region.
+    // Destroy releases stack + TEB + TLS vector + the final shared PEB.
     ASSERT_TRUE(ctx.destroy().ok());
     EXPECT_EQ(ctx.context_state(), ContextState::Destroyed);
     EXPECT_EQ(proc->address_space().stats().region_count,
-              regions_before - 1u);
+              regions_before - 4u);
     // Destroyed context refuses everything except idempotent destroy.
     EXPECT_FALSE(ctx.initialize().ok());
     EXPECT_TRUE(ctx.destroy().ok());   // documented idempotent
@@ -2248,7 +2248,7 @@ TEST(ExecutionContextM11Test, ThreadsShareProcessPebButOwnDistinctTebs) {
         EXPECT_EQ(second.guest_gs_base(), second.guest_environment()->teb_base());
         EXPECT_TRUE(first.destroy().ok());
         EXPECT_TRUE(second.destroy().ok());
-        EXPECT_EQ(space.stats().region_count, 1u); // shared process PEB remains
+        EXPECT_EQ(space.stats().region_count, 1u); // external shared PEB owner remains
     }
     process_environment.reset();
     EXPECT_EQ(space.stats().region_count, 0u);

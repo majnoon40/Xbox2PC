@@ -346,8 +346,11 @@ Result<void> ExecutionContext::destroy() {
         return Result<void>(RuntimeErrc::InvalidState,
                             "cannot destroy while executing");
     }
-    // TEB, PEB, TLS vector and TLS blocks are released before the stack.
+    // Per-thread TEB/TLS are released first. Dropping this context's shared
+    // process-environment reference releases the PEB only after the last
+    // context for that process is destroyed.
     guest_environment_.reset();
+    process_environment_.reset();
     if (stack_region_va_ != 0) {
         auto r = space_.release_region(stack_region_va_);
         if (!r.ok()) {
