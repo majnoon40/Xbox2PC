@@ -29,11 +29,10 @@
 //      invents Xbox APIs or binds host functions; a controlled test
 //      resolver (StaticResolver) serves synthetic modules for tests/CLI.
 //      Resolved/Unresolved/Unsupported/Invalid import states stay distinct.
-//   6. TLS: the PE TLS directory is validated and its template/index/
-//      callbacks are REPORTED (LoadDiagnostics); callbacks are never called
-//      by the loader (M6 exclusion). Per-thread TLS initialization is
-//      deferred: the M4 thread model has per-thread slots but no image-
-//      template copy path yet — reported as UnsupportedCapability.
+//   6. TLS: the PE TLS directory and initialized template are validated;
+//      template bytes, zero-fill, and AddressOfIndex RVA are retained in
+//      LoadDiagnostics. ExecutionContext materializes a per-thread block.
+//      TLS callbacks are counted but never called by the loader.
 //   7. Lifecycle: LoadState machine (Created/Validating/Allocating/
 //      Mapping/Relocating/ResolvingImports/Preparing/Prepared/Failed/
 //      Unloaded); every failure rolls back ALL reserved regions (exact

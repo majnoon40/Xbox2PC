@@ -2010,6 +2010,7 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
     spec.imports = {{"xgameruntime", {{"XGameRuntimeInitialize", 1}}}};
     spec.reloc_blocks = {{0x2000, {{10, 0x2008, 0x140000000ull}}}};
     spec.tls.template_data = {9, 9};
+    spec.tls.zero_fill = 3;
     auto image = test::PeBuilder(spec).build();
     entries[1].data = std::string(reinterpret_cast<const char*>(image.data()),
                                  image.size());
@@ -2109,6 +2110,18 @@ TEST(ExecE2eTest, VfsPackageLoadResolveExecuteCleanup) {
                                    sizeof(copied_tls)).ok());
     EXPECT_EQ(copied_tls[0], 9u);
     EXPECT_EQ(copied_tls[1], 9u);
+    std::uint8_t tls_tail[3] = {0xFF, 0xFF, 0xFF};
+    ASSERT_TRUE(ctx->memory().read(tls_block.value() + 2, tls_tail,
+                                   sizeof(tls_tail)).ok());
+    EXPECT_EQ(tls_tail[0], 0u);
+    EXPECT_EQ(tls_tail[1], 0u);
+    EXPECT_EQ(tls_tail[2], 0u);
+    if (loaded->diagnostics().tls_index_slot_rva != 0) {
+        auto stored_index = ctx->memory().read_u32(
+            loaded->exec().image_base + loaded->diagnostics().tls_index_slot_rva);
+        ASSERT_TRUE(stored_index.ok());
+        EXPECT_EQ(stored_index.value(), tls_index);
+    }
     DeterministicBackend engine(w.reg, cfg);
     engine.bind_space(proc->address_space());
     engine.bind_process(1, 1);
