@@ -2179,8 +2179,10 @@ TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
     AddressSpace space(16ull << 20, 0x30000000, "guest-env-test");
     guest::GuestMemory mem(space);
     {
-        exec::GuestThreadEnvironment env(space);
-        ASSERT_TRUE(env.initialize(0x1234, 0x5678).ok());
+        exec::GuestProcessEnvironment process(space);
+        ASSERT_TRUE(process.initialize(0x1234).ok());
+        exec::GuestThreadEnvironment env(space, process);
+        ASSERT_TRUE(env.initialize(0x5678).ok());
         EXPECT_NE(env.teb_base(), 0u);
         EXPECT_NE(env.peb_base(), 0u);
         EXPECT_NE(env.tls_vector_base(), 0u);
@@ -2194,8 +2196,8 @@ TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
                   0x1234u);
         EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebThreadIdOffset).value(),
                   0x5678u);
-        ASSERT_TRUE(env.set_image_base(0x180000000ull).ok());
-        EXPECT_EQ(mem.read_u64(env.peb_base() + exec::GuestThreadEnvironment::kPebImageBaseOffset).value(),
+        ASSERT_TRUE(process.set_image_base(0x180000000ull).ok());
+        EXPECT_EQ(mem.read_u64(env.peb_base() + exec::GuestProcessEnvironment::kPebImageBaseOffset).value(),
                   0x180000000ull);
     }
     EXPECT_EQ(space.stats().region_count, 0u);
@@ -2204,8 +2206,10 @@ TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
 TEST(GuestThreadEnvironmentTest, InstallsPerThreadTlsTemplateAndZeroFill) {
     AddressSpace space(16ull << 20, 0x31000000, "guest-tls-test");
     guest::GuestMemory mem(space);
-    exec::GuestThreadEnvironment env(space);
-    ASSERT_TRUE(env.initialize(1, 2).ok());
+    exec::GuestProcessEnvironment process(space);
+    ASSERT_TRUE(process.initialize(1).ok());
+    exec::GuestThreadEnvironment env(space, process);
+    ASSERT_TRUE(env.initialize(2).ok());
     const std::uint8_t image_template[] = {0x11, 0x22, 0x33, 0x44};
     auto block = env.install_tls_module(3, image_template, sizeof(image_template), 12);
     ASSERT_TRUE(block.ok()) << block.error_string();
@@ -2224,7 +2228,6 @@ TEST(GuestThreadEnvironmentTest, InstallsPerThreadTlsTemplateAndZeroFill) {
     EXPECT_EQ(env.read_tls(3, 15, contents, 2).errc(), RuntimeErrc::InvalidArgument);
     EXPECT_EQ(env.read_tls(4, 0, contents, 1).errc(), RuntimeErrc::NotFound);
 }
-
 
 TEST(ExecutionContextM11Test, ThreadsShareProcessPebButOwnDistinctTebs) {
     AddressSpace space(32ull << 20, 0x32000000, "execution-context-m11");
