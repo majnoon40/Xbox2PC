@@ -2199,16 +2199,10 @@ Result<void> TimingService::on_initialize() {
     const auto r4 = api_reg_.register_implementation(
         "kernel32", "GetCurrentThreadId",
         keep(std::make_shared<CurrentThreadIdImpl>()), owner);
-    const auto r5 = api_reg_.register_implementation(
-        "kernel32", "SetLastError", keep(std::make_shared<SetLastErrorImpl>()), owner);
-    const auto r6 = api_reg_.register_implementation(
-        "kernel32", "GetLastError", keep(std::make_shared<GetLastErrorImpl>()), owner);
     if (!r1.ok()) return r1;
     if (!r2.ok()) return r2;
     if (!r3.ok()) return r3;
     if (!r4.ok()) return r4;
-    if (!r5.ok()) return r5;
-    if (!r6.ok()) return r6;
     return Result<void>::ok_result();
 }
 
