@@ -789,8 +789,15 @@ class SetEventImpl : public IApiImplementation {
 public:
     explicit SetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.set_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
-        if(!r.ok())out.note=r.error_string(); return true;
+        if (ctx.arg_count != 1) {
+            out.return_value = 0;
+            out.note = "SetEvent requires exactly one handle";
+            return true;
+        }
+        auto r = svc_.set_event(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: SetEvent"; }
 private: GameRuntimeService& svc_;
@@ -799,8 +806,15 @@ class ResetEventImpl : public IApiImplementation {
 public:
     explicit ResetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.reset_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
-        if(!r.ok())out.note=r.error_string(); return true;
+        if (ctx.arg_count != 1) {
+            out.return_value = 0;
+            out.note = "ResetEvent requires exactly one handle";
+            return true;
+        }
+        auto r = svc_.reset_event(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: ResetEvent"; }
 private: GameRuntimeService& svc_;
@@ -809,14 +823,16 @@ class WaitForSingleObjectImpl : public IApiImplementation {
 public:
     explicit WaitForSingleObjectImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.args[1] > UINT32_MAX) {
+        if (ctx.arg_count != 2 || ctx.args[1] > UINT32_MAX) {
             out.return_value = 0xFFFFFFFFu;
             out.note = "WaitForSingleObject timeout exceeds DWORD";
             return true;
         }
-        auto r=svc_.wait_object(ctx.process_id,ctx.thread_id,ctx.args[0],static_cast<std::uint32_t>(ctx.args[1]));
-        out.return_value=r.ok()?r.value():0xFFFFFFFFu;
-        if(!r.ok())out.note=r.error_string(); return true;
+        auto r = svc_.wait_object(ctx.process_id, ctx.thread_id, ctx.args[0],
+                                  static_cast<std::uint32_t>(ctx.args[1]));
+        out.return_value = r.ok() ? r.value() : 0xFFFFFFFFu;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: WaitForSingleObject (event, mutex, semaphore handles)"; }
 private: GameRuntimeService& svc_;
