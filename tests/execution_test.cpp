@@ -2025,7 +2025,7 @@ TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
     test::PeBuildSpec spec;
     spec.image_base = process->address_space().base();
     spec.text_payloads.push_back(
-        {0x1000, {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3}}; // mov eax, 42; ret
+        {0x1000, {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3}}); // mov eax, 42; ret
     auto image = test::PeBuilder(spec).build();
     diag::Diagnostics parse_diagnostics;
     auto parsed = pe::parse(image.data(), image.size(), "native-pe-return.exe",
