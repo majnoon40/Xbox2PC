@@ -232,16 +232,29 @@ ExecutionResult DeterministicBackend::run(
                 res.outcome = Outcome::Faulted;
                 break;
             }
-            const auto return_valid = mem.validate_exec(return_address.value());
-            if (!return_valid.ok()) {
-                const auto kind = return_valid.err == guest::GuestMemErrc::PermissionDenied
-                    ? GuestFault::PermissionExec : GuestFault::InvalidAccess;
-                fault(kind, io_cpu, AccessType::Execute, return_address.value(),
-                      pid_, tid_, Recoverability::Fatal,
-                      "API call return address is not executable",
-                      res.exception);
-                res.outcome = Outcome::Faulted;
-                break;
+            // Engine-managed return targets: another API binding (an
+            // import thunk returning into another import thunk) or the
+            // completion sentinel (an import returning directly to the
+            // entry return address) are intercepted by this loop before
+            // the next fetch, so they are not required to be backed by
+            // executable guest memory -- the same exemption the RET-to-
+            // sentinel completion pre-check below already relies on.
+            const bool return_is_engine_managed =
+                is_api_binding(return_address.value()) ||
+                (req.completion_va != 0 &&
+                 return_address.value() == req.completion_va);
+            if (!return_is_engine_managed) {
+                const auto return_valid = mem.validate_exec(return_address.value());
+                if (!return_valid.ok()) {
+                    const auto kind = return_valid.err == guest::GuestMemErrc::PermissionDenied
+                        ? GuestFault::PermissionExec : GuestFault::InvalidAccess;
+                    fault(kind, io_cpu, AccessType::Execute, return_address.value(),
+                          pid_, tid_, Recoverability::Fatal,
+                          "API call return address is not executable",
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
             }
 
             const auto depth = impl_->dispatch_depth;
@@ -323,6 +336,17 @@ ExecutionResult DeterministicBackend::run(
 
             io_cpu.rip = return_address.value();
             ++res.api_calls;
+            if (req.completion_va != 0 && io_cpu.rip == req.completion_va) {
+                // Returning from an imported API directly to the entry
+                // return address: the same entry-return contract as a
+                // guest RET to the sentinel. Checked before the next
+                // fetch because the synthesized sentinel has no guest
+                // memory backing (see the post-step check below).
+                res.outcome = Outcome::Returned;
+                res.return_value =
+                    rg(io_cpu, static_cast<std::uint8_t>(Gpr::Rax));
+                break;
+            }
             continue;
         }
 
