@@ -198,6 +198,24 @@ useful and should not be confused with that requested guest ABI.
 requires a guest-visible unified namespace and type-directed close semantics.
 It should not create a second independent owner of object lifetime.
 
+## M11 implementation update (2026-11-24)
+
+The baseline observations below describe the audited pre-M11 implementation.
+The consolidated M11 branch now changes one Phase 7 item:
+
+- Process-exit observers are snapshotted and pinned under
+  `ProcessManager::lock_`, then invoked after releasing that lock.
+- Removing an observer prevents future snapshots and waits for any already
+  active callback to finish.
+- A regression test verifies an observer can call `process_count()` without
+  deadlocking and that unregistration drains an active callback.
+- An observer must not synchronously unregister itself; that would wait for
+  its own active invocation.
+
+This does **not** complete Phase 7. The task-queue infinite-wait termination
+problem described below remains a separate unresolved lifecycle issue, and
+the global lock-order policy still needs a broader audit and tests.
+
 ## 5. Lock order across ProcessManager, services, and observers
 
 **Answer: locks are locally scoped and several nested orders can be observed,
