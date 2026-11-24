@@ -2118,6 +2118,65 @@ TEST(GdkServiceTest, ServiceInitializationOrderingAndRollback) {
     EXPECT_FALSE(r.ok);   // revoked at shutdown
 }
 
+TEST(GdkServiceTest, LastErrorIsStoredPerGuestThread) {
+    ApiWorld w;
+    std::uint32_t first_thread_error = 0;
+    std::uint32_t second_thread_error = 0;
+    ApiContext first;
+    first.process_id = 1;
+    first.thread_id = 10;
+    first.set_last_error = [&](std::uint32_t value) {
+        first_thread_error = value;
+        return xbox2pc::rt::Result<void>::ok_result();
+    };
+    first.get_last_error = [&]() {
+        return xbox2pc::rt::Result<std::uint32_t>(first_thread_error);
+    };
+    ApiContext second;
+    second.process_id = 1;
+    second.thread_id = 11;
+    second.set_last_error = [&](std::uint32_t value) {
+        second_thread_error = value;
+        return xbox2pc::rt::Result<void>::ok_result();
+    };
+    second.get_last_error = [&]() {
+        return xbox2pc::rt::Result<std::uint32_t>(second_thread_error);
+    };
+
+    first.arg_count = 1;
+    first.args[0] = 0x12345678u;
+    const auto set_first = w.reg.dispatch("kernel32", "SetLastError", first);
+    ASSERT_TRUE(set_first.ok) << set_first.error;
+    EXPECT_EQ(first_thread_error, 0x12345678u);
+
+    first.arg_count = 0;
+    const auto get_first = w.reg.dispatch("kernel32", "GetLastError", first);
+    ASSERT_TRUE(get_first.ok) << get_first.error;
+    EXPECT_EQ(get_first.return_value, 0x12345678u);
+
+    second.arg_count = 1;
+    second.args[0] = 0x87654321u;
+    const auto set_second = w.reg.dispatch("kernel32", "SetLastError", second);
+    ASSERT_TRUE(set_second.ok) << set_second.error;
+    second.arg_count = 0;
+    const auto get_second = w.reg.dispatch("kernel32", "GetLastError", second);
+    ASSERT_TRUE(get_second.ok) << get_second.error;
+    EXPECT_EQ(get_second.return_value, 0x87654321u);
+
+    const auto still_first = w.reg.dispatch("kernel32", "GetLastError", first);
+    ASSERT_TRUE(still_first.ok) << still_first.error;
+    EXPECT_EQ(still_first.return_value, 0x12345678u);
+
+    ApiContext missing_environment;
+    missing_environment.arg_count = 0;
+    EXPECT_FALSE(w.reg.dispatch("kernel32", "GetLastError",
+                                missing_environment).ok);
+    missing_environment.arg_count = 1;
+    missing_environment.args[0] = 7;
+    EXPECT_FALSE(w.reg.dispatch("kernel32", "SetLastError",
+                                missing_environment).ok);
+}
+
 TEST(GdkServiceTest, CurrentProcessAndThreadIdentityQueries) {
     ApiWorld w;
     ApiContext ctx;
