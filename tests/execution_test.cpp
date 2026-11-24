@@ -1238,6 +1238,66 @@ TEST(EngineTest, DispatchesWin32EventApiBinding) {
     EXPECT_TRUE(w.grt->close_sync_handle(pid, result.return_value).ok());
 }
 
+TEST(EngineTest, DispatchesLastErrorThroughTheCallingGuestTeb) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("last-error-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+    constexpr std::uint64_t tid = 0x95;
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    ExecutionContext context(pid, tid, process->address_space(), w.reg,
+                             config.value(), "last-error-context");
+    ASSERT_TRUE(context.initialize().ok());
+    ASSERT_NE(context.guest_environment_mut(), nullptr);
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &stack_va);
+    const std::uint64_t rsp = stack_va + 0x100;
+    constexpr std::uint64_t set_binding = 0x51010021ull;
+    constexpr std::uint64_t get_binding = 0x51010022ull;
+    constexpr std::uint32_t expected = 0xA17E5EEDu;
+    ASSERT_TRUE(mem.write_u64(rsp, get_binding).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + sizeof(std::uint64_t),
+                              kCompletionSentinel).ok());
+
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space(),
+        context.guest_environment_mut()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = set_binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values = {set_binding, get_binding};
+    request.api_bindings = {
+        ApiBindingInfo{set_binding, "kernel32", "SetLastError", false, 0},
+        ApiBindingInfo{get_binding, "kernel32", "GetLastError", false, 0},
+    };
+
+    cpu::CpuState state;
+    state.reset();
+    state.set_reg(cpu::Gpr::Sp, rsp);
+    state.set_reg(cpu::Gpr::Rcx, expected);
+    state.rip = set_binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, state, interrupted);
+
+    ASSERT_EQ(result.outcome, Outcome::Returned);
+    EXPECT_EQ(result.api_calls, 2u);
+    EXPECT_EQ(result.return_value, expected);
+    EXPECT_EQ(state.reg(cpu::Gpr::Rax), expected);
+    const auto stored = context.guest_environment_mut()->last_error();
+    ASSERT_TRUE(stored.ok()) << stored.error_string();
+    EXPECT_EQ(stored.value(), expected);
+    EXPECT_TRUE(context.destroy().ok());
+}
+
 TEST(EngineTest, DispatchesTaskQueueDuplicateHandleAndWritesGuestOutput) {
     ExecWorld w;
     auto [process_handle, process] = w.new_process("task-queue-duplicate-binding.exe");
