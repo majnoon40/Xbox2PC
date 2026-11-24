@@ -1936,8 +1936,6 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     ASSERT_TRUE(tls.ok() && tls.value().has_value());
     auto cfg = ExecutionConfig::default_validated().value();
     guest::GuestMemory mem(proc->address_space());
-    auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
-    ASSERT_TRUE(plan.ok()) << plan.error_string();
     // This test fixture does not synthesize relocation entries for its TLS
     // callback array. Apply the equivalent of the loader's DIR64 fixups to
     // the array VA and entries so the execution test exercises real callbacks
