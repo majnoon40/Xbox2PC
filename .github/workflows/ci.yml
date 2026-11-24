@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/m11-teb-stack-bounds]
   pull_request:
     branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls]
   workflow_dispatch:
