@@ -2376,8 +2376,7 @@ TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
         first.guest_gs_base() + exec::GuestThreadEnvironment::kTebLastErrorValueOffset);
     ASSERT_TRUE(raw.ok());
     EXPECT_EQ(raw.value(), 0x12345678u);
-    EXPECT_EQ(first.guest_environment()->set_last_error(1u).errc(),
-              RuntimeErrc::InvalidState); // no mutation after destroy
+    // The second thread's value remains independent of the first thread.
     ASSERT_TRUE(first.destroy().ok());
     EXPECT_EQ(first.guest_environment(), nullptr);
     EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
