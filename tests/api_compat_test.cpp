@@ -1518,12 +1518,13 @@ TEST(GdkServiceTest, TaskQueueInfiniteDispatchObservesGuestCancellation) {
            std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
         std::this_thread::yield();
     }
-    ASSERT_TRUE(entered.load(std::memory_order_acquire));
+    const bool entered_in_time = entered.load(std::memory_order_acquire);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     EXPECT_FALSE(finished.load(std::memory_order_acquire));
     cancel.store(true, std::memory_order_release);
     waiter.join();
 
+    EXPECT_TRUE(entered_in_time);
     EXPECT_TRUE(finished.load(std::memory_order_acquire));
     EXPECT_FALSE(dispatch_result.ok());
     EXPECT_EQ(dispatch_result.errc(), xbox2pc::RuntimeErrc::ThreadTerminated);
