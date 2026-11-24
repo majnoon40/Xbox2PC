@@ -337,6 +337,121 @@ void parse_exports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
 // loader sorts by begin (pairs of begin+end for function fragments) so the
 // RIP lookup is a binary search. Malformed entries are warned and skipped;
 // the table stays sorted by (begin, end).
+// ── .xdata UNWIND_INFO decoding (M11 Phase 6 slice 2) ─────────────────────
+// Header layout: byte 0 = version | flags<<3; byte 1 = size_of_prolog;
+// byte 2 = count_of_codes | frame_register<<4; byte 3 = frame_offset<<4.
+// The unwind code array follows as count_of_codes 16-bit slots; some
+// opcodes consume extra slots for operands. The header's count is never
+// trusted beyond per-fetch bounds checks against the file size.
+std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
+                                             const RuntimeFunction& fn,
+                                             const std::uint8_t* base,
+                                             std::uint64_t size,
+                                             diag::Diagnostics& diags) {
+    if (base == nullptr || fn.unwind_info_rva == 0) {
+        diags.warning("decode_unwind_info: null buffer or unwind RVA");
+        return std::nullopt;
+    }
+    const auto off = rva_to_offset(img, fn.unwind_info_rva);
+    if (!off.has_value()) {
+        diags.warning("unwind info RVA " + std::to_string(fn.unwind_info_rva) +
+                      " does not map to any section", fn.unwind_info_rva);
+        return std::nullopt;
+    }
+    if (!in_range(*off, 4, size)) {
+        diags.warning("unwind info header truncated", *off);
+        return std::nullopt;
+    }
+    TableReader rd{base, size};
+    UnwindInfo info;
+    const std::uint8_t b0 = rd.u8(*off);
+    info.version = static_cast<std::uint8_t>(b0 & 0x7);
+    info.flags = static_cast<std::uint8_t>(b0 >> 3);
+    info.size_of_prolog = rd.u8(*off + 1);
+    const std::uint8_t b2 = rd.u8(*off + 2);
+    const unsigned slot_count = b2 & 0xF;
+    info.frame_register = static_cast<std::uint8_t>(b2 >> 4);
+    info.frame_offset = static_cast<std::uint8_t>(rd.u8(*off + 3) >> 4);
+    if (info.version != 1) {
+        diags.warning("unsupported UNWIND_INFO version " +
+                      std::to_string(info.version), *off);
+        return std::nullopt;
+    }
+    std::uint64_t cursor = *off + 4;
+    for (unsigned i = 0; i < slot_count; ++i) {
+        if (!in_range(cursor, 2, size)) {
+            diags.warning("unwind code array truncated at slot " +
+                          std::to_string(i), cursor);
+            return std::nullopt;
+        }
+        const std::uint8_t lo = rd.u8(cursor);
+        const std::uint8_t hi = rd.u8(cursor + 1);
+        UnwindCode code;
+        code.slot_offset = lo;
+        code.opcode = static_cast<std::uint8_t>(hi & 0xF);
+        code.opinfo = static_cast<std::uint8_t>(hi >> 4);
+        unsigned extra_slots = 0;
+        switch (code.opcode) {
+        case 0:  // UWOP_PUSH_NONVOL — reg in opinfo
+        case 3:  // UWOP_SET_FPREG
+        case 10: // UWOP_PUSH_MACHFRAME
+            extra_slots = 0;
+            code.operand = code.opinfo;
+            break;
+        case 2:  // UWOP_ALLOC_SMALL — size = opinfo*8+8
+            extra_slots = 0;
+            code.operand = static_cast<std::uint32_t>(code.opinfo) * 8 + 8;
+            break;
+        case 1:  // UWOP_ALLOC_LARGE — size in next slot *8 (opinfo==0 form)
+            extra_slots = 1;
+            break;
+        case 4:  // UWOP_SAVE_NONVOL — offset in next slot*8
+        case 6:  // UWOP_EPILOG
+        case 7:  // UWOP_SPARE_CODE
+        case 8:  // UWOP_SAVE_XMM128 — offset in next slot*16
+            extra_slots = 1;
+            break;
+        case 5:  // UWOP_SAVE_NONVOL_FAR — 32-bit offset
+        case 9:  // UWOP_SAVE_XMM128_FAR — 32-bit offset
+            extra_slots = 2;
+            break;
+        default:
+            diags.warning("unknown unwind opcode " + std::to_string(code.opcode) +
+                          " at slot " + std::to_string(i), cursor);
+            return std::nullopt;
+        }
+        if (extra_slots != 0) {
+            if (!in_range(cursor + 2, static_cast<std::uint64_t>(extra_slots) * 2, size)) {
+                diags.warning("unwind code operand truncated at slot " +
+                              std::to_string(i), cursor + 2);
+                return std::nullopt;
+            }
+            if (code.opcode == 1) {  // ALLOC_LARGE
+                if (code.opinfo != 0) {
+                    diags.warning("ALLOC_LARGE reserved opinfo form", cursor);
+                    return std::nullopt;
+                }
+                code.operand = static_cast<std::uint32_t>(rd.u16(cursor + 2)) * 8;
+            } else if (extra_slots == 1) {
+                code.operand = rd.u16(cursor + 2);
+            } else {
+                code.operand = rd.u16(cursor + 2) |
+                               (static_cast<std::uint32_t>(rd.u16(cursor + 4)) << 16);
+            }
+        }
+        info.codes.push_back(code);
+        cursor += 2 + static_cast<std::uint64_t>(extra_slots) * 2;
+    }
+    if (info.is_chained()) {
+        if (!in_range(cursor, 4, size)) {
+            diags.warning("chained unwind RVA truncated", cursor);
+            return std::nullopt;
+        }
+        info.chained_unwind_rva = rd.u32(cursor);
+    }
+    return info;
+}
+
 void parse_exception_table(PeImage& img, const std::uint8_t* base, std::uint64_t size,
                            diag::Diagnostics& diags) {
     if (img.directories.size() <= kDirException) return;

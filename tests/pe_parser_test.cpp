@@ -634,3 +634,195 @@ TEST(PdataRuntimeFunctionLookup, AbsentDirectoryYieldsEmptyTable) {
     EXPECT_TRUE(img.exceptions.functions.empty());
     EXPECT_EQ(img.exceptions.find_function(0x1000u), nullptr);
 }
+
+// ── M11 Phase 6 slice 2: .xdata UNWIND_INFO decoding ─────────────────────
+
+namespace {
+
+// Pack a 16-bit unwind-code slot: offset byte, then opcode|opinfo<<4.
+std::vector<std::uint8_t> code_slot(std::uint8_t off, unsigned opcode,
+                                    unsigned opinfo) {
+    return {off, static_cast<std::uint8_t>(opcode | (opinfo << 4))};
+}
+
+std::vector<std::uint8_t> u16_bytes(std::uint16_t v) {
+    return {static_cast<std::uint8_t>(v),
+            static_cast<std::uint8_t>(v >> 8)};
+}
+
+}  // namespace
+
+TEST(XdataUnwindInfoDecode, DecodesPrologCodesAndFrameRegister) {
+    // A representative prolog: push rbp; mov rbp,rsp; push rsi;
+    // sub rsp,0x28; save rbx to [rbp-0x10].
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind;
+    unwind.push_back(0x01 | (0x08 << 3));  // version 1, flags: UNW_FLAG_EHANDLER? no — 0x8 reserved; use chain flag test below. Use 0 flags here.
+    unwind.clear();
+    unwind.push_back(static_cast<std::uint8_t>(0x01));       // version 1, flags 0
+    unwind.push_back(0x0E);                                   // size_of_prolog
+    unwind.push_back(static_cast<std::uint8_t>(5 | (5 << 4))); // 5 slots, frame reg = rbp(5)
+    unwind.push_back(0x10);                                   // frame offset 1 (unscaled 0x1)
+    auto append = [&](const std::vector<std::uint8_t>& v) {
+        unwind.insert(unwind.end(), v.begin(), v.end());
+    };
+    append(code_slot(0x01, 0, 5));    // UWOP_PUSH_NONVOL rbp
+    append(code_slot(0x03, 3, 0));    // UWOP_SET_FPREG
+    append(code_slot(0x04, 0, 6));    // UWOP_PUSH_NONVOL rsi
+    append(code_slot(0x06, 2, 3));    // UWOP_ALLOC_SMALL -> 3*8+8 = 32
+    append(code_slot(0x09, 4, 3));    // UWOP_SAVE_NONVOL rbx
+    append(u16_bytes(0x0002));        //   offset slot: 2*8 = 16
+    // Place the UNWIND_INFO at a .text RVA far from the entry marker.
+    const std::uint32_t unwind_rva = 0x1800;
+    s.text_payloads.emplace_back(unwind_rva, unwind);
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, unwind_rva),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+    auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                image.size(), diags);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->version, 1u);
+    EXPECT_EQ(info->flags, 0u);
+    EXPECT_EQ(info->size_of_prolog, 0x0Eu);
+    EXPECT_EQ(info->frame_register, 5u);
+    EXPECT_EQ(info->frame_offset, 1u);
+    ASSERT_EQ(info->codes.size(), 5u);
+    // Stored order preserved.
+    EXPECT_EQ(info->codes[0].opcode, 0u);
+    EXPECT_EQ(info->codes[0].opinfo, 5u);
+    EXPECT_EQ(info->codes[1].opcode, 3u);
+    EXPECT_EQ(info->codes[2].opcode, 0u);
+    EXPECT_EQ(info->codes[2].opinfo, 6u);
+    EXPECT_EQ(info->codes[3].opcode, 2u);
+    EXPECT_EQ(info->codes[3].operand, 32u);  // ALLOC_SMALL 3*8+8
+    EXPECT_EQ(info->codes[4].opcode, 4u);
+    EXPECT_EQ(info->codes[4].operand, 2u);   // SAVE_NONVOL offset slot
+}
+
+TEST(XdataUnwindInfoDecode, DecodesLargeAllocFarSaveAndChaining) {
+    // ALLOC_LARGE 0x123*8, SAVE_XMM128_FAR with a 32-bit offset, and a
+    // chained-unwind link.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind;
+    auto append = [&](const std::vector<std::uint8_t>& v) {
+        unwind.insert(unwind.end(), v.begin(), v.end());
+    };
+    unwind.push_back(static_cast<std::uint8_t>(0x01 | (0x4 << 3)));  // v1, CHAININFO
+    unwind.push_back(0x20);
+    unwind.push_back(static_cast<std::uint8_t>(3));  // 3 slots, no frame reg
+    unwind.push_back(0x00);
+    append(code_slot(0x02, 1, 0));    // ALLOC_LARGE
+    append(u16_bytes(0x0123));        //   0x123*8 = 0x918
+    append(code_slot(0x05, 9, 7));    // SAVE_XMM128_FAR xmm7
+    append(u16_bytes(0x0040));        //   low 16 of offset
+    append(u16_bytes(0x0001));        //   high 16 -> 0x10040
+    append(code_slot(0x0A, 0, 5));    // PUSH_NONVOL rbp (3rd slot)
+    append(u16_bytes(0x1000));        // chained unwind RVA (low half)
+    append(u16_bytes(0x0000));        // chained unwind RVA (high half)
+    const std::uint32_t unwind_rva = 0x1900;
+    s.text_payloads.emplace_back(unwind_rva, unwind);
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, unwind_rva),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+    auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                image.size(), diags);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_TRUE(info->is_chained());
+    EXPECT_EQ(info->chained_unwind_rva, 0x1000u);
+    ASSERT_EQ(info->codes.size(), 3u);
+    EXPECT_EQ(info->codes[0].opcode, 1u);
+    EXPECT_EQ(info->codes[0].operand, 0x918u);      // 0x123 * 8
+    EXPECT_EQ(info->codes[1].opcode, 9u);
+    EXPECT_EQ(info->codes[1].operand, 0x10040u);    // far 32-bit offset
+    EXPECT_EQ(info->codes[2].opcode, 0u);
+}
+
+TEST(XdataUnwindInfoDecode, MalformedInputsRejected) {
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+
+    // Version 2 header -> rejected.
+    {
+        std::vector<std::uint8_t> bad{0x02, 0x10, 0x00, 0x00};
+        const std::uint32_t rva = 0x1A00;
+        PeBuildSpec s2 = s;
+        s2.text_payloads.emplace_back(rva, bad);
+        s2.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, rva)});
+        const auto image = PeBuilder(s2).build();
+        const PeImage img = parse_ok(image, diags);
+        const auto* fn = img.exceptions.find_function(0x1080u);
+        ASSERT_NE(fn, nullptr);
+        auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                    image.size(), diags);
+        EXPECT_FALSE(info.has_value());
+    }
+    // Unknown opcode 11 -> rejected.
+    {
+        std::vector<std::uint8_t> bad{0x01, 0x10, 0x01, 0x00};
+        bad.push_back(0x01);
+        bad.push_back(static_cast<std::uint8_t>(11));  // opcode 11: invalid
+        const std::uint32_t rva = 0x1B00;
+        PeBuildSpec s2 = s;
+        s2.text_payloads.emplace_back(rva, bad);
+        s2.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, rva)});
+        const auto image = PeBuilder(s2).build();
+        const PeImage img = parse_ok(image, diags);
+        const auto* fn = img.exceptions.find_function(0x1080u);
+        ASSERT_NE(fn, nullptr);
+        auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                    image.size(), diags);
+        EXPECT_FALSE(info.has_value());
+    }
+    // Truncated operand: ALLOC_LARGE whose size slot lies past the buffer
+    // end. UNWIND_INFO has no length of its own — the file continues past
+    // it in a built image — so truncation is exercised by cutting the size
+    // argument mid-blob (the API's per-fetch bounds checks guard exactly
+    // this for hostile buffers).
+    {
+        std::vector<std::uint8_t> bad{0x01, 0x10, 0x01, 0x00};
+        bad.push_back(0x01);
+        bad.push_back(0x01);  // ALLOC_LARGE: opcode nibble 1, opinfo 0
+        const std::uint32_t rva = 0x1C00;
+        PeBuildSpec s2 = s;
+        s2.text_payloads.emplace_back(rva, bad);
+        s2.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, rva)});
+        const auto image = PeBuilder(s2).build();
+        const PeImage img = parse_ok(image, diags);
+        const auto* fn = img.exceptions.find_function(0x1080u);
+        ASSERT_NE(fn, nullptr);
+        const auto off = xbox2pc::pe::rva_to_offset(img, rva);
+        ASSERT_TRUE(off.has_value());
+        // Full buffer: decodes (the operand is whatever follows in .text).
+        EXPECT_TRUE(xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                    image.size(), diags).has_value());
+        // Cut inside the operand slot: the fetch must fail the bounds check.
+        auto cut = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                   off.value() + 5, diags);
+        EXPECT_FALSE(cut.has_value());
+    }
+    // Null unwind RVA -> rejected before any buffer access.
+    {
+        PeBuildSpec s2 = s;
+        s2.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, 0)});
+        const auto image = PeBuilder(s2).build();
+        const PeImage img = parse_ok(image, diags);
+        const auto* fn = img.exceptions.find_function(0x1080u);
+        ASSERT_NE(fn, nullptr);
+        auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                    image.size(), diags);
+        EXPECT_FALSE(info.has_value());
+    }
+    EXPECT_GE(diags.count(xbox2pc::diag::Severity::Warning), 4u);
+}

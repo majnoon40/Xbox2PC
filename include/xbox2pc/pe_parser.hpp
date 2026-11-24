@@ -170,6 +170,34 @@ struct RuntimeFunction {
     std::uint32_t unwind_info_rva = 0;
 };
 
+// One decoded x64 unwind code (UNWIND_CODE). slot_offset is the prolog
+// offset the code applies to (bytes from function start); opcode and
+// opinfo are the raw 4-bit code fields; operand carries the decoded
+// operand (register number, allocation size, or frame/slot offset —
+// 32-bit because far saves use 32-bit offsets).
+struct UnwindCode {
+    std::uint8_t slot_offset = 0;   // code offset within the prolog
+    std::uint8_t opcode = 0;        // UWOP_*
+    std::uint8_t opinfo = 0;        // opcode-specific info bits
+    std::uint32_t operand = 0;      // decoded operand
+};
+
+// Decoded UNWIND_INFO (.xdata) for one function. codes keep their stored
+// order (reverse application order); count_of_codes is the header's slot
+// count. chained_unwind_rva is set only for UNW_FLAG_CHAININFO entries.
+struct UnwindInfo {
+    std::uint8_t version = 0;
+    std::uint8_t flags = 0;
+    std::uint8_t size_of_prolog = 0;
+    std::uint8_t frame_register = 0;   // 0 when no frame pointer
+    std::uint8_t frame_offset = 0;     // unscaled (already >>4) frame offset
+    std::vector<UnwindCode> codes;
+    std::uint32_t chained_unwind_rva = 0;
+
+    bool is_chained() const { return (flags & 0x4) != 0; }
+    bool handler_present() const { return (flags & 0x1) != 0; }
+};
+
 // Directory 3 (.pdata) contents, sorted by begin_rva for lookup.
 struct ExceptionTable {
     bool present = false;
@@ -283,6 +311,16 @@ struct PeImage {
         return va;
     }
 };
+
+// Decode the .xdata UNWIND_INFO blob for one RUNTIME_FUNCTION. base/size
+// are the raw file bytes (the parser keeps no copy). Returns nullopt and
+// reports through diags for unmappable RVAs, truncated arrays, unknown
+// opcodes, or unsupported versions.
+std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
+                                             const RuntimeFunction& fn,
+                                             const std::uint8_t* base,
+                                             std::uint64_t size,
+                                             diag::Diagnostics& diags);
 
 // ── Parser ──────────────────────────────────────────────────────────────
 
