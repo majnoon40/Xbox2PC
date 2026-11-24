@@ -159,6 +159,8 @@ struct ApiContext {
     // Lets manual task-queue dispatch re-enter the same bounded guest backend
     // without exposing a host function pointer to guest memory.
     GuestCallbackInvoker invoke_guest_callback;
+    // True when the managed guest thread's cooperative execution has been canceled.
+    std::function<bool()> cancellation_requested;
 };
 
 struct ApiCallResult {
