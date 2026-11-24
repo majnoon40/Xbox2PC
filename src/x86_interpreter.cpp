@@ -1201,6 +1201,7 @@ StepResult Interpreter::step(const Decoded& ins) {
                 cx.cpu.rip += ins.length;
                 return StepResult::success();
             }
+            const std::uint64_t saved_rflags = cx.cpu.rflags;
             switch (ins.mnem) {
                 case Mnemonic::Shl: {
                     result = (masked >= bits) ? 0 : ((dst.raw << masked) & m);
@@ -1332,6 +1333,7 @@ StepResult Interpreter::step(const Decoded& ins) {
             }
             set_pf_zf_sf(cx.cpu, result, bits);
             if (!write_operand(cx, ins.ops[0], result)) {
+                cx.cpu.rflags = saved_rflags;
                 return StepResult::failed(cx.fail);
             }
             cx.cpu.rip += ins.length;

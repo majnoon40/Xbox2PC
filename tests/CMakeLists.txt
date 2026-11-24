@@ -259,3 +259,15 @@ target_link_libraries(static_analysis_test PRIVATE
     xbox2pc_rt_static_analysis xbox2pc_pe_builder gtest)
 target_compile_features(static_analysis_test PRIVATE cxx_std_20)
 add_test(NAME static_analysis_test COMMAND static_analysis_test)
+
+# Security & correctness regression suite (adversarial audit coverage).
+add_executable(security_regression_test security_regression_test.cpp)
+target_link_libraries(security_regression_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_x86_interpreter
+    xbox2pc_rt_gdk
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(security_regression_test PRIVATE cxx_std_20)
+add_test(NAME security_regression_test COMMAND security_regression_test)

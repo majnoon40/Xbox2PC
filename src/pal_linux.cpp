@@ -23,8 +23,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <limits>
 #include <time.h>
-#include <unistd.h>
 #include <unistd.h>
 
 namespace xbox2pc::pal {
@@ -36,6 +36,30 @@ std::string errno_string(const char* what) {
 
 Result<void> errno_result(const char* what) {
     return Result<void>(RuntimeErrc::PlatformError, errno_string(what));
+}
+
+// Computes an absolute CLOCK_REALTIME deadline from a non-negative relative
+// nanosecond timeout without signed integer overflow.
+timespec realtime_deadline_from_ns(MonotonicNs timeout_ns) {
+    timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    const std::int64_t add_sec = timeout_ns / 1'000'000'000LL;
+    const std::int64_t add_nsec = timeout_ns % 1'000'000'000LL;
+    std::int64_t total_nsec = static_cast<std::int64_t>(ts.tv_nsec) + add_nsec;
+    std::int64_t carry_sec = total_nsec / 1'000'000'000LL;
+    total_nsec %= 1'000'000'000LL;
+    constexpr std::int64_t kMaxSec =
+        static_cast<std::int64_t>(std::numeric_limits<time_t>::max());
+    const std::int64_t cur_sec = static_cast<std::int64_t>(ts.tv_sec);
+    if (add_sec > kMaxSec - cur_sec ||
+        carry_sec > kMaxSec - (cur_sec + add_sec)) {
+        ts.tv_sec = std::numeric_limits<time_t>::max();
+        ts.tv_nsec = 999'999'999L;
+        return ts;
+    }
+    ts.tv_sec = static_cast<time_t>(cur_sec + add_sec + carry_sec);
+    ts.tv_nsec = static_cast<long>(total_nsec);
+    return ts;
 }
 
 }  // namespace
@@ -65,6 +89,10 @@ void* gated_trampoline(void* p);
 class LinuxThreadGated : public PalThread {
 public:
     Result<HostThread> start(ThreadFn fn, void* arg) override {
+        if (started_) {
+            return Result<HostThread>(RuntimeErrc::InvalidState,
+                                      "thread already started");
+        }
         spawn_ = std::make_unique<SpawnGate>();
         spawn_->m = PTHREAD_MUTEX_INITIALIZER;
         spawn_->cv = PTHREAD_COND_INITIALIZER;
@@ -86,7 +114,7 @@ public:
     }
 
     Result<void> join() override {
-        if (!started_ || joined_) {
+        if (!started_ || joined_ || detached_) {
             return Result<void>(RuntimeErrc::InvalidState, "thread not joinable");
         }
         void* code = nullptr;
@@ -102,7 +130,7 @@ public:
     }
 
     Result<void> detach() override {
-        if (!started_ || joined_) {
+        if (!started_ || joined_ || detached_) {
             return Result<void>(RuntimeErrc::InvalidState, "thread not detachable");
         }
         const int rc = pthread_detach(thread_);
@@ -111,6 +139,7 @@ public:
             return Result<void>(RuntimeErrc::PlatformError,
                                 "pthread_detach: " + std::string(std::strerror(rc)));
         }
+        detached_ = true;
         return Result<void>::ok_result();
     }
 
@@ -158,6 +187,7 @@ private:
     std::atomic<bool> stop_flag_{false};
     bool started_ = false;
     bool joined_ = false;
+    bool detached_ = false;
     std::uint64_t exit_code_ = 0;
 };
 
@@ -311,13 +341,7 @@ public:
         if (timeout_ns < 0) return wait(m);
         // pthread_cond_timedwait takes an ABSOLUTE deadline; the PAL contract
         // is relative — convert once per call.
-        timespec ts{};
-        clock_gettime(CLOCK_REALTIME, &ts);
-        const std::int64_t total_ns =
-            static_cast<std::int64_t>(ts.tv_nsec) + (timeout_ns % 1'000'000'000LL);
-        ts.tv_sec += static_cast<time_t>(timeout_ns / 1'000'000'000LL) +
-                     total_ns / 1'000'000'000LL;
-        ts.tv_nsec = total_ns % 1'000'000'000LL;
+        const timespec ts = realtime_deadline_from_ns(timeout_ns);
         const int rc = pthread_cond_timedwait(&cv_, &lm->m_, &ts);
         if (rc == 0) {
             // Re-acquired internally: refresh ownership (see wait()).
@@ -401,14 +425,18 @@ public:
             return Result<void>(RuntimeErrc::InvalidArgument, "release(0)");
         }
         pthread_mutex_lock(&m_);
-        if (value_ + static_cast<std::int64_t>(count) > max_) {
+        const std::int64_t delta = static_cast<std::int64_t>(count);
+        if (value_ > max_ || delta > max_ - value_) {
             pthread_mutex_unlock(&m_);
             return Result<void>(RuntimeErrc::InvalidState,
                                 "semaphore overflow: count would exceed max");
         }
-        value_ += static_cast<std::int64_t>(count);
-        const std::uint32_t waiters = count;  // wake at least `count` waiters
-        for (std::uint32_t i = 0; i < waiters; ++i) pthread_cond_signal(&cv_);
+        value_ += delta;
+        if (count == 1) {
+            pthread_cond_signal(&cv_);
+        } else {
+            pthread_cond_broadcast(&cv_);
+        }
         pthread_mutex_unlock(&m_);
         return Result<void>::ok_result();
     }
@@ -521,15 +549,8 @@ private:
     // converted to an ABSOLUTE CLOCK_REALTIME deadline. Returns
     // (acquired, timed_out); spurious wakeups re-loop with remaining time.
     std::pair<bool, bool> timed_wait_locked(MonotonicNs timeout_ns) {
-        timespec now{};
-        clock_gettime(CLOCK_REALTIME, &now);
-        std::int64_t deadline_ns =
-            static_cast<std::int64_t>(now.tv_sec) * 1'000'000'000LL +
-            static_cast<std::int64_t>(now.tv_nsec) + timeout_ns;
+        const timespec ts = realtime_deadline_from_ns(timeout_ns);
         for (;;) {
-            timespec ts{};
-            ts.tv_sec = static_cast<time_t>(deadline_ns / 1'000'000'000LL);
-            ts.tv_nsec = static_cast<long>(deadline_ns % 1'000'000'000LL);
             const int rc = pthread_cond_timedwait(&cv_, &m_, &ts);
             if (rc == 0) return {true, false};
             if (rc == ETIMEDOUT) return {false, true};
@@ -571,7 +592,11 @@ public:
     Result<void> map(std::uint64_t size, bool commit, bool exec) {
         const long page = sysconf(_SC_PAGESIZE);
         const std::uint64_t psize = page > 0 ? static_cast<std::uint64_t>(page) : 4096;
-        const std::uint64_t aligned = (size + psize - 1) / psize * psize;
+        if (size == 0 || size > (~0ull) - (psize - 1)) {
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "mapping size is zero or overflows page alignment");
+        }
+        const std::uint64_t aligned = ((size - 1) / psize + 1) * psize;
         const int prot = commit ? (PROT_READ | PROT_WRITE) : PROT_NONE;
         const int flags = MAP_PRIVATE | MAP_ANONYMOUS | (exec ? 0 : MAP_NORESERVE);
         void* base = mmap(nullptr, static_cast<std::size_t>(aligned),
@@ -607,7 +632,7 @@ public:
         if (base_ == nullptr) {
             return Result<void>(RuntimeErrc::InvalidState, "region unmapped");
         }
-        if (offset >= size_ || size == 0 || offset + size > size_) {
+        if (offset >= size_ || size == 0 || size > size_ - offset) {
             return Result<void>(RuntimeErrc::InvalidArgument,
                                 "subrange out of bounds");
         }
@@ -627,7 +652,7 @@ public:
         if (base_ == nullptr) {
             return Result<void>(RuntimeErrc::InvalidState, "region unmapped");
         }
-        if (offset >= size_ || size == 0 || offset + size > size_) {
+        if (offset >= size_ || size == 0 || size > size_ - offset) {
             return Result<void>(RuntimeErrc::InvalidArgument,
                                 "subrange out of bounds");
         }
