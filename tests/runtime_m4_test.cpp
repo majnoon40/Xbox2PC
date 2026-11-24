@@ -921,22 +921,23 @@ TEST(ProcessMgmtTest, ProcessOwnsXMemAllocatorUntilTermination) {
     ASSERT_TRUE(process_guard.ok());
     auto* process = process_guard.value().get()->as<ManagedProcess>();
     ASSERT_NE(process, nullptr);
-    auto allocator_result = process->ensure_xmem_allocator(1ull << 20, 512ull << 10);
-    ASSERT_TRUE(allocator_result.ok()) << allocator_result.error_string();
-    auto* allocator = allocator_result.value();
-    ASSERT_NE(allocator, nullptr);
-
-    auto allocation = allocator->allocate(4096, 64, "process-heap", true);
+    auto allocation = process->allocate_xmem(
+        4096, 64, "process-heap", true, 1ull << 20, 512ull << 10);
     ASSERT_TRUE(allocation.ok()) << allocation.error_string();
     EXPECT_EQ(allocation.value() % 64, 0u);
-    auto again = process->ensure_xmem_allocator(2ull << 20, 0);
-    ASSERT_TRUE(again.ok());
-    EXPECT_EQ(again.value(), allocator);
+    auto again = process->allocate_xmem(128, 16, "second", false,
+                                        2ull << 20, 0);
+    ASSERT_TRUE(again.ok()) << again.error_string();
     EXPECT_EQ(process->address_space().stats().region_count, 1u);
+    auto stats = process->xmem_stats();
+    ASSERT_TRUE(stats.ok());
+    EXPECT_EQ(stats.value().allocation_count, 2u);
+    ASSERT_TRUE(process->free_xmem(allocation.value()).ok());
+    ASSERT_TRUE(process->free_xmem(again.value()).ok());
 
     ASSERT_TRUE(pm.terminate_process(ph.value(), 0).ok());
     EXPECT_EQ(process->address_space().stats().region_count, 0u);
-    EXPECT_EQ(process->ensure_xmem_allocator(1ull << 20).errc(),
+    EXPECT_EQ(process->allocate_xmem(64, 16, "late", false).errc(),
               RuntimeErrc::ProcessTerminated);
     ASSERT_TRUE(core.shutdown().ok());
 }

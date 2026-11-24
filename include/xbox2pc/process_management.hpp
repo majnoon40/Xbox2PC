@@ -82,10 +82,16 @@ public:
     AddressSpace& address_space() { return *space_; }
     const AddressSpace& address_space() const { return *space_; }
 
-    // Lazily create one process-owned guest XMem arena. The first successful
-    // call fixes the arena size and byte budget for this process.
-    Result<IXMemAllocator*> ensure_xmem_allocator(
-        std::uint64_t arena_size, std::uint64_t max_bytes = 0);
+    // Process-serialized XMem operations. The first successful allocation
+    // creates the process-owned arena; later arena-size/budget arguments are
+    // ignored because the process has one allocator for its lifetime.
+    Result<std::uint64_t> allocate_xmem(
+        std::uint64_t size, std::uint64_t alignment, std::string tag,
+        bool zero_initialize, std::uint64_t arena_size = 4ull << 20,
+        std::uint64_t max_bytes = 0);
+    Result<void> free_xmem(std::uint64_t guest_address, bool scrub = false);
+    Result<XMemAllocation> query_xmem(std::uint64_t guest_address) const;
+    Result<MemoryAllocator::Stats> xmem_stats() const;
 
     // ProcessManager calls this only after all guest threads have exited and
     // before releasing the process AddressSpace.
