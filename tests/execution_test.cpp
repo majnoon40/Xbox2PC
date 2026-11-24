@@ -2377,10 +2377,10 @@ TEST(BridgeTest, SetAndGetLastErrorUseTheBoundGuestTeb) {
     ASSERT_TRUE(set_plan.ok()) << set_plan.error_string();
     ASSERT_TRUE(get_plan.ok()) << get_plan.error_string();
 
-    std::vector<abi::ArgValue> set_args(1);
-    set_args[0].kind = abi::ArgKind::Int;
+    std::vector<xbox2pc::rt::abi::ArgValue> set_args(1);
+    set_args[0].kind = xbox2pc::rt::abi::ArgKind::Int;
     set_args[0].int_v = 0x1234ABCDu;
-    auto prepared = abi::prepare_call(cpu_state, 0x51000001,
+    auto prepared = xbox2pc::rt::abi::prepare_call(cpu_state, 0x51000001,
         set_plan.value().call, set_args, HostStack::writer(&stack));
     ASSERT_TRUE(prepared.ok()) << prepared.error_string();
     auto set_result = marshal_and_dispatch(cpu_state, mem, w.reg,
@@ -2392,7 +2392,7 @@ TEST(BridgeTest, SetAndGetLastErrorUseTheBoundGuestTeb) {
     cpu_state.reset();
     cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
     HostStack get_stack(0x2003F000ull, 0x1000);
-    auto get_prepared = abi::prepare_call(cpu_state, 0x51000002,
+    auto get_prepared = xbox2pc::rt::abi::prepare_call(cpu_state, 0x51000002,
         get_plan.value().call, {}, HostStack::writer(&get_stack));
     ASSERT_TRUE(get_prepared.ok()) << get_prepared.error_string();
     auto get_result = marshal_and_dispatch(cpu_state, mem, w.reg,
@@ -2406,7 +2406,7 @@ TEST(BridgeTest, SetAndGetLastErrorUseTheBoundGuestTeb) {
     ASSERT_TRUE(context.destroy().ok());
 }
 
-TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
+TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
     AddressSpace space(16ull << 20, 0x37000000, "guest-last-error-test");
     api::ApiRegistry registry;
     auto process = std::make_shared<exec::GuestProcessEnvironment>(space);
