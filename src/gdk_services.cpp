@@ -1043,12 +1043,12 @@ public:
             out.note = "CloseHandle requires exactly one handle";
             return true;
         }
-        auto r = svc_.close_sync_handle(ctx.process_id, ctx.args[0]);
+        auto r = svc_.close_guest_object(ctx.process_id, ctx.args[0]);
         out.return_value = r.ok() ? 1 : 0;
         if (!r.ok()) out.note = r.error_string();
         return true;
     }
-    std::string describe() const override { return "Win32: CloseHandle (supported synchronization and task-queue handles)"; }
+    std::string describe() const override { return "Win32: CloseHandle (typed dispatch: event/mutex/semaphore, task queue, heap)"; }
 private: GameRuntimeService& svc_;
 };
 
@@ -2132,7 +2132,10 @@ Result<void> GameRuntimeService::close_sync_handle(std::uint64_t pid, std::uint6
                                 "task-queue object does not implement guest handle close");
         return closer->close_guest_handle(pid, handle, std::move(candidate.value()));
     }
+    const bool is_heap = object != nullptr && object->type_id() == TypeId::MemoryRegion &&
+                         object->as<RtHeap>() != nullptr;
     candidate.value().release();
+    if (is_heap) return close_heap_object(pid, handle);
 
     std::lock_guard transaction(sync_transaction_lock_);
     auto sync_object = lookup_sync_object(pid, handle);
@@ -2157,6 +2160,69 @@ Result<void> GameRuntimeService::close_sync_handle(std::uint64_t pid, std::uint6
         retired_sync_objects_[pid].push_back(object_id);
     }
     return Result<void>::ok_result();
+}
+
+Result<void> GameRuntimeService::close_heap_object(std::uint64_t pid,
+                                                     std::uint64_t heap_handle) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<void>(heap.errc(), heap.context());
+    {
+        auto* heap_obj = heap.value().get()->as<RtHeap>();
+        if (heap_obj != nullptr && heap_obj->is_default_heap())
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "the process default heap cannot be closed");
+    }
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto closed = owner->handle_table().close(Handle::from_raw(heap_handle));
+    if (!closed.ok()) return Result<void>(closed.errc(), closed.context());
+    std::lock_guard lock(state_lock_);
+    const auto pit = procs_.find(pid);
+    if (pit != procs_.end() && pit->second.process_heap == heap_handle)
+        pit->second.process_heap = 0;
+    return Result<void>();
+}
+
+Result<void> GameRuntimeService::close_guest_object(std::uint64_t pid,
+                                                    std::uint64_t handle) {
+    // Generic CloseHandle dispatch: one entry point, typed routing.
+    // Sync objects (event/mutex/semaphore) keep the transactional path;
+    // task queues use their registered closer; heaps close as private
+    // heap handles. Everything else fails closed with ObjectTypeMismatch
+    // so unknown future types must register a close path before they
+    // become guest-visible through CloseHandle.
+    if (pid == 0 || handle == 0)
+        return Result<void>(RuntimeErrc::InvalidHandle, "null process or guest handle");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    auto candidate = owner->handle_table().lookup(Handle::from_raw(handle));
+    if (!candidate.ok()) return Result<void>(candidate.errc(), candidate.context());
+    auto* object = candidate.value().get();
+    const auto type = object == nullptr ? TypeId::Invalid : object->type_id();
+    candidate.value().release();
+    switch (type) {
+    case TypeId::Event:
+    case TypeId::Mutex:
+    case TypeId::Semaphore:
+        return close_sync_handle(pid, handle);
+    case TypeId::TaskQueue:
+        return close_sync_handle(pid, handle);  // routes to the queue closer
+    case TypeId::MemoryRegion: {
+        // Heaps are the only MemoryRegion objects exposed as guest handles.
+        if (object->as<RtHeap>() == nullptr)
+            return Result<void>(RuntimeErrc::ObjectTypeMismatch,
+                                "memory region is not closable through CloseHandle");
+        return close_heap_object(pid, handle);
+    }
+    default:
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch,
+                            "object type is not closable through CloseHandle");
+    }
 }
 
 Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t handle) {

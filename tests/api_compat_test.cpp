@@ -139,6 +139,79 @@ void* guest_wait_thread_main(xbox2pc::rt::RtThread& self, void* raw) {
 
 // ── 12.1 registry ─────────────────────────────────────────────────────────
 
+// ── M11 Phase 3: generic CloseHandle typed dispatch ───────────────────────
+
+TEST(CloseHandleTypedDispatchAndStaleRejection, HeapAndSyncRouting) {
+    // One world, two processes: A creates a private heap + an event, B is a
+    // stranger. CloseHandle must route by object type, reject foreign and
+    // stale handles, and refuse the process default heap.
+    ApiRegistry reg;
+    RuntimeCore core;
+    ProcessManager pm(core.objects());
+    GameRuntimeService* grt = nullptr;
+    {
+        auto svc = std::make_unique<GameRuntimeService>(reg, pm);
+        grt = svc.get();
+        ASSERT_TRUE(core.services().register_service(std::move(svc)).ok());
+    }
+    ASSERT_TRUE(core.initialize().ok());
+
+    auto pa = pm.create_process("close-a", 16ull << 20);
+    ASSERT_TRUE(pa.ok());
+    const auto pid_a = pm.resolve_pid(pa.value()).value();
+    auto pb = pm.create_process("close-b", 16ull << 20);
+    ASSERT_TRUE(pb.ok());
+    const auto pid_b = pm.resolve_pid(pb.value()).value();
+    // Sync objects require a started process (state-machine requirement).
+    for (const auto& [proc, name] : {std::pair{pa.value(), "close-a"},
+                                     std::pair{pb.value(), "close-b"}}) {
+        xbox2pc::rt::ModuleDescriptor module;
+        module.module_name = name;
+        module.is_valid_pe = true;
+        ASSERT_TRUE(pm.initialize_process(proc, module,
+                                          xbox2pc::rt::RuntimeConfig{}).ok());
+        ASSERT_TRUE(pm.start_process(proc).ok());
+    }
+
+    // Private heap + auto-reset event in process A.
+    auto heap = grt->heap_create(pid_a, 0);
+    ASSERT_TRUE(heap.ok());
+    auto event = grt->create_event(pid_a, false, false);
+    ASSERT_TRUE(event.ok());
+
+    // The process default heap refuses generic close (HeapDestroy semantics).
+    auto defheap = grt->process_heap(pid_a);
+    ASSERT_TRUE(defheap.ok());
+    ASSERT_NE(defheap.value(), 0u);
+    auto refused = grt->close_guest_object(pid_a, defheap.value());
+    ASSERT_FALSE(refused.ok());
+
+    // Foreign process: closing A's heap via B must fail (wrong table).
+    auto foreign = grt->close_guest_object(pid_b, heap.value());
+    ASSERT_FALSE(foreign.ok());
+
+    // Event routes through the sync path and closes.
+    auto closed_ev = grt->close_guest_object(pid_a, event.value());
+    ASSERT_TRUE(closed_ev.ok());
+    // Second close of the same event is stale.
+    auto stale_ev = grt->close_guest_object(pid_a, event.value());
+    ASSERT_FALSE(stale_ev.ok());
+
+    // Heap API on a live private heap works, then CloseHandle retires it...
+    auto block = grt->heap_alloc(pid_a, heap.value(), 128, false);
+    ASSERT_TRUE(block.ok());
+    auto closed = grt->close_guest_object(pid_a, heap.value());
+    ASSERT_TRUE(closed.ok());
+    // ...and the retired handle is stale for subsequent heap calls.
+    auto post = grt->heap_alloc(pid_a, heap.value(), 64, false);
+    ASSERT_FALSE(post.ok());
+    // Double close is stale.
+    auto stale = grt->close_guest_object(pid_a, heap.value());
+    ASSERT_FALSE(stale.ok());
+
+    (void)core.shutdown();
+}
+
 TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
     ApiRegistry reg;
     EXPECT_GE(reg.descriptor_count(), 18u);

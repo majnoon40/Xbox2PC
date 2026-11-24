@@ -130,6 +130,11 @@ public:
     Result<void> heap_free(std::uint64_t process_id, std::uint64_t heap_handle,
                            std::uint64_t address);
     Result<void> heap_destroy(std::uint64_t process_id, std::uint64_t heap_handle);
+    // Generic CloseHandle dispatch (Phase 3): typed routing for sync
+    // objects, task queues, and heap handles. close_heap_object is the
+    // heap-only path (shared with heap_destroy).
+    Result<void> close_guest_object(std::uint64_t process_id, std::uint64_t handle);
+    Result<void> close_heap_object(std::uint64_t process_id, std::uint64_t heap_handle);
     Result<std::uint64_t> heap_realloc(std::uint64_t process_id, std::uint64_t heap_handle,
                                        std::uint64_t address, std::uint64_t new_size,
                                        bool zero_tail);

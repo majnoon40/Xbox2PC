@@ -83,6 +83,7 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | HeapDestroy | `BOOL ...(HANDLE)` | partially-implemented (handle close; default heap refused) |
 | HeapReAlloc | `LPVOID ...(HANDLE, DWORD, LPVOID, SIZE_T)` | partially-implemented (moving realloc; prefix preserved; zeroed grown tail) |
 | HeapSize | `SIZE_T ...(HANDLE, DWORD, LPCVOID)` | partially-implemented (tracked allocation size; SIZE_MAX on error) |
+| CloseHandle | `BOOL ...(HANDLE)` | partially-implemented (typed dispatch: event/mutex/semaphore, task queue, private heap; default heap refused) |
 
 | XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation) |
 | XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release) |

@@ -858,7 +858,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.signature="BOOL CloseHandle(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
         a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
         a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kCloseHandleUrl;
-        a.notes="closes event, guest mutex, and guest semaphore handles created by this service only"; add(a);
+        a.notes="typed close dispatch over the process handle table: event, guest mutex, guest semaphore, task-queue, and private heap handles; the process default heap and closable-unknown types fail closed"; add(a);
     }
 
     return d;
