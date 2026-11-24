@@ -2365,10 +2365,10 @@ TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
 
     EXPECT_EQ(first.guest_environment()->last_error().value(), 0u);
     EXPECT_EQ(second.guest_environment()->last_error().value(), 0u);
-    ASSERT_TRUE(first.guest_environment()->set_last_error(0x12345678u).ok());
+    ASSERT_TRUE(first.guest_environment_mut()->set_last_error(0x12345678u).ok());
     EXPECT_EQ(first.guest_environment()->last_error().value(), 0x12345678u);
     EXPECT_EQ(second.guest_environment()->last_error().value(), 0u);
-    ASSERT_TRUE(second.guest_environment()->set_last_error(5u).ok());
+    ASSERT_TRUE(second.guest_environment_mut()->set_last_error(5u).ok());
     EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
     EXPECT_EQ(first.guest_environment()->last_error().value(), 0x12345678u);
 

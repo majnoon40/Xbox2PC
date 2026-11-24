@@ -146,6 +146,7 @@ public:
     std::shared_ptr<ExecutionControl> execution_control() const;
     std::uint32_t run_count() const { return runs_; }
     const GuestThreadEnvironment* guest_environment() const { return guest_environment_.get(); }
+    GuestThreadEnvironment* guest_environment_mut() { return guest_environment_.get(); }
     // Guest GS base for the future native-entry thunk; the interpreter does not consume it.
     std::uint64_t guest_gs_base() const { return guest_environment_ ? guest_environment_->teb_base() : 0; }
 
