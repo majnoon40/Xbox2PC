@@ -1107,8 +1107,8 @@ TEST(GdkServiceTest, TaskQueueHandlesUseTheProcessHandleTable) {
     const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
     const auto first = w.tq->create_queue(pid, manual, manual);
     ASSERT_TRUE(first.ok()) << first.error_string();
-    const auto first_handle = Handle::from_raw(first.value());
-    EXPECT_EQ(first_handle.type(), static_cast<std::uint16_t>(TypeId::TaskQueue));
+    const auto first_handle = xbox2pc::rt::Handle::from_raw(first.value());
+    EXPECT_EQ(first_handle.type(), static_cast<std::uint16_t>(xbox2pc::rt::TypeId::TaskQueue));
     auto first_object = process->handle_table().lookup(first_handle);
     ASSERT_TRUE(first_object.ok()) << first_object.error_string();
     const auto object_id = first_object.value().get()->id();
@@ -1116,7 +1116,7 @@ TEST(GdkServiceTest, TaskQueueHandlesUseTheProcessHandleTable) {
     const auto duplicate = w.tq->duplicate_queue(pid, first.value());
     ASSERT_TRUE(duplicate.ok()) << duplicate.error_string();
     EXPECT_NE(duplicate.value(), first.value());
-    auto duplicate_object = process->handle_table().lookup(Handle::from_raw(duplicate.value()));
+    auto duplicate_object = process->handle_table().lookup(xbox2pc::rt::Handle::from_raw(duplicate.value()));
     ASSERT_TRUE(duplicate_object.ok()) << duplicate_object.error_string();
     EXPECT_EQ(duplicate_object.value().get()->id(), object_id);
     EXPECT_EQ(w.tq->live_queues(), 1u);
