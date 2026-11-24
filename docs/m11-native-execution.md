@@ -6,8 +6,11 @@ entrypoints directly on an x86-64 Linux host using the Microsoft x64 ABI.
 ## Supported boundary
 
 - The entry VA must translate to committed guest memory with execute permission.
-- Entry has no arguments, no import/API bindings, and no cooperative execution
-  gate. The code must be position-independent with respect to the host mapping.
+- Entry accepts up to four integer or small-aggregate arguments in the
+  Microsoft x64 RCX/RDX/R8/R9 register positions, with integer or void returns.
+  Pointer, floating-point/XMM, and stack arguments are rejected. Imports/API
+  bindings and cooperative execution control are also rejected. Code must be
+  position-independent with respect to the host mapping.
 - The entry executes in a child process with a bounded lifetime. A host signal
   terminates that child and is reported as a guest fault; a timeout is reported
   as a budget fault.

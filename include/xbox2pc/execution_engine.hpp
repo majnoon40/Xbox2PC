@@ -273,8 +273,9 @@ private:
 };
 
 // First native-host execution slice. This backend is intentionally narrow:
-// x86-64 Linux, no guest imports/arguments/GS/SEH, and a bounded child-process
-// lifetime. The child process contains host faults; it is NOT a security
+// x86-64 Linux, up to four integer-like register arguments (RCX/RDX/R8/R9),
+// no pointer/FP/stack arguments, imports, GS, or SEH, and a bounded child
+// process lifetime. The child contains host faults; it is NOT a security
 // sandbox and must only be used with trusted, unencumbered test code.
 class NativeExecutionBackend final : public IExecutionEngine {
 public:
