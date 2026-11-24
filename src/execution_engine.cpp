@@ -818,6 +818,29 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(int_arg()); plan.call.args.push_back(ptr_out(4));
         plan.out_buffer_args.push_back(3);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "GetProcessHeap") {
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "HeapCreate") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "HeapAlloc") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "HeapFree") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "HeapDestroy") {
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XMemAlloc") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "XMemFree") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else {
         return Ret(RuntimeErrc::NotFound,
                    "no marshalling plan for " + d.library + "!" + id +

@@ -1174,6 +1174,133 @@ TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
     EXPECT_EQ(cpu_state.rip, code_va + 0x100); // RET sentinel pre-check stops at the return instruction
 }
 
+TEST(EngineTest, DispatchesWin32HeapApiBindings) {
+    // Imported Win32 heap round trip through the interpreter: chained
+    // GetProcessHeap -> HeapAlloc(0x100) -> HeapFree, then XMemAlloc(64)
+    // and XMemFree. Verifies the arena allocation is real guest memory
+    // (writable, readable back) and per-allocation free works.
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("heap-api-binding.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "heap-api-binding.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t get_heap = 0x51010001ull;
+    constexpr std::uint64_t alloc = 0x51010002ull;
+    constexpr std::uint64_t free_fn = 0x51010003ull;
+    constexpr std::uint64_t xmem_alloc = 0x51010004ull;
+    constexpr std::uint64_t xmem_free = 0x51010005ull;
+    constexpr std::uint64_t tid = 0x97;
+    const std::uint64_t rsp = stack_va + 0x100;
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = get_heap;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values = {get_heap, alloc, free_fn, xmem_alloc, xmem_free};
+    request.api_bindings = {
+        ApiBindingInfo{get_heap, "kernel32", "GetProcessHeap", false, 0},
+        ApiBindingInfo{alloc, "kernel32", "HeapAlloc", false, 0},
+        ApiBindingInfo{free_fn, "kernel32", "HeapFree", false, 0},
+        ApiBindingInfo{xmem_alloc, "xmem", "XMemAlloc", false, 0},
+        ApiBindingInfo{xmem_free, "xmem", "XMemFree", false, 0},
+    };
+
+    // Canonical per-API return contract: [rsp] = guest RET, [rsp+8] = sentinel.
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = get_heap;
+    std::atomic<bool> interrupted{false};
+    auto result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "GetProcessHeap dispatch";
+    EXPECT_EQ(result.api_calls, 1u);
+    const std::uint64_t heap = result.return_value;
+    ASSERT_NE(heap, 0u);
+
+    // Stage 2: HeapAlloc(heap, 0, 0x100).
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, heap);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0); // no flags
+    cpu_state.set_reg(cpu::Gpr::R8, 0x100);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = alloc;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "HeapAlloc dispatch";
+    EXPECT_EQ(result.api_calls, 1u);
+    const std::uint64_t block = result.return_value;
+    ASSERT_NE(block, 0u);
+    // The block must be real writable guest memory: write and read back.
+    ASSERT_TRUE(mem.write_u64(block, 0xCAFEBABEDEADBEEFull).ok());
+    auto read_back = mem.read_u64(block);
+    ASSERT_TRUE(read_back.ok());
+    EXPECT_EQ(read_back.value(), 0xCAFEBABEDEADBEEFull);
+
+    // Stage 3: HeapFree(heap, 0, block).
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, heap);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    cpu_state.set_reg(cpu::Gpr::R8, block);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = free_fn;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "HeapFree dispatch";
+    EXPECT_EQ(result.return_value, 1u);
+
+    // Stage 4: XMemAlloc(64, 0).
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, 64);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = xmem_alloc;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "XMemAlloc dispatch";
+    const std::uint64_t xblock = result.return_value;
+    ASSERT_NE(xblock, 0u);
+    ASSERT_TRUE(mem.write_u64(xblock, 0x1122334455667788ull).ok());
+
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, xblock);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = xmem_free;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "XMemFree dispatch";
+    EXPECT_EQ(result.return_value, 1u);
+}
+
 TEST(EngineTest, DispatchesWin32EventApiBinding) {
     ExecWorld w;
     auto [process_handle, process] = w.new_process("win32-api-binding.exe");

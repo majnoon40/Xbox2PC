@@ -76,6 +76,13 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
 | XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | partially-implemented (same-process shared queue handle; pending callbacks retain queue lifetime) |
 | WaitForMultipleObjects | `DWORD ...(count, HANDLE*, waitAll, timeout)` | partially-implemented (wait-any and transactional wait-all subsets) |
+| GetProcessHeap | `HANDLE GetProcessHeap()` | partially-implemented (per-process default heap over the xmem arena) |
+| HeapCreate | `HANDLE ...(DWORD, SIZE_T, SIZE_T)` | partially-implemented (private heap handle in the process arena) |
+| HeapAlloc | `LPVOID ...(HANDLE, DWORD, SIZE_T)` | partially-implemented (8-byte aligned arena sub-allocation) |
+| HeapFree | `BOOL ...(HANDLE, DWORD, LPVOID)` | partially-implemented (per-allocation arena release) |
+| HeapDestroy | `BOOL ...(HANDLE)` | partially-implemented (handle close; default heap refused) |
+| XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation) |
+| XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 

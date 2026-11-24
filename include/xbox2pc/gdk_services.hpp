@@ -120,6 +120,19 @@ public:
     void release_process(std::uint64_t process_id);
     Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
     Result<MemoryQuerySnapshot> query_memory_snapshot(std::uint64_t process_id) const;
+    // M11 Phase 4 heap + XMem import surface. Heap handles are process-
+    // scoped runtime objects; allocations come from the per-process xmem
+    // arena so Win32 heap memory and XMem share one teardown path.
+    Result<std::uint64_t> process_heap(std::uint64_t process_id);
+    Result<std::uint64_t> heap_create(std::uint64_t process_id, std::uint32_t options);
+    Result<std::uint64_t> heap_alloc(std::uint64_t process_id, std::uint64_t heap_handle,
+                                     std::uint64_t size, bool zero_initialize);
+    Result<void> heap_free(std::uint64_t process_id, std::uint64_t heap_handle,
+                           std::uint64_t address);
+    Result<void> heap_destroy(std::uint64_t process_id, std::uint64_t heap_handle);
+    Result<std::uint64_t> xmem_alloc(std::uint64_t process_id, std::uint64_t size,
+                                     std::uint64_t alignment);
+    Result<void> xmem_free(std::uint64_t process_id, std::uint64_t address);
     Result<std::uint64_t> virtual_alloc(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t allocation_type, std::uint32_t protection);
     Result<void> virtual_free(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t free_type);
     Result<MemProtect> virtual_protect(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t protection);
@@ -151,9 +164,12 @@ public:
 private:
     Result<RefGuard> lookup_sync_object(std::uint64_t process_id, std::uint64_t handle) const;
     Result<std::uint64_t> create_sync_object(std::uint64_t process_id, std::unique_ptr<RuntimeObject> object);
+    Result<RefGuard> lookup_heap_object(std::uint64_t process_id, std::uint64_t handle) const;
+    Result<std::uint64_t> create_heap_object(std::uint64_t process_id, bool default_heap, std::uint32_t options);
     struct ProcState {
         std::uint64_t init_count = 0;
         bool uninit_failed_terminal = false;  // documented terminal state
+        std::uint64_t process_heap = 0;  // cached default-heap raw handle
     };
     ApiRegistry& api_reg_;
     ProcessManager& process_manager_;

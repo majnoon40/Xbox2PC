@@ -186,6 +186,140 @@ private:
 };
 
 
+// ── heap objects (M11 Phase 4) ────────────────────────────────────────────
+// RtHeap is a lightweight handle object: allocations are carved from the
+// per-process xmem arena (ManagedProcess::allocate_xmem) so heap and XMem
+// memory share one tracked address-space accounting and teardown path.
+class RtHeap : public RuntimeObject {
+public:
+    XBOX2PC_RUNTIME_OBJECT_TYPE(RtHeap, MemoryRegion)
+    explicit RtHeap(bool default_heap, std::uint32_t options)
+        : RuntimeObject(TypeId::MemoryRegion),
+          default_(default_heap), options_(options) {}
+    bool is_default_heap() const { return default_; }
+    std::uint32_t options() const { return options_; }
+private:
+    bool default_;
+    std::uint32_t options_;
+};
+
+class GetProcessHeapImpl : public IApiImplementation {
+public:
+    explicit GetProcessHeapImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 0) return false;
+        auto r = svc_.process_heap(ctx.process_id);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: GetProcessHeap (per-process default heap)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapCreateImpl : public IApiImplementation {
+public:
+    explicit HeapCreateImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        // HEAP_NO_SERIALIZE 0x1, HEAP_GENERATE_EXCEPTIONS 0x4 are documented
+        // option bits; anything else (or unknown bits) fails closed.
+        constexpr std::uint32_t kKnown = 0x1u | 0x4u;
+        const auto options = static_cast<std::uint32_t>(ctx.args[0]);
+        if ((options & ~kKnown) != 0) {
+            out.return_value = 0;
+            out.note = "HeapCreate supports HEAP_NO_SERIALIZE and HEAP_GENERATE_EXCEPTIONS option bits only";
+            return true;
+        }
+        auto r = svc_.heap_create(ctx.process_id, options);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapCreate (private heap within the process arena)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapAllocImpl : public IApiImplementation {
+public:
+    explicit HeapAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        constexpr std::uint32_t kZero = 0x8u;      // HEAP_ZERO_MEMORY
+        constexpr std::uint32_t kExceptions = 0x4u; // HEAP_GENERATE_EXCEPTIONS
+        const auto flags = static_cast<std::uint32_t>(ctx.args[1]);
+        if ((flags & ~(kZero | kExceptions)) != 0 || (flags & kExceptions) != 0) {
+            out.return_value = 0;
+            out.note = "HeapAlloc supports HEAP_ZERO_MEMORY; HEAP_GENERATE_EXCEPTIONS is not emulated";
+            return true;
+        }
+        // The heap handle is validated but allocations are tracked per
+        // allocation in the process arena (documented partial behavior).
+        auto r = svc_.heap_alloc(ctx.process_id, ctx.args[0], ctx.args[2],
+                                 (flags & kZero) != 0);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapAlloc (8-byte aligned arena sub-allocation)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapFreeImpl : public IApiImplementation {
+public:
+    explicit HeapFreeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        auto r = svc_.heap_free(ctx.process_id, ctx.args[0], ctx.args[2]);
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapFree (arena allocation release)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapDestroyImpl : public IApiImplementation {
+public:
+    explicit HeapDestroyImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 1) return false;
+        auto r = svc_.heap_destroy(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapDestroy (heap handle close; default heap refused)"; }
+private: GameRuntimeService& svc_;
+};
+class XMemAllocImpl : public IApiImplementation {
+public:
+    explicit XMemAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 2) return false;
+        // dwAttributes low byte encodes the base-2 alignment power on Xbox;
+        // only sane powers (8..4096 → 3..12) are honored, otherwise 8.
+        const auto attributes = static_cast<std::uint32_t>(ctx.args[1]);
+        std::uint64_t alignment = 8;
+        const auto power = attributes & 0xFFu;
+        if (power >= 3 && power <= 12) alignment = 1ull << power;
+        auto r = svc_.xmem_alloc(ctx.process_id, ctx.args[0], alignment);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "GDK: XMemAlloc (aligned xmem arena allocation)"; }
+private: GameRuntimeService& svc_;
+};
+class XMemFreeImpl : public IApiImplementation {
+public:
+    explicit XMemFreeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 2) return false;
+        auto r = svc_.xmem_free(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "GDK: XMemFree (xmem arena release)"; }
+private: GameRuntimeService& svc_;
+};
 class VirtualAllocImpl : public IApiImplementation {
 public:
     explicit VirtualAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -959,7 +1093,14 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r24 = api_reg_.register_implementation("kernel32", "WaitForMultipleObjects", keep(std::make_shared<WaitForMultipleObjectsImpl>(*this)), owner);
     auto r25 = api_reg_.register_implementation("kernel32", "SetLastError", keep(std::make_shared<SetLastErrorImpl>()), owner);
     auto r26 = api_reg_.register_implementation("kernel32", "GetLastError", keep(std::make_shared<GetLastErrorImpl>()), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26}) {
+    auto r27 = api_reg_.register_implementation("kernel32", "GetProcessHeap", keep(std::make_shared<GetProcessHeapImpl>(*this)), owner);
+    auto r28 = api_reg_.register_implementation("kernel32", "HeapCreate", keep(std::make_shared<HeapCreateImpl>(*this)), owner);
+    auto r29 = api_reg_.register_implementation("kernel32", "HeapAlloc", keep(std::make_shared<HeapAllocImpl>(*this)), owner);
+    auto r30 = api_reg_.register_implementation("kernel32", "HeapFree", keep(std::make_shared<HeapFreeImpl>(*this)), owner);
+    auto r31 = api_reg_.register_implementation("kernel32", "HeapDestroy", keep(std::make_shared<HeapDestroyImpl>(*this)), owner);
+    auto r32 = api_reg_.register_implementation("xmem", "XMemAlloc", keep(std::make_shared<XMemAllocImpl>(*this)), owner);
+    auto r33 = api_reg_.register_implementation("xmem", "XMemFree", keep(std::make_shared<XMemFreeImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26, &r27, &r28, &r29, &r30, &r31, &r32, &r33}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -1252,6 +1393,136 @@ Result<MemProtect> GameRuntimeService::virtual_protect(
     return process_manager_.protect_region_by_pid(pid, start, aligned, decoded.value());
 }
 
+// ── M11 Phase 4: heap + XMem service surface ─────────────────────────────
+
+Result<std::uint64_t> GameRuntimeService::process_heap(std::uint64_t pid) {
+    // Fast path under the state lock only; creation happens outside it so
+    // the service state lock is never held across ProcessManager calls
+    // (the manager lock is taken first in every other path).
+    {
+        std::lock_guard lock(state_lock_);
+        const auto it = procs_.find(pid);
+        if (it != procs_.end() && it->second.process_heap != 0)
+            return Result<std::uint64_t>(it->second.process_heap);
+    }
+    const auto handle = create_heap_object(pid, true, 0);
+    if (!handle.ok()) return handle;
+    std::lock_guard lock(state_lock_);
+    auto& st = procs_[pid];
+    if (st.process_heap == 0) st.process_heap = handle.value();
+    return Result<std::uint64_t>(st.process_heap);
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_create(std::uint64_t pid,
+                                                      std::uint32_t options) {
+    return create_heap_object(pid, false, options);
+}
+
+Result<std::uint64_t> GameRuntimeService::create_heap_object(
+    std::uint64_t pid, bool default_heap, std::uint32_t options) {
+    if (pid == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "heap creation requires a process");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr || owner->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "owner process is not running");
+    auto object_id = process_manager_.objects().register_object(
+        std::make_unique<RtHeap>(default_heap, options));
+    if (!object_id.ok()) return Result<std::uint64_t>(object_id.errc(), object_id.context());
+    auto reference = process_manager_.objects().lookup_id(object_id.value());
+    if (!reference.ok()) {
+        (void)process_manager_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(reference.errc(), reference.context());
+    }
+    auto handle = owner->handle_table().create(*reference.value().get());
+    if (!handle.ok()) {
+        reference.value().release();
+        (void)process_manager_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(handle.errc(), handle.context());
+    }
+    return Result<std::uint64_t>(handle.value().raw());
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_alloc(std::uint64_t pid,
+                                                     std::uint64_t heap_handle,
+                                                     std::uint64_t size,
+                                                     bool zero_initialize) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<std::uint64_t>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    // Rationale for the clamp: the arena is 4 MiB by default; a guest
+    // asking for more than the whole arena cannot be satisfied anyway.
+    if (size == 0 || size > (64ull << 20))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "HeapAlloc size must be 1..64 MiB");
+    return owner->allocate_xmem(size, 8, "heap", zero_initialize);
+}
+
+Result<void> GameRuntimeService::heap_free(std::uint64_t pid,
+                                           std::uint64_t heap_handle,
+                                           std::uint64_t address) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<void>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    return owner->free_xmem(address);
+}
+
+Result<void> GameRuntimeService::heap_destroy(std::uint64_t pid,
+                                              std::uint64_t heap_handle) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<void>(heap.errc(), heap.context());
+    {
+        auto* heap_obj = heap.value().get()->as<RtHeap>();
+        if (heap_obj != nullptr && heap_obj->is_default_heap())
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "the process default heap cannot be destroyed");
+    }
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto closed = owner->handle_table().close(Handle::from_raw(heap_handle));
+    if (!closed.ok()) return Result<void>(closed.errc(), closed.context());
+    std::lock_guard lock(state_lock_);
+    const auto pit = procs_.find(pid);
+    if (pit != procs_.end() && pit->second.process_heap == heap_handle)
+        pit->second.process_heap = 0;
+    return Result<void>();
+}
+
+Result<std::uint64_t> GameRuntimeService::xmem_alloc(std::uint64_t pid,
+                                                     std::uint64_t size,
+                                                     std::uint64_t alignment) {
+    if (pid == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "XMemAlloc requires a process");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    if (size == 0 || size > (64ull << 20))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "XMemAlloc size must be 1..64 MiB");
+    return owner->allocate_xmem(size, alignment, "xmem", false);
+}
+
+Result<void> GameRuntimeService::xmem_free(std::uint64_t pid,
+                                            std::uint64_t address) {
+    if (pid == 0)
+        return Result<void>(RuntimeErrc::InvalidArgument, "XMemFree requires a process");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    return owner->free_xmem(address);
+}
+
 Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,
                                                                   std::uint64_t raw) const {
     if (pid == 0 || raw == 0)
@@ -1268,6 +1539,24 @@ Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,
           (value->type_id() == TypeId::Mutex && value->as<RtGuestMutex>() != nullptr) ||
           (value->type_id() == TypeId::Semaphore && value->as<RtGuestSemaphore>() != nullptr))) {
         return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a supported synchronization object");
+    }
+    return Result<RefGuard>(std::move(object.value()));
+}
+
+Result<RefGuard> GameRuntimeService::lookup_heap_object(std::uint64_t pid,
+                                                           std::uint64_t raw) const {
+    if (pid == 0 || raw == 0)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null or runtime-global heap handle");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<RefGuard>(RuntimeErrc::NotFound, "heap owner process does not exist");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    auto object = owner->handle_table().lookup(Handle::from_raw(raw));
+    if (!object.ok()) return Result<RefGuard>(object.errc(), object.context());
+    auto* value = object.value().get();
+    if (value == nullptr || value->type_id() != TypeId::MemoryRegion ||
+        value->as<RtHeap>() == nullptr) {
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a heap object");
     }
     return Result<RefGuard>(std::move(object.value()));
 }
@@ -1768,7 +2057,7 @@ void GameRuntimeService::release_process(std::uint64_t process_id) {
     std::vector<std::uint64_t> objects_to_destroy;
     {
         std::lock_guard lock(state_lock_);
-        procs_.erase(process_id);
+        procs_.erase(process_id);  // drops the cached default-heap handle too
         for (auto it = ts_bits_.begin(); it != ts_bits_.end();) {
             if (it->first.first == process_id) it = ts_bits_.erase(it);
             else ++it;
