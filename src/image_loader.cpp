@@ -1565,7 +1565,7 @@ Result<Handle> ImageLoader::load_image(ProcessManager& pm, ObjectManager& mgr,
         // Synthetic TLS index (deterministic per process; documented as a
         // runtime bookkeeping id, NOT an Xbox TLS-slot reproduction).
         diag.tls_index_assigned = true;
-        diag.tls_index = static_cast<std::uint32_t>(space.space_id() & 0xFFFF);
+        diag.tls_index = static_cast<std::uint32_t>(space.space_id() % 64);
         out.exec.tls_present = true;
         // Validated template bytes are retained for per-thread materialization.
     }
