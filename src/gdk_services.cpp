@@ -186,46 +186,6 @@ private:
 };
 
 
-class SetLastErrorImpl : public IApiImplementation {
-public:
-    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.arg_count != 1 || !ctx.set_last_error) {
-            out.note = "SetLastError requires an initialized guest thread environment";
-            return false;
-        }
-        auto stored = ctx.set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
-        if (!stored.ok()) {
-            out.note = stored.error_string();
-            return false;
-        }
-        out.return_value = 0;
-        return true;
-    }
-    std::string describe() const override {
-        return "Win32: SetLastError (per-thread TEB slot)";
-    }
-};
-
-class GetLastErrorImpl : public IApiImplementation {
-public:
-    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.arg_count != 0 || !ctx.get_last_error) {
-            out.note = "GetLastError requires an initialized guest thread environment";
-            return false;
-        }
-        auto value = ctx.get_last_error();
-        if (!value.ok()) {
-            out.note = value.error_string();
-            return false;
-        }
-        out.return_value = value.value();
-        return true;
-    }
-    std::string describe() const override {
-        return "Win32: GetLastError (per-thread TEB slot)";
-    }
-};
-
 class VirtualAllocImpl : public IApiImplementation {
 public:
     explicit VirtualAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -702,13 +662,12 @@ public:
 class SetLastErrorImpl : public IApiImplementation {
 public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (!ctx.set_last_error) {
-            out.error = "SetLastError requires an initialized guest thread environment";
+        if (ctx.arg_count != 1 || !ctx.set_last_error) {
+            out.error = "SetLastError requires one argument and an initialized guest thread environment";
             return false;
         }
         const auto result = ctx.set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
         if (!result.ok()) { out.error = result.error_string(); return false; }
-        out.note = "stored in the calling guest thread's TEB";
         return true;
     }
     std::string describe() const override { return "Win32: SetLastError (guest TEB LastErrorValue)"; }
@@ -717,14 +676,13 @@ public:
 class GetLastErrorImpl : public IApiImplementation {
 public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (!ctx.get_last_error) {
-            out.error = "GetLastError requires an initialized guest thread environment";
+        if (ctx.arg_count != 0 || !ctx.get_last_error) {
+            out.error = "GetLastError requires zero arguments and an initialized guest thread environment";
             return false;
         }
         const auto result = ctx.get_last_error();
         if (!result.ok()) { out.error = result.error_string(); return false; }
         out.return_value = result.value();
-        out.note = "read from the calling guest thread's TEB";
         return true;
     }
     std::string describe() const override { return "Win32: GetLastError (guest TEB LastErrorValue)"; }
