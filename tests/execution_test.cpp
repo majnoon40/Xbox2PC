@@ -2533,6 +2533,12 @@ TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
         ASSERT_TRUE(process.initialize(0x1234).ok());
         exec::GuestThreadEnvironment env(space, process);
         ASSERT_TRUE(env.initialize(0x5678).ok());
+        ASSERT_TRUE(env.set_stack_bounds(0x71000000, 0x70FFF000).ok());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebStackBaseOffset).value(),
+                  0x71000000u);
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebStackLimitOffset).value(),
+                  0x70FFF000u);
+        EXPECT_FALSE(env.set_stack_bounds(0x70FFF000, 0x71000000).ok());
         EXPECT_NE(env.teb_base(), 0u);
         EXPECT_NE(env.peb_base(), 0u);
         EXPECT_NE(env.tls_vector_base(), 0u);
