@@ -2294,6 +2294,30 @@ TEST(TlsExecTest, UnreadableCallbackArrayRejectsWholePlan) {
     (void)w.pm.terminate_process(ph, 0);
 }
 
+TEST(TlsExecTest, NonExecutableCallbackRejectsWholePlan) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-non-executable.exe");
+    auto region = proc->address_space().reserve_region_auto(0x1000,
+                                                            "tls-callback-array");
+    ASSERT_TRUE(region.ok()) << region.error_string();
+    ASSERT_TRUE(proc->address_space().commit_region(region.value()).ok());
+
+    guest::GuestMemory mem(proc->address_space());
+    loader::TlsInfo tls;
+    tls.present = true;
+    tls.callbacks_va = region.value() + 0x100;
+    tls.callback_count = 1;
+    // The array is readable, but the target is not mapped executable memory.
+    ASSERT_TRUE(mem.write_u64(tls.callbacks_va, 0xDEADBEEFull).ok());
+
+    auto cfg = ExecutionConfig::default_validated().value();
+    auto plan = plan_tls_callbacks(mem, tls, cfg);
+    EXPECT_FALSE(plan.ok());
+    EXPECT_EQ(plan.errc(), RuntimeErrc::NotFound);
+    EXPECT_NE(plan.error_string().find("not executable"), std::string::npos);
+    (void)w.pm.terminate_process(ph, 0);
+}
+
 TEST(TlsExecTest, ExcessiveCallbacksRejected) {
     ExecWorld w;
     auto [ph, proc] = w.new_process("tlx.exe");
