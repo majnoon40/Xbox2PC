@@ -1490,6 +1490,46 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
                                 XTaskQueuePort::Work, 0).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueInfiniteDispatchObservesGuestCancellation) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-cancel.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
+    auto created = w.tq->create_queue(
+        owner_pid,
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(created.ok());
+
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> finished{false};
+    xbox2pc::Result<bool> dispatch_result(false);
+    std::thread waiter([&] {
+        entered.store(true, std::memory_order_release);
+        dispatch_result = w.tq->dispatch(
+            owner_pid, created.value(), XTaskQueuePort::Work, 0xFFFFFFFFu, {},
+            [&] { return cancel.load(std::memory_order_acquire); });
+        finished.store(true, std::memory_order_release);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    while (!entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
+        std::this_thread::yield();
+    }
+    ASSERT_TRUE(entered.load(std::memory_order_acquire));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(finished.load(std::memory_order_acquire));
+    cancel.store(true, std::memory_order_release);
+    waiter.join();
+
+    EXPECT_TRUE(finished.load(std::memory_order_acquire));
+    EXPECT_FALSE(dispatch_result.ok());
+    EXPECT_EQ(dispatch_result.errc(), xbox2pc::RuntimeErrc::ThreadTerminated);
+    EXPECT_TRUE(w.tq->close_queue(owner_pid, created.value()).ok());
+}
+
 TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
     ApiWorld w;
     auto* process = w.new_process("task-queue-final-close.exe");
