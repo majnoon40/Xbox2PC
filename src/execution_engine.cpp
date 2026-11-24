@@ -8,6 +8,7 @@
 //   4. plan_for_descriptor (documented-signature-driven plans)
 
 #include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/x86_interpreter.hpp"
 
 #include <algorithm>
@@ -491,7 +492,14 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
     api::ApiContext ctx;
     ctx.process_id = pid;
     ctx.thread_id = tid;
-    ctx.thread_environment = thread_environment;
+    if (thread_environment != nullptr && thread_environment->initialized()) {
+        ctx.set_last_error = [thread_environment](std::uint32_t error) {
+            return thread_environment->set_last_error(error);
+        };
+        ctx.get_last_error = [thread_environment]() {
+            return thread_environment->last_error();
+        };
+    }
     ctx.invoke_guest_callback = invoke_callback;
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&

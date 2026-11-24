@@ -661,11 +661,11 @@ public:
 class SetLastErrorImpl : public IApiImplementation {
 public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.thread_environment == nullptr || !ctx.thread_environment->initialized()) {
+        if (!ctx.set_last_error) {
             out.error = "SetLastError requires an initialized guest thread environment";
             return false;
         }
-        const auto result = ctx.thread_environment->set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
+        const auto result = ctx.set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
         if (!result.ok()) { out.error = result.error_string(); return false; }
         out.note = "stored in the calling guest thread's TEB";
         return true;
@@ -676,11 +676,11 @@ public:
 class GetLastErrorImpl : public IApiImplementation {
 public:
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.thread_environment == nullptr || !ctx.thread_environment->initialized()) {
+        if (!ctx.get_last_error) {
             out.error = "GetLastError requires an initialized guest thread environment";
             return false;
         }
-        const auto result = ctx.thread_environment->last_error();
+        const auto result = ctx.get_last_error();
         if (!result.ok()) { out.error = result.error_string(); return false; }
         out.return_value = result.value();
         out.note = "read from the calling guest thread's TEB";
