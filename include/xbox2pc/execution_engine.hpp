@@ -272,6 +272,47 @@ private:
     GuestThreadEnvironment* thread_environment_ = nullptr;
 };
 
+
+ // ── M11.5.1: explicitly trusted native-host smoke backend ─────────────────
+ //
+ // This first native slice is intentionally narrow: x86-64 Linux, a
+ // position-independent leaf entry, no guest imports, no guest pointers,
+ // no TLS/GS access, and no guest stack arguments. It is NOT a sandbox.
+ // Only use with trusted synthetic code. Fault isolation, full Windows-x64
+ // argument marshalling, GS/TLS setup, and unwind support are later slices.
+enum class NativeExecutionPermission : std::uint8_t {
+    TrustedInProcess
+};
+
+class NativeHostBackend final : public IExecutionEngine {
+public:
+    explicit NativeHostBackend(NativeExecutionPermission permission)
+        : permission_(permission) {}
+
+    const char* engine_kind() const override { return "native-host-smoke"; }
+    const char* engine_description() const override {
+        return "trusted in-process x86-64 leaf-code smoke backend; no isolation";
+    }
+
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space) override;
+
+    ExecutionResult run(const ExecutionRequest& req, cpu::CpuState& io_cpu,
+                        const std::atomic<bool>& interrupted) override;
+
+    bool supports_single_step() const override { return false; }
+    Result<std::uint64_t> single_step(cpu::CpuState&,
+                                      const ExecutionRequest&) override;
+    static bool supported_on_host();
+
+private:
+    NativeExecutionPermission permission_;
+    AddressSpace* space_ = nullptr;
+    std::uint64_t process_id_ = 0;
+    std::uint64_t thread_id_ = 0;
+};
+
 // ── the marshalling bridge ────────────────────────────────────────────────
 
 // Argument marshalling metadata for one imported API: how to extract

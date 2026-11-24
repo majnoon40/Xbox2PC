@@ -2248,6 +2248,39 @@ int main(int argc, char** argv) {
 }
 
 
+
+#if defined(XBOX2PC_NATIVE_LINUX_X64)
+TEST(NativeHostBackendTest, ExecutesTrustedPositionIndependentLeafCode) {
+    AddressSpace space(64 * 4096, 0x70000000, "native-leaf");
+    constexpr std::uint64_t code_va = 0x70000000;
+    ASSERT_TRUE(space.reserve_region(code_va, 4096, "native-code").ok());
+    ASSERT_TRUE(space.commit_region(code_va).ok());
+    auto host = space.translate(code_va);
+    ASSERT_TRUE(host.ok());
+
+    // mov eax, 42 ; ret — no imports, data references, stack arguments,
+    // TLS access, or external control flow.
+    const std::uint8_t code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(code_va, MemProtect::ReadExecute).ok());
+
+    NativeHostBackend engine(NativeExecutionPermission::TrustedInProcess);
+    ASSERT_TRUE(engine.bind_execution_context(7, 11, space).ok());
+    ExecutionRequest request;
+    request.entry_va = code_va;
+    request.completion_va = kCompletionSentinel;
+    cpu::CpuState state;
+    std::atomic<bool> interrupted{false};
+    auto result = engine.run(request, state, interrupted);
+
+    EXPECT_EQ(result.outcome, Outcome::Returned);
+    EXPECT_EQ(result.return_value, 42u);
+    EXPECT_EQ(result.cpu.state.gprs[static_cast<std::size_t>(cpu::Gpr::Rax)], 42u);
+    EXPECT_EQ(result.final_rip, kCompletionSentinel);
+}
+#endif
+
+
 // ── M11.3 guest TEB/PEB and implicit TLS storage ──────────────────────────
 
 TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
