@@ -234,6 +234,11 @@ public:
     }
     Result<void> bind_execution_context(std::uint64_t process_id,
                                         std::uint64_t thread_id,
+                                        AddressSpace& space) override {
+        return bind_execution_context(process_id, thread_id, space, nullptr);
+    }
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
                                         AddressSpace& space,
                                         GuestThreadEnvironment* thread_environment) override {
         if (process_id == 0 || thread_id == 0) {
