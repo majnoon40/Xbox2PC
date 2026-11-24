@@ -1897,6 +1897,47 @@ TEST(ContextTest, ValidationAndLimits) {
     (void)w.pm.terminate_process(ph, 0);
 }
 
+// ── M11 native-host execution slice ───────────────────────────────────────
+
+TEST(NativeExecutionTest, RunsPositionIndependentReturnStubInFaultContainedChild) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if !defined(__linux__) || !defined(__x86_64__)
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#else
+    AddressSpace space(4ull << 20, 0x51000000, "native-return-stub");
+    auto region = space.reserve_region_auto(space.page_size(), "native-code");
+    ASSERT_TRUE(region.ok()) << region.error_string();
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok()) << host.error_string();
+    const std::uint8_t code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+    std::memcpy(host.value(), code, sizeof(code)); // mov eax, 42; ret
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x71, 0x81, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    req.completion_va = kCompletionSentinel;
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    auto result = backend.run(req, cpu, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? result.exception->detail : "no native execution exception");
+    EXPECT_EQ(result.return_value, 42u);
+    EXPECT_EQ(result.cpu.state.reg(cpu::Gpr::Rax), 42u);
+    EXPECT_EQ(result.final_rip, kCompletionSentinel);
+#endif
+}
+
 // ── TLS callbacks ─────────────────────────────────────────────────────────
 
 TEST(TlsExecTest, PlanValidationAndExecution) {

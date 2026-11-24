@@ -272,6 +272,38 @@ private:
     GuestThreadEnvironment* thread_environment_ = nullptr;
 };
 
+// First native-host execution slice. This backend is intentionally narrow:
+// x86-64 Linux, no guest imports/arguments/GS/SEH, and a bounded child-process
+// lifetime. The child process contains host faults; it is NOT a security
+// sandbox and must only be used with trusted, unencumbered test code.
+class NativeExecutionBackend final : public IExecutionEngine {
+public:
+    explicit NativeExecutionBackend(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
+    const char* engine_kind() const override { return "native-host"; }
+    const char* engine_description() const override {
+        return "x86-64 Linux native entry execution in a fault-contained child process "
+               "(no imports, GS/TLS, SEH, or persistent guest writes)";
+    }
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space) override;
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space,
+                                        GuestThreadEnvironment* thread_environment) override;
+    ExecutionResult run(const ExecutionRequest& req, cpu::CpuState& io_cpu,
+                        const std::atomic<bool>& interrupted) override;
+    bool supports_single_step() const override { return false; }
+    Result<std::uint64_t> single_step(cpu::CpuState& io_cpu,
+                                      const ExecutionRequest& req) override;
+private:
+    AddressSpace* space_ = nullptr;
+    std::uint64_t pid_ = 0;
+    std::uint64_t tid_ = 0;
+    std::chrono::milliseconds timeout_;
+};
+
 // ── the marshalling bridge ────────────────────────────────────────────────
 
 // Argument marshalling metadata for one imported API: how to extract
