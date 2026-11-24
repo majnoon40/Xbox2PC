@@ -501,6 +501,10 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
         };
     }
     ctx.invoke_guest_callback = invoke_callback;
+    if (req.control != nullptr) {
+        const auto control = req.control;
+        ctx.cancellation_requested = [control] { return control->is_cancelled(); };
+    }
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&
                             i < api::ApiContext::kMaxArgs;
