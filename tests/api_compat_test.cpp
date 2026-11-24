@@ -152,6 +152,12 @@ TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
 
 TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     ApiRegistry reg;
+    const auto* last_error_set = reg.find("kernel32", "SetLastError");
+    const auto* last_error_get = reg.find("kernel32", "GetLastError");
+    ASSERT_NE(last_error_set, nullptr);
+    ASSERT_NE(last_error_get, nullptr);
+    EXPECT_EQ(last_error_set->impl, ApiStatus::FullyImplemented);
+    EXPECT_EQ(last_error_get->impl, ApiStatus::FullyImplemented);
     const auto* alloc = reg.find("kernel32", "VirtualAlloc");
     const auto* query = reg.find("kernel32", "VirtualQuery");
     const auto* free = reg.find("kernel32", "VirtualFree");
