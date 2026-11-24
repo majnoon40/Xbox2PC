@@ -1964,7 +1964,9 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
                                      out.exec.image_base);
     ASSERT_TRUE(res.ok());
     // Executed + failed == callbacks in the plan (nothing silently lost).
-    EXPECT_EQ(res.value().executed, 2u);
+    ASSERT_EQ(res.value().executed, 2u)
+        << (res.value().first_failure.has_value()
+                ? res.value().first_failure->detail : "no callback failure detail");
     EXPECT_EQ(res.value().failed, 0u);
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph, h.value());
