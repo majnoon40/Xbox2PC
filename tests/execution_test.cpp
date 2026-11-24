@@ -37,6 +37,7 @@
 #include "xbox2pc/gdk_services.hpp"
 #include "xbox2pc/guest_cpu_state.hpp"
 #include "xbox2pc/guest_memory.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/package_vfs.hpp"
 #include "xbox2pc/packages.hpp"
@@ -2169,4 +2170,57 @@ TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+
+// ── M11.3 guest TEB/PEB and implicit TLS storage ──────────────────────────
+
+TEST(GuestThreadEnvironmentTest, InitializesTebPebAndTlsVectorPointers) {
+    AddressSpace space(16ull << 20, 0x30000000, "guest-env-test");
+    guest::GuestMemory mem(space);
+    {
+        exec::GuestThreadEnvironment env(space);
+        ASSERT_TRUE(env.initialize(0x1234, 0x5678).ok());
+        EXPECT_NE(env.teb_base(), 0u);
+        EXPECT_NE(env.peb_base(), 0u);
+        EXPECT_NE(env.tls_vector_base(), 0u);
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebSelfOffset).value(),
+                  env.teb_base());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebTlsVectorOffset).value(),
+                  env.tls_vector_base());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebPebOffset).value(),
+                  env.peb_base());
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebProcessIdOffset).value(),
+                  0x1234u);
+        EXPECT_EQ(mem.read_u64(env.teb_base() + exec::GuestThreadEnvironment::kTebThreadIdOffset).value(),
+                  0x5678u);
+        ASSERT_TRUE(env.set_image_base(0x180000000ull).ok());
+        EXPECT_EQ(mem.read_u64(env.peb_base() + exec::GuestThreadEnvironment::kPebImageBaseOffset).value(),
+                  0x180000000ull);
+    }
+    EXPECT_EQ(space.stats().region_count, 0u);
+}
+
+TEST(GuestThreadEnvironmentTest, InstallsPerThreadTlsTemplateAndZeroFill) {
+    AddressSpace space(16ull << 20, 0x31000000, "guest-tls-test");
+    guest::GuestMemory mem(space);
+    exec::GuestThreadEnvironment env(space);
+    ASSERT_TRUE(env.initialize(1, 2).ok());
+    const std::uint8_t image_template[] = {0x11, 0x22, 0x33, 0x44};
+    auto block = env.install_tls_module(3, image_template, sizeof(image_template), 12);
+    ASSERT_TRUE(block.ok()) << block.error_string();
+    EXPECT_EQ(mem.read_u64(env.tls_vector_base() + 3 * 8).value(), block.value());
+    std::uint8_t contents[16] = {};
+    ASSERT_TRUE(env.read_tls(3, 0, contents, sizeof(contents)).ok());
+    EXPECT_EQ(contents[0], 0x11);
+    EXPECT_EQ(contents[1], 0x22);
+    EXPECT_EQ(contents[2], 0x33);
+    EXPECT_EQ(contents[3], 0x44);
+    for (std::size_t i = 4; i < sizeof(contents); ++i) EXPECT_EQ(contents[i], 0);
+    EXPECT_EQ(env.install_tls_module(3, image_template, sizeof(image_template), 0).errc(),
+              RuntimeErrc::AlreadyExists);
+    EXPECT_EQ(env.install_tls_module(64, image_template, sizeof(image_template), 0).errc(),
+              RuntimeErrc::InvalidArgument);
+    EXPECT_EQ(env.read_tls(3, 15, contents, 2).errc(), RuntimeErrc::InvalidArgument);
+    EXPECT_EQ(env.read_tls(4, 0, contents, 1).errc(), RuntimeErrc::NotFound);
 }
