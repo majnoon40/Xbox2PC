@@ -558,6 +558,47 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
     return Ret(plan);
 }
 
+Result<void> TlsLifecycle::on_image_loaded(std::uint64_t image_base,
+                                             TlsCallbackPlan plan) {
+    if (image_base == 0)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "image base must be nonzero");
+    for (auto& [base, existing] : modules_) {
+        if (base == image_base) {
+            existing = std::move(plan);
+            return Result<void>::ok_result();
+        }
+    }
+    try {
+        modules_.emplace_back(image_base, std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result<void>(RuntimeErrc::OutOfResources,
+                            "unable to record TLS callback plan");
+    }
+    return Result<void>::ok_result();
+}
+
+Result<TlsCallbackResult> TlsLifecycle::run(
+    ExecutionContext& ctx, IExecutionEngine& engine,
+    TlsCallbackReason reason) const {
+    TlsCallbackResult total;
+    if (modules_.empty()) return Result<TlsCallbackResult>(total);
+    const bool reverse = reason == TlsCallbackReason::ProcessDetach ||
+                         reason == TlsCallbackReason::ThreadDetach;
+    for (std::size_t step = 0; step < modules_.size(); ++step) {
+        const auto index = reverse ? modules_.size() - 1 - step : step;
+        const auto& [image_base, plan] = modules_[index];
+        if (plan.callbacks.empty()) continue;
+        auto one = execute_tls_callbacks(ctx, plan, engine, image_base, reason);
+        if (!one.ok()) return one;  // orchestration failure (bad reason etc.)
+        total.executed += one.value().executed;
+        total.failed += one.value().failed;
+        if (!total.first_failure.has_value() && one.value().first_failure.has_value())
+            total.first_failure = one.value().first_failure;
+    }
+    return Result<TlsCallbackResult>(total);
+}
+
 Result<TlsCallbackResult> execute_tls_callbacks(
     ExecutionContext& ctx, const TlsCallbackPlan& plan,
     IExecutionEngine& engine, std::uint64_t image_handle_va,

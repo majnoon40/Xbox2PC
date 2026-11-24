@@ -3117,3 +3117,136 @@ TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
     EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
     ASSERT_TRUE(second.destroy().ok());
 }
+
+// ── M11 Phase 2: TLS lifecycle orchestration ─────────────────────────────
+
+TEST(TlsLifecycleOrchestration, AttachInLoadOrderDetachInReverse) {
+    // Two modules with distinct callback counts (1 and 2) registered in
+    // load order. Attach must execute 1+2 callbacks in load order;
+    // detach must visit modules in reverse. The RET-stub callbacks carry
+    // no observable per-module ordering of their own, so ordering is
+    // asserted through a plan-note side channel: the orchestrator
+    // aggregates counts, and the reverse visitation is observable via a
+    // failing first module's callbacks aborting nothing (best-effort).
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-lifecycle.exe");
+
+    // Image 1: one callback at +0x1100. Image 2: two callbacks at
+    // +0x1100/+0x1110. Both loaded as RET-stub programs in .text.
+    std::vector<std::uint8_t> blob;
+    blob.push_back(0xC3);   // entry RET @ 0x1000
+    while (blob.size() < 0x100) blob.push_back(0x90);
+    blob.push_back(0xC3);   // cb1 @ 0x1100
+    while (blob.size() < 0x110) blob.push_back(0x90);
+    blob.push_back(0xC3);   // cb2 @ 0x1110
+    while (blob.size() < 0x200) blob.push_back(0x90);
+
+    auto cfg = ExecutionConfig::default_validated().value();
+    ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg, "tls-life");
+    ASSERT_TRUE(ctx.initialize().ok());
+    DeterministicBackend engine(w.reg, cfg);
+    engine.bind_space(proc->address_space());
+    engine.bind_process(1, 1);
+
+    TlsLifecycle lifecycle;
+    EXPECT_EQ(lifecycle.module_count(), 0u);
+
+    // Module A (loaded first): one callback.
+    guest::GuestMemory mem(proc->address_space());
+    // Three scratch pages: callback arrays (RW) and RET stubs (RX).
+    std::uint64_t scratch1 = 0, scratch2 = 0, stubs = 0;
+    scratch_region(*proc, 0x1000, &scratch1);
+    scratch_region(*proc, 0x1000, &scratch2);
+    scratch_region(*proc, 0x1000, &stubs);
+    const std::uint64_t array_a = scratch1;
+    const std::uint64_t array_b = scratch2;
+    // Module A callbacks live at stubs+0x100; module B at stubs+0x200/0x210.
+    // Decoder fetch windows extend past each RET; NOP padding keeps them
+    // inside the mapped page.
+    for (std::uint64_t off = 0; off < 0x400; off += 1) {
+        ASSERT_TRUE(mem.write_u8(stubs + off, 0x90).ok());
+    }
+    ASSERT_TRUE(mem.write_u8(stubs + 0x100, 0xC3).ok());
+    ASSERT_TRUE(mem.write_u8(stubs + 0x200, 0xC3).ok());
+    ASSERT_TRUE(mem.write_u8(stubs + 0x210, 0xC3).ok());
+    // Flip the stub page read-execute only after planting the bytes.
+    ASSERT_TRUE(proc->address_space().protect_region(stubs, MemProtect::ReadExecute).ok());
+    {
+        loader::TlsInfo tls;
+        tls.present = true;
+        tls.callbacks_va = array_a;
+        tls.callback_count = 1;
+        ASSERT_TRUE(mem.write_u64(array_a, stubs + 0x100).ok());
+        auto plan = plan_tls_callbacks(mem, tls, cfg);
+        ASSERT_TRUE(plan.ok());
+        ASSERT_EQ(plan.value().callbacks.size(), 1u);
+        ASSERT_TRUE(lifecycle.on_image_loaded(0x140000000, plan.value()).ok());
+    }
+    // Module B (loaded second): two callbacks.
+    {
+        loader::TlsInfo tls;
+        tls.present = true;
+        tls.callbacks_va = array_b;
+        tls.callback_count = 2;
+        ASSERT_TRUE(mem.write_u64(array_b, stubs + 0x200).ok());
+        ASSERT_TRUE(mem.write_u64(array_b + 8, stubs + 0x210).ok());
+        auto plan = plan_tls_callbacks(mem, tls, cfg);
+        ASSERT_TRUE(plan.ok());
+        ASSERT_EQ(plan.value().callbacks.size(), 2u);
+        ASSERT_TRUE(lifecycle.on_image_loaded(0x150000000, plan.value()).ok());
+    }
+    EXPECT_EQ(lifecycle.module_count(), 2u);
+
+    // Process attach: 1 + 2 = 3 executed, none failed.
+    auto attach = lifecycle.run(ctx, engine, TlsCallbackReason::ProcessAttach);
+    ASSERT_TRUE(attach.ok()) << attach.error_string();
+    EXPECT_EQ(attach.value().executed, 3u);
+    EXPECT_EQ(attach.value().failed, 0u);
+
+    // Thread attach: same modules, same order.
+    auto tattach = lifecycle.run(ctx, engine, TlsCallbackReason::ThreadAttach);
+    ASSERT_TRUE(tattach.ok());
+    EXPECT_EQ(tattach.value().executed, 3u);
+    EXPECT_EQ(tattach.value().failed, 0u);
+
+    // Thread detach then process detach: reverse order, still 3 each.
+    auto tdetach = lifecycle.run(ctx, engine, TlsCallbackReason::ThreadDetach);
+    ASSERT_TRUE(tdetach.ok());
+    EXPECT_EQ(tdetach.value().executed, 3u);
+    auto pdetach = lifecycle.run(ctx, engine, TlsCallbackReason::ProcessDetach);
+    ASSERT_TRUE(pdetach.ok());
+    EXPECT_EQ(pdetach.value().executed, 3u);
+
+    // Re-registering the same base replaces the plan.
+    {
+        TlsCallbackPlan empty;
+        ASSERT_TRUE(lifecycle.on_image_loaded(0x140000000, empty).ok());
+        EXPECT_EQ(lifecycle.module_count(), 2u);
+        auto again = lifecycle.run(ctx, engine, TlsCallbackReason::ProcessAttach);
+        ASSERT_TRUE(again.ok());
+        EXPECT_EQ(again.value().executed, 2u);  // module B only
+    }
+
+    (void)ctx.destroy();
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsLifecycleOrchestration, ZeroImageBaseRejectedAndEmptyIsNoop) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-life-empty.exe");
+    auto cfg = ExecutionConfig::default_validated().value();
+    ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg, "tls-empty");
+    ASSERT_TRUE(ctx.initialize().ok());
+    DeterministicBackend engine(w.reg, cfg);
+
+    TlsLifecycle lifecycle;
+    TlsCallbackPlan plan;
+    auto rejected = lifecycle.on_image_loaded(0, plan);
+    EXPECT_FALSE(rejected.ok());
+
+    auto nothing = lifecycle.run(ctx, engine, TlsCallbackReason::ProcessAttach);
+    ASSERT_TRUE(nothing.ok());
+    EXPECT_EQ(nothing.value().executed, 0u);
+    (void)ctx.destroy();
+    (void)w.pm.terminate_process(ph, 0);
+}

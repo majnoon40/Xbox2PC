@@ -224,6 +224,36 @@ Result<TlsCallbackResult> execute_tls_callbacks(
     IExecutionEngine& engine, std::uint64_t image_handle_va,
     TlsCallbackReason reason = TlsCallbackReason::ProcessAttach);
 
+// ── TLS lifecycle orchestration (M11 Phase 2) ─────────────────────────────
+// Drives per-module TLS callback plans from process/thread lifecycle
+// points instead of the manual helper. Modules register plans in load
+// order; attach reasons run in load order, detach reasons in reverse
+// (LIFO), matching the documented loader semantics.
+
+class TlsLifecycle {
+public:
+    // Register a module's callback plan. Image bases uniquely identify
+    // modules; registering the same base twice replaces the plan (the
+    // loader re-loads the same image only after unload, whose detach
+    // already ran).
+    Result<void> on_image_loaded(std::uint64_t image_base,
+                                 TlsCallbackPlan plan);
+
+    // Run every registered module's callbacks for the given reason.
+    // Attach reasons iterate in load order; detach reasons in reverse.
+    // A failing callback does not abort the walk: results aggregate
+    // executed/failed counts and retain the first failure.
+    Result<TlsCallbackResult> run(ExecutionContext& ctx,
+                                  IExecutionEngine& engine,
+                                  TlsCallbackReason reason) const;
+
+    std::size_t module_count() const { return modules_.size(); }
+
+private:
+    // Ordered by registration (load order).
+    std::vector<std::pair<std::uint64_t, TlsCallbackPlan>> modules_;
+};
+
 // ── limits registry (runtime-wide, thread-safe) ─────────────────────────
 
 // Counts live contexts against the config cap (advisory; creation
