@@ -504,11 +504,11 @@ struct TlsInfo {
     std::uint64_t raw_data_end_rva = 0;
     std::uint64_t template_size = 0;   // end - start (file-backed template)
     std::uint64_t template_rva = 0;
-    std::uint32_t index_slot_rva = 0;  // StartAddressOfRawData in PE32+ is
-                                       // a VA; see decode notes (docs).
+    std::uint32_t index_slot_rva = 0;  // AddressOfIndex RVA
     std::uint64_t callbacks_va = 0;
     std::uint32_t callback_count = 0;
     std::uint32_t zero_fill_size = 0;  // SizeOfZeroFill
+    std::vector<std::uint8_t> template_bytes; // validated initialized-data bytes
 };
 
 // Decode + validate the TLS directory (PE32+ layout). Reports callbacks
