@@ -203,6 +203,27 @@ claims compatibility from recognition — coverage is reported as
 coverage, and the CLI prints the explicit note
 "import coverage is NOT game compatibility".
 
+## M11 platform-surface compatibility
+
+The per-import report above describes individual PE imports. M11 also
+tracks the broader Xbox platform boundary independently, so an implemented
+import must not be mistaken for a complete subsystem.
+
+| Platform area | M11 status | Evidence / boundary |
+|---|---|---|
+| Runtime and process | Partial | PE loading, process/thread managers, minimal TEB/PEB and per-thread TLS storage exist; automatic TLS attach/detach lifecycle and native guest execution remain incomplete. |
+| Memory and xmem | Partial | Process-owned xmem allocator and a subset of virtual-memory APIs exist; full Win32 allocation/protection/query semantics and complete Xbox allocator compatibility are not claimed. |
+| Synchronization and task queues | Partial | Supported event/mutex/semaphore waits and bounded manual task queues exist; unsupported queue modes, scheduler behavior, and broader lock-order proof remain open. |
+| Graphics | Stubbed / roadmap only | No production graphics provider is claimed. The null-provider contract and future graphics direction are documented in `docs/graphics-roadmap.md`. |
+| Audio | Unsupported | No audio provider or guest audio execution path is implemented. |
+| Storage | Unsupported | No Xbox storage provider or title save-data compatibility is implemented. |
+| Networking | Unsupported | No Xbox networking provider, service emulation, or online compatibility is implemented. |
+
+These are subsystem-level statuses, not a compatibility promise. Any API
+outside the implemented subset must remain explicitly Stubbed, Partially
+Implemented, or Unsupported in its import row. The report must not infer a
+platform feature from a recognized symbol alone.
+
 ## CLI
 
 ```
