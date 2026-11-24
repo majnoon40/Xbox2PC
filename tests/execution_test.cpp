@@ -2106,6 +2106,51 @@ TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
 #endif
 }
 
+TEST(NativeExecutionTest, RejectsGuestStackRequests) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x55000000, "native-guest-stack-contract");
+    auto region = space.reserve_region_auto(space.page_size(), "native-code");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    const std::uint8_t code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x75, 0x85, space).ok());
+    auto expect_rejected = [&](std::uint64_t stack_top, std::uint64_t stack_size) {
+        ExecutionRequest req;
+        req.entry_va = region.value();
+        req.completion_va = kCompletionSentinel;
+        req.stack_top_va = stack_top;
+        req.stack_size = stack_size;
+        cpu::CpuState cpu;
+        cpu.reset();
+        std::atomic<bool> interrupted{false};
+        const auto result = backend.run(req, cpu, interrupted);
+        EXPECT_EQ(result.outcome, Outcome::Faulted);
+        ASSERT_TRUE(result.exception.has_value());
+        EXPECT_EQ(result.exception->fault, GuestFault::UnsupportedInstruction);
+        EXPECT_NE(result.exception->detail.find("guest stack"), std::string::npos);
+    };
+    expect_rejected(0x55002000, 0);
+    expect_rejected(0, 0x1000);
+    expect_rejected(0x55002000, 0x1000);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
 // ── TLS callbacks ─────────────────────────────────────────────────────────
 
 TEST(TlsExecTest, PlanValidationAndExecution) {

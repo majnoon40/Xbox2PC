@@ -80,6 +80,11 @@ ExecutionResult NativeExecutionBackend::run(
         req.control != nullptr)
         return fail(GuestFault::UnsupportedInstruction,
                     "native slice does not yet support imports or cooperative execution control");
+    // This backend executes on a host-owned child stack. Guest stack state
+    // must not be silently ignored or mistaken for an installed guest stack.
+    if (req.stack_top_va != 0 || req.stack_size != 0)
+        return fail(GuestFault::UnsupportedInstruction,
+                    "native slice does not install a guest stack");
     if (interrupted.load(std::memory_order_acquire)) {
         result.outcome = Outcome::Interrupted;
         return result;
