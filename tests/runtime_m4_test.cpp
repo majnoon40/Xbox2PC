@@ -113,6 +113,9 @@ TEST(MemoryTest, GuestXMemAllocatorReturnsGuestAddressesAndTracksAllocations) {
     ASSERT_TRUE(heap.free(second.value()).ok());
     EXPECT_EQ(heap.stats().used_bytes, 0u);
     EXPECT_EQ(heap.stats().allocation_count, 0u);
+    const auto arena = heap.arena_base();
+    allocator.value().reset();
+    EXPECT_FALSE(space.find_region(arena).ok());
 }
 
 TEST(MemoryTest, GuestXMemAllocatorEnforcesBoundsAndRejectsBadRequests) {

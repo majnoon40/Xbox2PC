@@ -26,14 +26,3 @@ register a typed close path before they can be closed through the generic API.
 
 Automatic/thread-pool dispatch, delayed callbacks, and scheduler-aware
 cancellation remain unsupported.
-
-
-## M11.4.3 — Guest virtual-address allocator seam
-
-`GuestXMemAllocator` implements an internal `IXMemAllocator` contract over a
-single committed process `AddressSpace` arena. It uses the existing aligned
-first-fit `MemoryAllocator` for suballocation, returns guest virtual addresses
-(not host pointers), validates exact-base frees/queries, optionally zeroes new
-allocations, and exposes usage/peak statistics. This is an architectural seam
-for later XMem API adapters; it does not claim undocumented Xbox XMem flags,
-heap policies, or ABI behavior.
