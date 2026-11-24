@@ -1938,6 +1938,50 @@ TEST(NativeExecutionTest, RunsPositionIndependentReturnStubInFaultContainedChild
 #endif
 }
 
+TEST(NativeExecutionTest, PassesIntegerArgumentsInMicrosoftX64Registers) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x54000000, "native-integer-args");
+    auto region = space.reserve_region_auto(space.page_size(), "native-args-code");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    // mov eax, ecx ; add eax, edx ; ret
+    const std::uint8_t code[] = {0x89, 0xC8, 0x01, 0xD0, 0xC3};
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x74, 0x84, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    req.completion_va = kCompletionSentinel;
+    req.entry_spec.args = {{abi::ArgKind::Int}, {abi::ArgKind::Int}};
+    req.entry_spec.ret = abi::CallSpec::ReturnKind::Int;
+    req.entry_args = {{abi::ArgKind::Int, 19}, {abi::ArgKind::Int, 23}};
+    cpu::CpuState cpu;
+    cpu.reset();
+    cpu.set_reg(cpu::Gpr::Rcx, 19);
+    cpu.set_reg(cpu::Gpr::Rdx, 23);
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? result.exception->detail : "no native execution exception");
+    EXPECT_EQ(result.return_value, 42u);
+    EXPECT_EQ(result.cpu.state.reg(cpu::Gpr::Rax), 42u);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
 TEST(NativeExecutionTest, CapturesInvalidInstructionWithoutCrashingParent) {
 #if defined(__SANITIZE_THREAD__)
     GTEST_SKIP() << "forked native execution is not exercised under TSan";

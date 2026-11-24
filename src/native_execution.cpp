@@ -1,5 +1,6 @@
 // native_execution.cpp — narrow x86-64 Linux native-host execution path.
 #include "xbox2pc/execution_engine.hpp"
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <string>
@@ -56,10 +57,29 @@ ExecutionResult NativeExecutionBackend::run(
         return fail(GuestFault::InvalidState, "native execution context is not bound");
     if (req.entry_va == 0)
         return fail(GuestFault::InvalidState, "native entry VA is null");
-    if (!req.entry_args.empty() || !req.api_bindings.empty() ||
-        !req.api_binding_values.empty() || req.control != nullptr)
+    if (req.entry_args.size() > 4 ||
+        req.entry_args.size() != req.entry_spec.args.size() ||
+        req.entry_spec.varargs ||
+        (req.entry_spec.ret != abi::CallSpec::ReturnKind::Void &&
+         req.entry_spec.ret != abi::CallSpec::ReturnKind::Int))
         return fail(GuestFault::UnsupportedInstruction,
-                    "native slice accepts no entry arguments, imports, or cooperative control");
+                    "native slice accepts at most four integer-like register arguments and integer/void returns");
+    for (std::size_t i = 0; i < req.entry_args.size(); ++i) {
+        const auto kind = req.entry_spec.args[i].kind;
+        if (kind != req.entry_args[i].kind ||
+            (kind != abi::ArgKind::Int && kind != abi::ArgKind::Struct) ||
+            (kind == abi::ArgKind::Struct &&
+             req.entry_spec.args[i].struct_size != 1 &&
+             req.entry_spec.args[i].struct_size != 2 &&
+             req.entry_spec.args[i].struct_size != 4 &&
+             req.entry_spec.args[i].struct_size != 8))
+            return fail(GuestFault::UnsupportedInstruction,
+                        "native slice rejects pointer, floating-point, and unsupported aggregate arguments");
+    }
+    if (!req.api_bindings.empty() || !req.api_binding_values.empty() ||
+        req.control != nullptr)
+        return fail(GuestFault::UnsupportedInstruction,
+                    "native slice does not yet support imports or cooperative execution control");
     if (interrupted.load(std::memory_order_acquire)) {
         result.outcome = Outcome::Interrupted;
         return result;
@@ -85,9 +105,16 @@ ExecutionResult NativeExecutionBackend::run(
     }
     if (child == 0) {
         ::close(pipe_fds[0]);
-        using GuestEntry = std::uint64_t (__attribute__((ms_abi)) *)(void);
+        using GuestEntry = std::uint64_t (__attribute__((ms_abi)) *)(
+            std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
         const auto entry = reinterpret_cast<GuestEntry>(host_entry.value());
-        const std::uint64_t value = entry();
+        const std::array<cpu::Gpr, 4> argument_registers = {
+            cpu::Gpr::Rcx, cpu::Gpr::Rdx, cpu::Gpr::R8, cpu::Gpr::R9};
+        std::array<std::uint64_t, 4> arguments{};
+        for (std::size_t i = 0; i < req.entry_args.size(); ++i)
+            arguments[i] = io_cpu.reg(argument_registers[i]);
+        const std::uint64_t value = entry(
+            arguments[0], arguments[1], arguments[2], arguments[3]);
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
         std::size_t written = 0;
         while (written < sizeof(value)) {
@@ -161,10 +188,10 @@ ExecutionResult NativeExecutionBackend::run(
     ::close(pipe_fds[0]);
     if (received != sizeof(return_value))
         return fail(GuestFault::Internal, "native guest child returned no complete RAX result");
-    io_cpu.set_reg(cpu::Gpr::Rax, return_value);
+    io_cpu.set_reg(cpu::Gpr::Rax, req.entry_spec.ret == abi::CallSpec::ReturnKind::Void ? 0 : return_value);
     io_cpu.rip = req.completion_va != 0 ? req.completion_va : req.entry_va;
     result.outcome = Outcome::Returned;
-    result.return_value = return_value;
+    result.return_value = req.entry_spec.ret == abi::CallSpec::ReturnKind::Void ? 0 : return_value;
     result.final_rip = io_cpu.rip;
     result.cpu.state = io_cpu;
     result.instructions_executed = 0;
