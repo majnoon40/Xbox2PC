@@ -198,6 +198,70 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         auto v = validate_entry_point(exec, space_);
         if (!v.ok()) return Ret(v.errc(), v.context());
     }
+    // Materialize the PE TLS block for this thread. The module index remains
+    // caller-supplied until the process-wide module registry is implemented.
+    const auto& image_diag = image.diagnostics();
+    if (image_diag.has_tls) {
+        if (tls_index >= GuestThreadEnvironment::kTlsSlotCount ||
+            image_diag.tls_template_bytes.size() != image_diag.tls_template_size ||
+            image_diag.tls_template_size > loader::kMaxTlsTemplate ||
+            image_diag.tls_zero_fill_size > loader::kMaxTlsTemplate ||
+            image_diag.tls_template_size >
+                loader::kMaxTlsTemplate - image_diag.tls_zero_fill_size) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "invalid PE TLS index or template metadata");
+        }
+        if (!guest_environment_ || !guest_environment_->initialized()) {
+            return Ret(RuntimeErrc::InvalidState,
+                       "guest TEB/TLS environment is not initialized");
+        }
+        const std::uint64_t slot_va = guest_environment_->tls_vector_base() +
+            static_cast<std::uint64_t>(tls_index) * sizeof(std::uint64_t);
+        auto current = mem_.read_u64(slot_va);
+        if (!current.ok()) return Ret(current.errc(), current.context());
+        if (current.value() == 0) {
+            auto installed = guest_environment_->install_tls_module(
+                tls_index, image_diag.tls_template_bytes.data(),
+                image_diag.tls_template_bytes.size(),
+                image_diag.tls_zero_fill_size);
+            if (!installed.ok()) return Ret(installed.errc(), installed.context());
+        }
+        if (image_diag.tls_index_slot_rva != 0) {
+            if (image_diag.tls_index_slot_rva > exec.image_size ||
+                exec.image_size - image_diag.tls_index_slot_rva < sizeof(std::uint32_t)) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS AddressOfIndex RVA is outside the image");
+            }
+            const std::uint64_t index_va = exec.image_base + image_diag.tls_index_slot_rva;
+            const loader::SectionLayout* owner = nullptr;
+            for (const auto& section : image.layout().sections) {
+                if (index_va >= section.mapped_base) {
+                    const auto offset = index_va - section.mapped_base;
+                    if (offset <= section.mapped_size &&
+                        sizeof(std::uint32_t) <= section.mapped_size - offset) {
+                        owner = &section;
+                        break;
+                    }
+                }
+            }
+            if (owner == nullptr) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS AddressOfIndex is not in a mapped section");
+            }
+            const bool was_writable = owner->protection == MemProtect::ReadWrite ||
+                                      owner->protection == MemProtect::Full;
+            if (!was_writable) {
+                auto changed = space_.protect_region(owner->mapped_base, MemProtect::ReadWrite);
+                if (!changed.ok()) return Ret(changed.errc(), changed.context());
+            }
+            auto written = mem_.write_u32(index_va, tls_index);
+            if (!was_writable) {
+                auto restored = space_.protect_region(owner->mapped_base, owner->protection);
+                if (!restored.ok()) return Ret(restored.errc(), restored.context());
+            }
+            if (!written.ok()) return Ret(written.errc(), written.context());
+        }
+    }
     // Reset CPU per preparation; stack discipline [MS-X64STACK].
     // The ENTRY call's return address is the COMPLETION SENTINEL: the
     // engine's RET on the sentinel completes the run (documented
@@ -219,8 +283,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     auto prep = abi::prepare_call(cpu_, exec.entry_va, spec, args, writer);
     if (!prep.ok()) return Ret(prep.errc(), prep.context());
     cpu_.rip = exec.entry_va;   // execution starts at the entry point
-    // (tls_index association is recorded; the M7 TLS state rides the
-    // process's threads, not this context.)
+    // TLS storage is materialized per thread when the image declares TLS.
     ExecutionRequest req;
     req.entry_va = exec.entry_va;
     req.stack_top_va = info_.stack_top;

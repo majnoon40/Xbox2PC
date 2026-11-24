@@ -40,8 +40,11 @@ vector slot. Index 0 is valid for this module-vector model.
   entry thunks. It does not change the host thread's GS base.
 - The deterministic interpreter does not yet implement GS-relative memory
   operands.
-- The loader does not yet pass PE TLS template bytes, zero-fill size, or the
-  image's AddressOfIndex field into this API. TLS callback execution and
-  compiler-generated TLS reads are not claimed to work end to end.
+- The loader retains validated PE TLS template bytes, zero-fill size, and
+  the AddressOfIndex RVA. prepare_entry copies the template into a per-thread
+  TLS block and writes the caller-supplied module index into the image slot.
+  A process-wide module-index allocator is not implemented yet.
+- TLS callback execution and compiler-generated TLS reads are not claimed to
+  work end to end; native GS setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full
   Windows TLS allocation model.

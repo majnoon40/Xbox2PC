@@ -260,6 +260,9 @@ struct LoadDiagnostics {
     bool tls_index_assigned = false;       // synthetic index allocation
     std::uint32_t tls_index = 0;
     std::uint64_t tls_template_size = 0;
+    std::uint32_t tls_index_slot_rva = 0;
+    std::uint32_t tls_zero_fill_size = 0;
+    std::vector<std::uint8_t> tls_template_bytes;
     bool has_tls = false;
 
     // Capabilities the image requested but this runtime cannot express
