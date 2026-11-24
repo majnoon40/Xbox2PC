@@ -154,7 +154,9 @@ AccessRights HandleTable::rights_of(Handle h) const {
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return AccessRights::None;
     const Slot& s = slots_[h.index()];
-    if (!s.in_use || s.generation != h.generation()) return AccessRights::None;
+    if (!s.in_use || s.generation != h.generation() || s.type != h.type()) {
+        return AccessRights::None;
+    }
     return static_cast<AccessRights>(s.rights);
 }
 
@@ -163,7 +165,8 @@ bool HandleTable::inheritable(Handle h) const {
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return false;
     const Slot& s = slots_[h.index()];
-    return s.in_use && s.generation == h.generation() && s.inheritable;
+    return s.in_use && s.generation == h.generation() && s.type == h.type() &&
+           s.inheritable;
 }
 
 Result<void> HandleTable::close(Handle h) {
@@ -187,6 +190,9 @@ Result<void> HandleTable::close(Handle h) {
                             "generation " + std::to_string(h.generation()) +
                                 " != current " + std::to_string(s.generation));
     }
+    if (s.type != h.type()) {
+        return Result<void>(RuntimeErrc::InvalidHandle, "type field mismatch");
+    }
     // Rights check: Close is required to retire a handle.
     if (!has_right(static_cast<AccessRights>(s.rights), AccessRights::Close)) {
         return Result<void>(RuntimeErrc::InvalidArgument,
@@ -205,13 +211,37 @@ Result<void> HandleTable::close(Handle h) {
 
 Result<Handle> HandleTable::duplicate(Handle h, AccessRights reduced,
                                        bool inheritable_flag) {
-    // Resolve first (validates table id + generation + type).
-    auto found = lookup(h);
-    if (!found.ok()) {
-        return Result<Handle>(found.errc(), found.context());
+    if (h.is_null()) {
+        return Result<Handle>(RuntimeErrc::InvalidHandle, "null handle");
+    }
+    if (h.table_id() != table_id_) {
+        return Result<Handle>(RuntimeErrc::InvalidHandle,
+                              "handle belongs to another table");
+    }
+    std::uint64_t obj_id = 0;
+    AccessRights src_rights = AccessRights::None;
+    {
+        std::shared_lock lock(lock_);
+        if (h.index() >= slots_.size()) {
+            return Result<Handle>(RuntimeErrc::InvalidHandle,
+                                  "slot index out of range");
+        }
+        const Slot& s = slots_[h.index()];
+        if (!s.in_use) {
+            return Result<Handle>(RuntimeErrc::HandleStale, "slot freed");
+        }
+        if (s.generation != h.generation()) {
+            return Result<Handle>(RuntimeErrc::HandleStale,
+                                  "generation " + std::to_string(h.generation()) +
+                                      " != current " + std::to_string(s.generation));
+        }
+        if (s.type != h.type()) {
+            return Result<Handle>(RuntimeErrc::InvalidHandle, "type field mismatch");
+        }
+        obj_id = s.object_id;
+        src_rights = static_cast<AccessRights>(s.rights);
     }
     // Duplicate right required on the SOURCE handle.
-    const AccessRights src_rights = rights_of(h);
     if (!has_right(src_rights, AccessRights::Duplicate)) {
         return Result<Handle>(RuntimeErrc::InvalidArgument,
                               "handle lacks the duplicate right");
@@ -224,6 +254,14 @@ Result<Handle> HandleTable::duplicate(Handle h, AccessRights reduced,
                                   std::string(access_rights_to_name(reduced)) +
                                   " from " +
                                   std::string(access_rights_to_name(src_rights)) + ")");
+    }
+    if (owner_ == nullptr) {
+        return Result<Handle>(RuntimeErrc::NotInitialized,
+                              "handle table has no object manager installed");
+    }
+    auto found = owner_->resolve_id(obj_id);
+    if (!found.ok()) {
+        return Result<Handle>(found.errc(), found.context());
     }
     RefGuard& g = found.value();
     if (g.get() == nullptr) {

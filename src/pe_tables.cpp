@@ -279,23 +279,32 @@ void parse_exports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
         }
     }
 
-    // Resolve the unified view.
+    // Resolve the unified view in O(N + M) time. Pre-index the first valid
+    // name-table entry for each function index to avoid an O(N * M) scan on
+    // crafted PE files with large export tables. The ordinal table may be
+    // EMPTY while n_n > 0 (e.g. a mutated PE with NumberOfNames > 0 but a
+    // null AddressOfNames/AddressOfNameOrdinals): bound the scan by the
+    // parsed table size, not by the directory count, so hostile headers
+    // cannot index an empty vector.
+    constexpr std::uint32_t kNoName = ~0u;
+    std::vector<std::uint32_t> name_for_func(et.function_rvas.size(), kNoName);
+    const std::uint32_t n_ord = std::min<std::uint32_t>(
+        n_n, static_cast<std::uint32_t>(et.name_ordinal_table.size()));
+    for (std::uint32_t j = 0; j < n_ord; ++j) {
+        const std::uint16_t func_idx = et.name_ordinal_table[j];
+        if (func_idx < name_for_func.size() && name_for_func[func_idx] == kNoName) {
+            name_for_func[func_idx] = j;
+        }
+    }
     et.functions.reserve(et.function_rvas.size());
-    std::vector<bool> name_used(n_n, false);
     for (std::uint32_t i = 0; i < et.function_rvas.size(); ++i) {
         ExportedFunction f;
         f.rva = et.function_rvas[i];
         f.ordinal = et.ordinal_base + i;  // may overflow-wrap on hostile input; harmless label
-        // Find a name whose ordinal table entry points at this index.
-        for (std::uint32_t j = 0; j < n_n; ++j) {
-            if (name_used[j]) continue;
-            if (et.name_ordinal_table[j] == i) {
-                const auto s_off = rva_to_offset(img, et.name_rvas[j]);
-                if (s_off.has_value()) {
-                    f.name = rd.cstr(*s_off, 512);
-                    name_used[j] = true;
-                }
-                break;
+        if (name_for_func[i] != kNoName) {
+            const auto s_off = rva_to_offset(img, et.name_rvas[name_for_func[i]]);
+            if (s_off.has_value()) {
+                f.name = rd.cstr(*s_off, 512);
             }
         }
         // Forwarder detection: function RVA points inside the export dir itself.

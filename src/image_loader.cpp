@@ -891,8 +891,20 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
     }
 
     // Relocation writes need page RW; sections were protected final in
-    // map_image. Flip each affected section to RW, apply, restore.
+    // map_image. Flip each affected section to RW once and guarantee restore
+    // even if a later relocation fails.
     std::vector<std::pair<std::uint64_t, MemProtect>> flipped;
+    struct RestoreOnExit {
+        AddressSpace& space;
+        std::vector<std::pair<std::uint64_t, MemProtect>>& regions;
+        bool active = true;
+        ~RestoreOnExit() {
+            if (!active) return;
+            for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+                (void)space.protect_region(it->first, it->second);
+            }
+        }
+    } restore_on_error{space, flipped};
     std::uint64_t applied = 0;
     for (const auto& blk : blocks.value()) {
         for (const auto& e : blk.entries) {
@@ -933,10 +945,15 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
                 host->protection == MemProtect::ReadWrite ||
                 host->protection == MemProtect::Full;
             if (!writable_now) {
-                auto pr = space.protect_region(host->mapped_base,
-                                               MemProtect::ReadWrite);
-                if (!pr.ok()) return Ret(pr.errc(), pr.context());
-                flipped.emplace_back(host->mapped_base, host->protection);
+                const auto already = std::find_if(
+                    flipped.begin(), flipped.end(),
+                    [&](const auto& x) { return x.first == host->mapped_base; });
+                if (already == flipped.end()) {
+                    auto pr = space.protect_region(host->mapped_base,
+                                                   MemProtect::ReadWrite);
+                    if (!pr.ok()) return Ret(pr.errc(), pr.context());
+                    flipped.emplace_back(host->mapped_base, host->protection);
+                }
             }
             std::string err;
             if (!apply_dir64(space, target_va, layout.delta,
@@ -947,6 +964,7 @@ Result<std::uint64_t> ImageLoader::apply_relocations(
         }
     }
     // Restore flipped protections (reverse order).
+    restore_on_error.active = false;
     for (auto it = flipped.rbegin(); it != flipped.rend(); ++it) {
         auto pr = space.protect_region(it->first, it->second);
         if (!pr.ok()) return Ret(pr.errc(), pr.context());

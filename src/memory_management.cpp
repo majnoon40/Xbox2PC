@@ -735,6 +735,10 @@ Result<void> AddressSpace::validate_access(std::uint64_t xbox_va, bool write,
         return Result<void>(RuntimeErrc::InvalidState,
                             "access to non-committed region");
     }
+    if (r.protection == MemProtect::NoAccess) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "access to no-access region (no_access)");
+    }
     const bool may_write = r.protection == MemProtect::ReadWrite ||
                            r.protection == MemProtect::Full;
     const bool may_exec = r.protection == MemProtect::ReadExecute ||

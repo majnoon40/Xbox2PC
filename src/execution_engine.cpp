@@ -366,7 +366,7 @@ ExecutionResult DeterministicBackend::run(
         // non-executable target, so the ENGINE handles the entry-return
         // contract itself: peek [RSP]; if it equals the completion VA,
         // execute the RET semantics (pop + optional imm16) and complete.
-        if (req.completion_va != 0) {
+        if (req.completion_va != 0 && mem.validate_exec(io_cpu.rip).ok()) {
             auto opcode_b = mem.read_u8(io_cpu.rip);
             if (opcode_b.ok() &&
                 (opcode_b.value() == 0xC3 || opcode_b.value() == 0xC2)) {
@@ -375,13 +375,17 @@ ExecutionResult DeterministicBackend::run(
                 auto target = mem.read_u64(sp0);
                 std::uint64_t extra = 0;
                 if (opcode_b.value() == 0xC2) {
-                    auto imm_lo = mem.read_u8(io_cpu.rip + 1);
-                    auto imm_hi = mem.read_u8(io_cpu.rip + 2);
-                    if (!imm_lo.ok() || !imm_hi.ok()) {
-                        extra = ~0ull;  // incomplete RET imm16 must not complete
+                    if (!mem.validate(io_cpu.rip, 3, false, true).ok()) {
+                        extra = ~0ull;  // non-executable RET imm16 must fault in interpreter
                     } else {
-                        extra = static_cast<std::uint64_t>(imm_lo.value()) |
-                                (static_cast<std::uint64_t>(imm_hi.value()) << 8);
+                        auto imm_lo = mem.read_u8(io_cpu.rip + 1);
+                        auto imm_hi = mem.read_u8(io_cpu.rip + 2);
+                        if (!imm_lo.ok() || !imm_hi.ok()) {
+                            extra = ~0ull;  // incomplete RET imm16 must not complete
+                        } else {
+                            extra = static_cast<std::uint64_t>(imm_lo.value()) |
+                                    (static_cast<std::uint64_t>(imm_hi.value()) << 8);
+                        }
                     }
                 }
                 if (target.ok() && target.value() == req.completion_va &&
