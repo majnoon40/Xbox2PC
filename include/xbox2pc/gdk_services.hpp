@@ -130,6 +130,11 @@ public:
     Result<void> heap_free(std::uint64_t process_id, std::uint64_t heap_handle,
                            std::uint64_t address);
     Result<void> heap_destroy(std::uint64_t process_id, std::uint64_t heap_handle);
+    Result<std::uint64_t> heap_realloc(std::uint64_t process_id, std::uint64_t heap_handle,
+                                       std::uint64_t address, std::uint64_t new_size,
+                                       bool zero_tail);
+    Result<std::uint64_t> heap_size(std::uint64_t process_id, std::uint64_t heap_handle,
+                                    std::uint64_t address);
     Result<std::uint64_t> xmem_alloc(std::uint64_t process_id, std::uint64_t size,
                                      std::uint64_t alignment);
     Result<void> xmem_free(std::uint64_t process_id, std::uint64_t address);

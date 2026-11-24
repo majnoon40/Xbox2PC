@@ -203,6 +203,43 @@ private:
     std::uint32_t options_;
 };
 
+class HeapReAllocImpl : public IApiImplementation {
+public:
+    explicit HeapReAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4) return false;
+        constexpr std::uint32_t kZero = 0x8u;       // HEAP_ZERO_MEMORY
+        constexpr std::uint32_t kExceptions = 0x4u;  // HEAP_GENERATE_EXCEPTIONS
+        constexpr std::uint32_t kInPlace = 0x10u;    // HEAP_REALLOC_IN_PLACE_ONLY
+        const auto flags = static_cast<std::uint32_t>(ctx.args[1]);
+        if ((flags & ~(kZero | kExceptions | kInPlace)) != 0 ||
+            (flags & kExceptions) != 0 || (flags & kInPlace) != 0) {
+            out.return_value = 0;
+            out.note = "HeapReAlloc supports HEAP_ZERO_MEMORY; HEAP_GENERATE_EXCEPTIONS and HEAP_REALLOC_IN_PLACE_ONLY are not emulated";
+            return true;
+        }
+        auto r = svc_.heap_realloc(ctx.process_id, ctx.args[0], ctx.args[2],
+                                   ctx.args[3], (flags & kZero) != 0);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapReAlloc (moving realloc; prefix preserved)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapSizeImpl : public IApiImplementation {
+public:
+    explicit HeapSizeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        auto r = svc_.heap_size(ctx.process_id, ctx.args[0], ctx.args[2]);
+        out.return_value = r.ok() ? r.value() : ~0ull;  // documented SIZE_MAX error
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapSize (tracked allocation size)"; }
+private: GameRuntimeService& svc_;
+};
 class GetProcessHeapImpl : public IApiImplementation {
 public:
     explicit GetProcessHeapImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -1098,9 +1135,11 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r29 = api_reg_.register_implementation("kernel32", "HeapAlloc", keep(std::make_shared<HeapAllocImpl>(*this)), owner);
     auto r30 = api_reg_.register_implementation("kernel32", "HeapFree", keep(std::make_shared<HeapFreeImpl>(*this)), owner);
     auto r31 = api_reg_.register_implementation("kernel32", "HeapDestroy", keep(std::make_shared<HeapDestroyImpl>(*this)), owner);
+    auto r31b = api_reg_.register_implementation("kernel32", "HeapReAlloc", keep(std::make_shared<HeapReAllocImpl>(*this)), owner);
+    auto r31c = api_reg_.register_implementation("kernel32", "HeapSize", keep(std::make_shared<HeapSizeImpl>(*this)), owner);
     auto r32 = api_reg_.register_implementation("xmem", "XMemAlloc", keep(std::make_shared<XMemAllocImpl>(*this)), owner);
     auto r33 = api_reg_.register_implementation("xmem", "XMemFree", keep(std::make_shared<XMemFreeImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26, &r27, &r28, &r29, &r30, &r31, &r32, &r33}) {
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26, &r27, &r28, &r29, &r30, &r31, &r31b, &r31c, &r32, &r33}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -1495,6 +1534,81 @@ Result<void> GameRuntimeService::heap_destroy(std::uint64_t pid,
     if (pit != procs_.end() && pit->second.process_heap == heap_handle)
         pit->second.process_heap = 0;
     return Result<void>();
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_realloc(
+    std::uint64_t pid, std::uint64_t heap_handle, std::uint64_t address,
+    std::uint64_t new_size, bool zero_tail) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<std::uint64_t>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    if (address == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "HeapReAlloc requires the original allocation base (null lpMem is HeapAlloc)");
+    if (new_size == 0 || new_size > (64ull << 20))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "HeapReAlloc size must be 1..64 MiB");
+    const auto old_info = owner->query_xmem(address);
+    if (!old_info.ok())
+        return Result<std::uint64_t>(old_info.errc(), old_info.context());
+    const auto old_size = old_info.value().size;
+    // Moving realloc: allocate the new block, copy the preserved prefix,
+    // free the old block. In-place resize is not attempted (documented
+    // partial behavior); failure of the new allocation leaves the original
+    // allocation completely untouched.
+    const auto fresh = owner->allocate_xmem(new_size, 8, "heap", false);
+    if (!fresh.ok()) return Result<std::uint64_t>(fresh.errc(), fresh.context());
+    const auto new_address = fresh.value();
+    const auto preserve = old_size < new_size ? old_size : new_size;
+    // Copy through the address space directly (translate + host memcpy).
+    // This keeps rt_gdk layered on rt_memory only; instantiating
+    // guest::GuestMemory here would require an rt_guestmem dependency that
+    // this library's layering does not have. Both blocks live inside the
+    // SAME single-reservation xmem arena (one contiguous committed region),
+    // so one translate per block resolves a contiguous host range; the
+    // congruence check fails closed if arena geometry ever changes.
+    auto& space = owner->address_space();
+    const auto src_t = space.translate(address);
+    const auto dst_t = space.translate(new_address);
+    if (!src_t.ok() || !dst_t.ok()) {
+        (void)owner->free_xmem(new_address);
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "realloc copy target unmappable");
+    }
+    if (preserve != 0) {
+        std::memcpy(static_cast<std::uint8_t*>(dst_t.value()),
+                    static_cast<const std::uint8_t*>(src_t.value()),
+                    static_cast<std::size_t>(preserve));
+    }
+    if (zero_tail && new_size > old_size) {
+        std::memset(static_cast<std::uint8_t*>(dst_t.value()) + old_size, 0,
+                    static_cast<std::size_t>(new_size - old_size));
+    }
+    const auto released = owner->free_xmem(address);
+    if (!released.ok()) {
+        // The old block could not be freed (double-free class of failure):
+        // roll back the copy target so we never leak two live blocks.
+        (void)owner->free_xmem(new_address);
+        return Result<std::uint64_t>(released.errc(), released.context());
+    }
+    return Result<std::uint64_t>(new_address);
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_size(std::uint64_t pid,
+                                                    std::uint64_t heap_handle,
+                                                    std::uint64_t address) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<std::uint64_t>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto info = owner->query_xmem(address);
+    if (!info.ok()) return Result<std::uint64_t>(info.errc(), info.context());
+    return Result<std::uint64_t>(info.value().size);
 }
 
 Result<std::uint64_t> GameRuntimeService::xmem_alloc(std::uint64_t pid,

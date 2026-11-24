@@ -159,6 +159,8 @@ const char* kHeapCreateUrl = "https://learn.microsoft.com/en-us/windows/win32/ap
 const char* kHeapAllocUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapalloc";
 const char* kHeapFreeUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapfree";
 const char* kHeapDestroyUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapdestroy";
+const char* kHeapReAllocUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heaprealloc";
+const char* kHeapSizeUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsize";
 const char* kXMemAllocUrl = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xmem/functions/xmemalloc";
 const char* kXMemFreeUrl = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xmem/functions/xmemfree";
 
@@ -557,122 +559,152 @@ std::vector<ApiDescriptor> builtin_descriptors() {
 
     {
         ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetProcessHeap";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "HANDLE GetProcessHeap()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-GET-PROCESS-HEAP]";
+        a.evidence_url = kGetProcessHeapUrl;
+        a.notes = "returns the per-process default heap handle backed by the process xmem arena; the handle is process-scoped and closes with process teardown";
+        add(a);
+    }
     {
-            ApiDescriptor a;
-            a.library = "kernel32";
-            a.export_name = "GetProcessHeap";
-            a.convention = Convention::None;
-            a.param_count = 0;
-            a.ret = ReturnKind::Pointer;
-            a.signature = "HANDLE GetProcessHeap()";
-            a.category = registry::ApiCategory::WindowsWin32;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[MS-GET-PROCESS-HEAP]";
-            a.evidence_url = kGetProcessHeapUrl;
-            a.notes = "returns the per-process default heap handle backed by the process xmem arena; the handle is process-scoped and closes with process teardown";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "kernel32";
-            a.export_name = "HeapCreate";
-            a.convention = Convention::X64Microsoft;
-            a.param_count = 3;
-            a.ret = ReturnKind::Pointer;
-            a.signature = "HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)";
-            a.category = registry::ApiCategory::WindowsWin32;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[MS-HEAP-CREATE]";
-            a.evidence_url = kHeapCreateUrl;
-            a.notes = "grows-nowhere private heaps within the per-process xmem arena; options are recorded but heap serialization and generate-exceptions are not emulated; zero maximum size means unbounded up to the arena cap";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "kernel32";
-            a.export_name = "HeapAlloc";
-            a.convention = Convention::X64Microsoft;
-            a.param_count = 3;
-            a.ret = ReturnKind::Pointer;
-            a.signature = "LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)";
-            a.category = registry::ApiCategory::WindowsWin32;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[MS-HEAP-ALLOC]";
-            a.evidence_url = kHeapAllocUrl;
-            a.notes = "8-byte aligned sub-allocation from the owning process arena; HEAP_ZERO_MEMORY zeroes; HEAP_GENERATE_EXCEPTIONS is rejected (fail-closed, no exception emulation)";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "kernel32";
-            a.export_name = "HeapFree";
-            a.convention = Convention::X64Microsoft;
-            a.param_count = 3;
-            a.ret = ReturnKind::Bool;
-            a.signature = "BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem)";
-            a.category = registry::ApiCategory::WindowsWin32;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[MS-HEAP-FREE]";
-            a.evidence_url = kHeapFreeUrl;
-            a.notes = "frees an allocation from the same process arena; the heap handle is validated but allocations are tracked per allocation, not per heap object";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "kernel32";
-            a.export_name = "HeapDestroy";
-            a.convention = Convention::X64Microsoft;
-            a.param_count = 1;
-            a.ret = ReturnKind::Bool;
-            a.signature = "BOOL HeapDestroy(HANDLE hHeap)";
-            a.category = registry::ApiCategory::WindowsWin32;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[MS-HEAP-DESTROY]";
-            a.evidence_url = kHeapDestroyUrl;
-            a.notes = "closes the heap handle; physical arena pages are reclaimed at process teardown (per-allocation free is HeapFree); destroying the process default heap fails closed";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "xmem";
-            a.export_name = "XMemAlloc";
-            a.convention = Convention::X64Microsoft;
-            a.param_count = 2;
-            a.ret = ReturnKind::Pointer;
-            a.signature = "LPVOID XMemAlloc(SIZE_T dwSize, DWORD dwAttributes)";
-            a.category = registry::ApiCategory::XboxGdk;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[GDK-XMEM-ALLOC]";
-            a.evidence_url = kXMemAllocUrl;
-            a.notes = "aligned sub-allocation from the per-process xmem arena; a nonzero low byte in dwAttributes is used as the alignment power (2^byte) when within 8..4096, otherwise 8; MEMORY_TAG bits are ignored";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "xmem";
-            a.export_name = "XMemFree";
-            a.convention = Convention::X64Microsoft;
-            a.param_count = 2;
-            a.ret = ReturnKind::Bool;
-            a.signature = "BOOL XMemFree(LPVOID lpAddress, DWORD dwAttributes)";
-            a.category = registry::ApiCategory::XboxGdk;
-            a.compat = ApiStatus::PartiallyImplemented;
-            a.impl = ApiStatus::PartiallyImplemented;
-            a.evidence = "[GDK-XMEM-FREE]";
-            a.evidence_url = kXMemFreeUrl;
-            a.notes = "frees a previous XMemAlloc/HeapAlloc-style arena allocation; dwAttributes is accepted and ignored";
-            add(a);
-        }
-        {
-            ApiDescriptor a;
-            a.library = "kernel32";
-            a.export_name = "SetLastError";
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapCreate";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-CREATE]";
+        a.evidence_url = kHeapCreateUrl;
+        a.notes = "grows-nowhere private heaps within the per-process xmem arena; options are recorded but heap serialization and generate-exceptions are not emulated; zero maximum size means unbounded up to the arena cap";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapAlloc";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-ALLOC]";
+        a.evidence_url = kHeapAllocUrl;
+        a.notes = "8-byte aligned sub-allocation from the owning process arena; HEAP_ZERO_MEMORY zeroes; HEAP_GENERATE_EXCEPTIONS is rejected (fail-closed, no exception emulation)";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapFree";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Bool;
+        a.signature = "BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-FREE]";
+        a.evidence_url = kHeapFreeUrl;
+        a.notes = "frees an allocation from the same process arena; the heap handle is validated but allocations are tracked per allocation, not per heap object";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapDestroy";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 1;
+        a.ret = ReturnKind::Bool;
+        a.signature = "BOOL HeapDestroy(HANDLE hHeap)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-DESTROY]";
+        a.evidence_url = kHeapDestroyUrl;
+        a.notes = "closes the heap handle; physical arena pages are reclaimed at process teardown (per-allocation free is HeapFree); destroying the process default heap fails closed";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapReAlloc";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-REALLOC]";
+        a.evidence_url = kHeapReAllocUrl;
+        a.notes = "moving realloc over the process xmem arena: allocate the new size, copy the preserved prefix, free the old allocation; HEAP_ZERO_MEMORY zeroes the grown tail; in-place resize is not attempted and reallocation in place is not reported";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapSize";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Uint64;
+        a.signature = "SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-SIZE]";
+        a.evidence_url = kHeapSizeUrl;
+        a.notes = "returns the tracked allocation size for a live arena allocation base; SIZE_MAX (-1) on any error, matching the documented error return";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "xmem";
+        a.export_name = "XMemAlloc";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 2;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID XMemAlloc(SIZE_T dwSize, DWORD dwAttributes)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[GDK-XMEM-ALLOC]";
+        a.evidence_url = kXMemAllocUrl;
+        a.notes = "aligned sub-allocation from the per-process xmem arena; a nonzero low byte in dwAttributes is used as the alignment power (2^byte) when within 8..4096, otherwise 8; MEMORY_TAG bits are ignored";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "xmem";
+        a.export_name = "XMemFree";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 2;
+        a.ret = ReturnKind::Bool;
+        a.signature = "BOOL XMemFree(LPVOID lpAddress, DWORD dwAttributes)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[GDK-XMEM-FREE]";
+        a.evidence_url = kXMemFreeUrl;
+        a.notes = "frees a previous XMemAlloc/HeapAlloc-style arena allocation; dwAttributes is accepted and ignored";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "SetLastError";
         a.convention = Convention::None;
         a.param_count = 1;
         a.ret = ReturnKind::Void;
@@ -701,7 +733,8 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.notes = "reads the error value from the calling guest thread's TEB; requires an initialized execution context";
         add(a);
     }
-
+    {
+        ApiDescriptor a;
         a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
         a.convention = Convention::X64Microsoft; a.param_count = 4;
         a.ret = ReturnKind::Uint32;

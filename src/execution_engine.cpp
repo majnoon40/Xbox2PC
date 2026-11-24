@@ -839,6 +839,14 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     } else if (id == "HeapDestroy") {
         plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "HeapReAlloc") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "HeapSize") {
+        plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "XMemAlloc") {
         plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Int;

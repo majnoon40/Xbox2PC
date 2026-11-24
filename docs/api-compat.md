@@ -81,6 +81,9 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | HeapAlloc | `LPVOID ...(HANDLE, DWORD, SIZE_T)` | partially-implemented (8-byte aligned arena sub-allocation) |
 | HeapFree | `BOOL ...(HANDLE, DWORD, LPVOID)` | partially-implemented (per-allocation arena release) |
 | HeapDestroy | `BOOL ...(HANDLE)` | partially-implemented (handle close; default heap refused) |
+| HeapReAlloc | `LPVOID ...(HANDLE, DWORD, LPVOID, SIZE_T)` | partially-implemented (moving realloc; prefix preserved; zeroed grown tail) |
+| HeapSize | `SIZE_T ...(HANDLE, DWORD, LPCVOID)` | partially-implemented (tracked allocation size; SIZE_MAX on error) |
+
 | XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation) |
 | XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |

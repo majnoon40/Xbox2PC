@@ -1174,6 +1174,144 @@ TEST(EngineTest, DispatchesResolvedApiBindingAndReturnsToGuest) {
     EXPECT_EQ(cpu_state.rip, code_va + 0x100); // RET sentinel pre-check stops at the return instruction
 }
 
+TEST(EngineTest, DispatchesWin32HeapRealloc) {
+    // Imported HeapReAlloc/HeapSize round trip through the interpreter:
+    // HeapAlloc(64) with a marker pattern, grow to 256 with HEAP_ZERO_MEMORY,
+    // verify the prefix survived and the tail is zeroed, HeapSize reports
+    // 256, then HeapFree releases the moved block.
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("heap-realloc.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "heap-realloc.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t get_heap = 0x51010001ull;
+    constexpr std::uint64_t alloc = 0x51010002ull;
+    constexpr std::uint64_t realloc_fn = 0x51010006ull;
+    constexpr std::uint64_t size_fn = 0x51010007ull;
+    constexpr std::uint64_t free_fn = 0x51010003ull;
+    constexpr std::uint64_t tid = 0x98;
+    const std::uint64_t rsp = stack_va + 0x100;
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = get_heap;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values = {get_heap, alloc, realloc_fn, size_fn, free_fn};
+    request.api_bindings = {
+        ApiBindingInfo{get_heap, "kernel32", "GetProcessHeap", false, 0},
+        ApiBindingInfo{alloc, "kernel32", "HeapAlloc", false, 0},
+        ApiBindingInfo{realloc_fn, "kernel32", "HeapReAlloc", false, 0},
+        ApiBindingInfo{size_fn, "kernel32", "HeapSize", false, 0},
+        ApiBindingInfo{free_fn, "kernel32", "HeapFree", false, 0},
+    };
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = get_heap;
+    std::atomic<bool> interrupted{false};
+    auto result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "GetProcessHeap dispatch";
+    const std::uint64_t heap = result.return_value;
+    ASSERT_NE(heap, 0u);
+
+    // HeapAlloc(heap, 0, 64).
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, heap);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    cpu_state.set_reg(cpu::Gpr::R8, 64);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = alloc;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "HeapAlloc dispatch";
+    const std::uint64_t block = result.return_value;
+    ASSERT_NE(block, 0u);
+    // Marker pattern over the first 32 bytes.
+    for (std::uint64_t off = 0; off < 32; off += 8) {
+        ASSERT_TRUE(mem.write_u64(block + off, 0xA1B2C3D4E5F60718ull + off).ok());
+    }
+
+    // HeapReAlloc(heap, HEAP_ZERO_MEMORY, block, 256).
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, heap);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0x8u); // HEAP_ZERO_MEMORY
+    cpu_state.set_reg(cpu::Gpr::R8, block);
+    cpu_state.set_reg(cpu::Gpr::R9, 256);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = realloc_fn;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "HeapReAlloc dispatch";
+    const std::uint64_t grown = result.return_value;
+    ASSERT_NE(grown, 0u);
+    ASSERT_NE(grown, block);  // moving realloc: a fresh block
+    // The 64-byte prefix must be preserved; the tail must be zeroed.
+    for (std::uint64_t off = 0; off < 32; off += 8) {
+        auto v = mem.read_u64(grown + off);
+        ASSERT_TRUE(v.ok());
+        EXPECT_EQ(v.value(), 0xA1B2C3D4E5F60718ull + off) << "prefix at +" << off;
+    }
+    for (std::uint64_t off = 64; off < 256; off += 8) {
+        auto v = mem.read_u64(grown + off);
+        ASSERT_TRUE(v.ok());
+        EXPECT_EQ(v.value(), 0u) << "zeroed tail at +" << off;
+    }
+
+    // HeapSize(heap, 0, grown) == 256.
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, heap);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    cpu_state.set_reg(cpu::Gpr::R8, grown);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = size_fn;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "HeapSize dispatch";
+    EXPECT_EQ(result.return_value, 256u);
+
+    // HeapFree(heap, 0, grown).
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rcx, heap);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    cpu_state.set_reg(cpu::Gpr::R8, grown);
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+    cpu_state.rip = free_fn;
+    result = backend.run(request, cpu_state, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned) << "HeapFree dispatch";
+    EXPECT_EQ(result.return_value, 1u);
+}
+
 TEST(EngineTest, DispatchesWin32HeapApiBindings) {
     // Imported Win32 heap round trip through the interpreter: chained
     // GetProcessHeap -> HeapAlloc(0x100) -> HeapFree, then XMemAlloc(64)
