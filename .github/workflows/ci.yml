@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries]
+    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls]
   workflow_dispatch:
 
 jobs:
