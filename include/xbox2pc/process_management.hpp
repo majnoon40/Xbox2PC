@@ -24,6 +24,7 @@
 //      state and wires metadata only.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -163,9 +164,10 @@ public:
     // Observers run only after cleanup succeeds and state becomes Terminated.
     Result<void> terminate_process(Handle process, std::uint64_t exit_code);
 
-    // Observers receive the stable process ID and execute under the manager
-    // lock. They must be short, non-throwing, and MUST NOT re-enter
-    // ProcessManager. Unregistration waits for any active callback to finish.
+    // Observers receive the stable process ID and execute WITHOUT the manager
+    // lock. They may call other ProcessManager methods. Unregistration removes
+    // the observer from future snapshots and waits for in-flight calls to end;
+    // an observer must not synchronously unregister itself.
     using ProcessExitObserver = std::function<void(std::uint64_t)>;
     Result<std::uint64_t> add_process_exit_observer(ProcessExitObserver observer);
     Result<void> remove_process_exit_observer(std::uint64_t observer_id);
@@ -230,7 +232,12 @@ private:
     // Spawn reservations counted while a thread is being registered/attached.
     // Protected by lock_ so concurrent spawns cannot bypass the global limit.
     std::uint64_t pending_threads_ = 0;
-    std::map<std::uint64_t, ProcessExitObserver> exit_observers_;
+    struct ExitObserverEntry {
+        ProcessExitObserver callback;
+        std::uint64_t active_calls = 0;  // protected by lock_
+    };
+    std::condition_variable observer_changed_;  // paired with lock_
+    std::map<std::uint64_t, std::shared_ptr<ExitObserverEntry>> exit_observers_;
     std::uint64_t next_exit_observer_ = 1;  // protected by lock_
     // Global totals maintained incrementally for fast limit checks.
     mutable std::atomic<std::uint64_t> committed_total_{0};
