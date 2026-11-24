@@ -851,8 +851,15 @@ class CloseEventHandleImpl : public IApiImplementation {
 public:
     explicit CloseEventHandleImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.close_sync_handle(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
-        if(!r.ok())out.note=r.error_string(); return true;
+        if (ctx.arg_count != 1) {
+            out.return_value = 0;
+            out.note = "CloseHandle requires exactly one handle";
+            return true;
+        }
+        auto r = svc_.close_sync_handle(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: CloseHandle (supported synchronization and task-queue handles)"; }
 private: GameRuntimeService& svc_;
@@ -1408,8 +1415,9 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
     } wait_state_restore{guest_runtime_thread, marked_blocked};
 
     const auto cancelled = [&guest_thread]() {
-        auto* object = guest_thread.get();
-        auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
+        auto* guest_object = guest_thread.get();
+        auto* thread = guest_object != nullptr
+            ? guest_object->as<RtThread>() : nullptr;
         return thread != nullptr && thread->stop_requested();
     };
     const auto wait_start_ns = pal::now_ns();
