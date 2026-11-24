@@ -56,6 +56,7 @@ public:
     static constexpr std::uint64_t kTebThreadIdOffset = 0x48;
     static constexpr std::uint64_t kTebTlsVectorOffset = 0x58;
     static constexpr std::uint64_t kTebPebOffset = 0x60;
+    static constexpr std::uint64_t kTebLastErrorValueOffset = 0x68;
 
     GuestThreadEnvironment(AddressSpace& space, GuestProcessEnvironment& process);
     ~GuestThreadEnvironment();
@@ -67,6 +68,8 @@ public:
                                              const std::uint8_t* template_bytes,
                                              std::size_t template_size,
                                              std::size_t zero_fill_bytes);
+    Result<void> set_last_error(std::uint32_t error);
+    Result<std::uint32_t> last_error() const;
     Result<void> read_tls(std::uint32_t index, std::uint64_t offset,
                           void* destination, std::size_t length) const;
 

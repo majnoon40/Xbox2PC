@@ -184,6 +184,20 @@ Result<std::uint64_t> GuestThreadEnvironment::install_tls_module(
     return block;
 }
 
+Result<void> GuestThreadEnvironment::set_last_error(std::uint32_t error) {
+    if (!initialized_) {
+        return Result<void>(RuntimeErrc::InvalidState, "TEB not initialized");
+    }
+    return memory_.write_u32(teb_va_ + kTebLastErrorValueOffset, error);
+}
+
+Result<std::uint32_t> GuestThreadEnvironment::last_error() const {
+    if (!initialized_) {
+        return Result<std::uint32_t>(RuntimeErrc::InvalidState, "TEB not initialized");
+    }
+    return memory_.read_u32(teb_va_ + kTebLastErrorValueOffset);
+}
+
 Result<void> GuestThreadEnvironment::read_tls(std::uint32_t index,
                                                std::uint64_t offset,
                                                void* destination,

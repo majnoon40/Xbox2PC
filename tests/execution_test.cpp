@@ -2348,3 +2348,38 @@ TEST(GuestProcessEnvironmentTest, ConcurrentRequestsForSameImageReturnOneIndex) 
         EXPECT_EQ(indexes[i], indexes[0]);
     }
 }
+
+
+TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
+    AddressSpace space(16ull << 20, 0x37000000, "guest-last-error-test");
+    api::ApiRegistry registry;
+    auto process = std::make_shared<exec::GuestProcessEnvironment>(space);
+    exec::ExecutionContext first(0x81, 0x91, space, registry,
+        ExecutionConfig::default_validated().value(), "last-error-first", process);
+    exec::ExecutionContext second(0x81, 0x92, space, registry,
+        ExecutionConfig::default_validated().value(), "last-error-second", process);
+    ASSERT_TRUE(first.initialize().ok());
+    ASSERT_TRUE(second.initialize().ok());
+    ASSERT_NE(first.guest_environment(), nullptr);
+    ASSERT_NE(second.guest_environment(), nullptr);
+
+    EXPECT_EQ(first.guest_environment()->last_error().value(), 0u);
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 0u);
+    ASSERT_TRUE(first.guest_environment()->set_last_error(0x12345678u).ok());
+    EXPECT_EQ(first.guest_environment()->last_error().value(), 0x12345678u);
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 0u);
+    ASSERT_TRUE(second.guest_environment()->set_last_error(5u).ok());
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
+    EXPECT_EQ(first.guest_environment()->last_error().value(), 0x12345678u);
+
+    const auto raw = first.memory().read_u32(
+        first.guest_gs_base() + exec::GuestThreadEnvironment::kTebLastErrorValueOffset);
+    ASSERT_TRUE(raw.ok());
+    EXPECT_EQ(raw.value(), 0x12345678u);
+    EXPECT_EQ(first.guest_environment()->set_last_error(1u).errc(),
+              RuntimeErrc::InvalidState); // no mutation after destroy
+    ASSERT_TRUE(first.destroy().ok());
+    EXPECT_EQ(first.guest_environment(), nullptr);
+    EXPECT_EQ(second.guest_environment()->last_error().value(), 5u);
+    ASSERT_TRUE(second.destroy().ok());
+}
