@@ -400,3 +400,8 @@ not claims inferred from a single missing declaration. In particular, searches
 for `ARCH_SET_GS`, `wrgsbase`, `RtlLookupFunctionEntry`,
 `RtlVirtualUnwind`, `SetLastError`, `GetLastError`, and `ExitProcess`
 found no runtime implementations at this baseline.
+
+
+### TLS callback validation hardening (2026-11-24)
+
+The M11 follow-up now rejects the complete TLS callback plan if any non-null callback VA is not executable mapped guest memory. The previous behavior counted and skipped invalid entries, which could silently run a partial callback sequence and leave module initialization inconsistent. A regression test covers a readable callback array containing a non-executable target. This does not complete automatic process/thread attach-detach lifecycle wiring; callback execution is still an explicit helper and must be integrated by the process/thread lifecycle owner.
