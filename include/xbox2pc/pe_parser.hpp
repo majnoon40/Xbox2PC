@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -321,6 +322,28 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
                                              const std::uint8_t* base,
                                              std::uint64_t size,
                                              diag::Diagnostics& diags);
+
+// Result of virtually unwinding one frame.
+struct UnwindFrame {
+    std::uint64_t return_rip = 0;   // guest VA of the return address
+    std::uint64_t rsp_after = 0;    // guest RSP after the RET pops it
+};
+
+// Virtually unwind one frame. current_rsp is the guest RSP at the
+// query point; target_offset is the faulting instruction's offset
+// within fn (codes with slot_offset > target_offset have not executed
+// and are skipped, per the documented unwind algorithm). read_stack
+// reads one guest-stack u64 (the caller plugs GuestMemory in; the pe
+// layer stays free of runtime types). Chained UNWIND_INFO entries
+// continue the walk with their full code arrays. PUSH_MACHFRAME and
+// stack-read failures return nullopt with diagnostics. Restoring saved
+// non-volatile registers is out of scope for this slice: only the
+// control-flow frame (return address + RSP) is reconstructed.
+std::optional<UnwindFrame> unwind_one_frame(
+    const PeImage& img, const RuntimeFunction& fn, const std::uint8_t* base,
+    std::uint64_t size, std::uint32_t target_offset, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags);
 
 // ── Parser ──────────────────────────────────────────────────────────────
 

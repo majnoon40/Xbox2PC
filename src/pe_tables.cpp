@@ -452,6 +452,87 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
     return info;
 }
 
+// ── virtual unwinding (M11 Phase 6 slice 3) ────────────────────────────────
+// The documented x64 unwind walk: codes are stored in reverse execution
+// order. Walking them in stored order and adding each effect undoes the
+// prolog step by step, so the accumulated delta is the distance from
+// current_rsp back to the entry RSP. SET_FPREG is a no-op for the walk:
+// once every post-establishment effect is undone, the walked RSP equals
+// the frame pointer by construction. Chained entries contribute their
+// full code array (the chained prolog has fully executed when control
+// is inside the outer range).
+std::optional<UnwindFrame> unwind_one_frame(
+    const PeImage& img, const RuntimeFunction& fn, const std::uint8_t* base,
+    std::uint64_t size, std::uint32_t target_offset, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags) {
+    std::uint64_t delta = 0;  // current_rsp + delta == entry_rsp
+    const RuntimeFunction* current = &fn;
+    const std::optional<UnwindFrame> none;
+    for (int depth = 0; depth < 8; ++depth) {  // chain-loop guard
+        auto info = decode_unwind_info(img, *current, base, size, diags);
+        if (!info.has_value()) return none;
+        const bool outer = (current == &fn);
+        for (const auto& code : info->codes) {
+            // Outer codes are target-filtered: a prolog op at offset X has
+            // executed when the control point is at or past X, so codes with
+            // slot_offset > target_offset are skipped. Chained codes all
+            // executed (control inside the outer range implies the chained
+            // prolog completed).
+            if (outer && code.slot_offset > target_offset) continue;
+            switch (code.opcode) {
+            case 0:  // PUSH_NONVOL: 8 bytes to undo
+                delta += 8;
+                break;
+            case 1:  // ALLOC_LARGE (operand pre-scaled by 8)
+            case 2:  // ALLOC_SMALL (operand = opinfo*8+8)
+                delta += code.operand;
+                break;
+            case 3:  // SET_FPREG: walked RSP already equals FP here
+                break;
+            case 4:  // SAVE_NONVOL: below the frame, no RSP effect
+            case 5:  // SAVE_NONVOL_FAR
+            case 8:  // SAVE_XMM128
+            case 9:  // SAVE_XMM128_FAR
+            case 6:  // EPILOG
+            case 7:  // SPARE_CODE (padding)
+                break;
+            case 10: // PUSH_MACHFRAME: interrupt frames — not modeled
+                diags.warning("unwind: PUSH_MACHFRAME is not supported");
+                return none;
+            default:
+                diags.warning("unwind: unknown opcode " +
+                              std::to_string(code.opcode));
+                return none;
+            }
+        }
+        if (info->is_chained() && info->chained_unwind_rva != 0) {
+            const RuntimeFunction* chained =
+                img.exceptions.find_function(info->chained_unwind_rva);
+            if (chained == nullptr) {
+                diags.warning("unwind: chained RVA " +
+                              std::to_string(info->chained_unwind_rva) +
+                              " has no covering RUNTIME_FUNCTION");
+                return none;
+            }
+            current = chained;
+            continue;
+        }
+        break;
+    }
+    const std::uint64_t entry_rsp = current_rsp + delta;
+    auto return_rip = read_stack(entry_rsp);
+    if (!return_rip.has_value()) {
+        diags.warning("unwind: return-address read failed at guest " +
+                      std::to_string(entry_rsp));
+        return none;
+    }
+    UnwindFrame frame;
+    frame.return_rip = return_rip.value();
+    frame.rsp_after = entry_rsp + 8;
+    return frame;
+}
+
 void parse_exception_table(PeImage& img, const std::uint8_t* base, std::uint64_t size,
                            diag::Diagnostics& diags) {
     if (img.directories.size() <= kDirException) return;

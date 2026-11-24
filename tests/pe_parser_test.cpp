@@ -826,3 +826,187 @@ TEST(XdataUnwindInfoDecode, MalformedInputsRejected) {
     }
     EXPECT_GE(diags.count(xbox2pc::diag::Severity::Warning), 4u);
 }
+
+// ── M11 Phase 6 slice 3: virtual unwinding ───────────────────────────────
+
+namespace {
+
+// A tiny simulated guest stack: u64 slots keyed by VA.
+struct FakeStack {
+    std::map<std::uint64_t, std::uint64_t> slots;
+    std::optional<std::uint64_t> read(std::uint64_t va) const {
+        const auto it = slots.find(va);
+        if (it == slots.end()) return std::nullopt;
+        return it->second;
+    }
+};
+
+}  // namespace
+
+TEST(VirtualUnwindOneFrame, UndoesPushesAndAlloc) {
+    // Prolog: push rbp (1); sub rsp,0x28 (6); push rbx (9).
+    // Fault at offset 0x20 (all three executed).
+    // Entry RSP 0x7FFF0000; return address at entry+0x38 (after undoing
+    // 8 + 0x28 + 8 = 0x38 of effects).
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind;
+    auto append = [&](const std::vector<std::uint8_t>& v) {
+        unwind.insert(unwind.end(), v.begin(), v.end());
+    };
+    unwind.push_back(0x01);                                  // version 1, flags 0
+    unwind.push_back(0x0A);                                  // prolog size
+    unwind.push_back(static_cast<std::uint8_t>(3));          // 3 slots, no FP
+    unwind.push_back(0x00);
+    append(code_slot(0x09, 0, 3));    // PUSH_NONVOL rbx       (executed last)
+    append(code_slot(0x06, 2, 4));    // ALLOC_SMALL 4*8+8=40  (0x28)
+    append(code_slot(0x01, 0, 5));    // PUSH_NONVOL rbp       (executed first)
+    const std::uint32_t unwind_rva = 0x1D00;
+    s.text_payloads.emplace_back(unwind_rva, unwind);
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, unwind_rva),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+
+    FakeStack stack;
+    stack.slots[0x7FFF0038] = 0x140001000;   // return address at entry RSP
+    const std::uint64_t current_rsp = 0x7FFF0000;  // fault point: entry - 0x38
+    auto frame = xbox2pc::pe::unwind_one_frame(
+        img, *fn, image.data(), image.size(), 0x20, current_rsp,
+        [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(frame.has_value());
+    EXPECT_EQ(frame->return_rip, 0x140001000u);
+    EXPECT_EQ(frame->rsp_after, 0x7FFF0040u);  // entry + 8 after the ret
+}
+
+TEST(VirtualUnwindOneFrame, TargetOffsetSkipsUnexecutedCodes) {
+    // Same prolog but the fault is at offset 0x04: only the first push
+    // executed, so only 8 bytes are undone.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind;
+    auto append = [&](const std::vector<std::uint8_t>& v) {
+        unwind.insert(unwind.end(), v.begin(), v.end());
+    };
+    unwind.push_back(0x01);
+    unwind.push_back(0x0A);
+    unwind.push_back(static_cast<std::uint8_t>(3));
+    unwind.push_back(0x00);
+    append(code_slot(0x09, 0, 3));
+    append(code_slot(0x06, 2, 4));
+    append(code_slot(0x01, 0, 5));
+    const std::uint32_t unwind_rva = 0x1D00;
+    s.text_payloads.emplace_back(unwind_rva, unwind);
+    s.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, unwind_rva)});
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+
+    FakeStack stack;
+    stack.slots[0x7FFF0008] = 0x140001234;
+    const std::uint64_t current_rsp = 0x7FFF0000;
+    auto frame = xbox2pc::pe::unwind_one_frame(
+        img, *fn, image.data(), image.size(), 0x04, current_rsp,
+        [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(frame.has_value());
+    EXPECT_EQ(frame->return_rip, 0x140001234u);
+    EXPECT_EQ(frame->rsp_after, 0x7FFF0010u);
+}
+
+TEST(VirtualUnwindOneFrame, ChainedInfoContributesAllCodes) {
+    // Outer function (0x1080-0x10A0) chains into inner (0x1050-0x1060)
+    // whose codes ALL apply. Inner prolog: push r12; sub rsp,0x10.
+    // Combined undo: 8 (outer push) + 8 + 0x10 (inner) = 0x28.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+
+    // Inner UNWIND_INFO: plain, 2 slots.
+    std::vector<std::uint8_t> inner;
+    inner.push_back(0x01);
+    inner.push_back(0x08);
+    inner.push_back(static_cast<std::uint8_t>(2));
+    inner.push_back(0x00);
+    const auto push_r12 = code_slot(0x06, 0, 12);   // PUSH_NONVOL r12
+    inner.insert(inner.end(), push_r12.begin(), push_r12.end());
+    const auto alloc16 = code_slot(0x02, 2, 1);     // ALLOC_SMALL 1*8+8 = 16
+    inner.insert(inner.end(), alloc16.begin(), alloc16.end());
+    const std::uint32_t inner_rva = 0x1E00;
+    s.text_payloads.emplace_back(inner_rva, inner);
+
+    // Outer UNWIND_INFO: 1 slot (push rbp) + CHAININFO link to inner.
+    std::vector<std::uint8_t> outer;
+    outer.push_back(static_cast<std::uint8_t>(0x01 | (0x4 << 3)));  // v1 + chain
+    outer.push_back(0x04);
+    outer.push_back(static_cast<std::uint8_t>(1));
+    outer.push_back(0x00);
+    const auto push_rbp = code_slot(0x01, 0, 5);     // PUSH_NONVOL rbp
+    outer.insert(outer.end(), push_rbp.begin(), push_rbp.end());
+    // Chained RUNTIME_FUNCTION RVA (32-bit): the inner function's begin.
+    outer.push_back(0x50); outer.push_back(0x10); outer.push_back(0x00); outer.push_back(0x00);
+    const std::uint32_t outer_rva = 0x1F00;
+    s.text_payloads.emplace_back(outer_rva, outer);
+
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1050, 0x1060, inner_rva),
+        pdata_entry(0x1080, 0x10A0, outer_rva),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+
+    FakeStack stack;
+    // Undo: outer push rbp (8) + inner push r12 (8) + inner ALLOC_SMALL
+    // (16) = 32 bytes; the return address sits at current_rsp + 0x20.
+    stack.slots[0x7FFF0020] = 0x140009999;
+    const std::uint64_t current_rsp = 0x7FFF0000;
+    auto frame = xbox2pc::pe::unwind_one_frame(
+        img, *fn, image.data(), image.size(), 0x08, current_rsp,
+        [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(frame.has_value());
+    EXPECT_EQ(frame->return_rip, 0x140009999u);
+    EXPECT_EQ(frame->rsp_after, 0x7FFF0028u);
+}
+
+TEST(VirtualUnwindOneFrame, StackReadFailureAndMachframeRejection) {
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    // PUSH_MACHFRAME code -> rejected.
+    std::vector<std::uint8_t> bad{0x01, 0x04, 0x01, 0x00};
+    bad.push_back(0x02);
+    bad.push_back(0x0A);  // opcode 10 (PUSH_MACHFRAME), opinfo 0
+    const std::uint32_t rva = 0x1A00;
+    s.text_payloads.emplace_back(rva, bad);
+    s.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, rva)});
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+    FakeStack stack;
+    auto frame = xbox2pc::pe::unwind_one_frame(
+        img, *fn, image.data(), image.size(), 0x20, 0x7FFF0000,
+        [&](std::uint64_t va) { return stack.read(va); }, diags);
+    EXPECT_FALSE(frame.has_value());
+
+    // Unmapped return-address slot -> stack-read failure surfaces as
+    // nullopt with a diagnostic (reuses the valid unwind from the first
+    // test's shape via a fresh build).
+    Diagnostics diags2;
+    PeBuildSpec s2 = default_spec();
+    std::vector<std::uint8_t> unwind{0x01, 0x02, 0x01, 0x00, 0x01, 0x05};
+    s2.text_payloads.emplace_back(0x1D00, unwind);
+    s2.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, 0x1D00)});
+    const auto image2 = PeBuilder(s2).build();
+    const PeImage img2 = parse_ok(image2, diags2);
+    const auto* fn2 = img2.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn2, nullptr);
+    FakeStack empty;
+    auto frame2 = xbox2pc::pe::unwind_one_frame(
+        img2, *fn2, image2.data(), image2.size(), 0x20, 0x7FFF0000,
+        [&](std::uint64_t va) { return empty.read(va); }, diags2);
+    EXPECT_FALSE(frame2.has_value());
+}
