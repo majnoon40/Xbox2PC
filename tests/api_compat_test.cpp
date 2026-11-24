@@ -1050,7 +1050,9 @@ TEST(GdkServiceTest, DocumentedIdFallbacks) {
 
 TEST(GdkServiceTest, TaskQueueLifecycle) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 77;
+    auto* process = w.new_process("task-queue-lifecycle.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto q = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1095,6 +1097,47 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(gone.ok());   // unknown handle now
     // Unknown mode values rejected.
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
+}
+
+TEST(GdkServiceTest, TaskQueueHandlesUseTheProcessHandleTable) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-handle-table.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = process->pid_value();
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    const auto first = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    const auto first_handle = Handle::from_raw(first.value());
+    EXPECT_EQ(first_handle.type(), static_cast<std::uint16_t>(TypeId::TaskQueue));
+    auto first_object = process->handle_table().lookup(first_handle);
+    ASSERT_TRUE(first_object.ok()) << first_object.error_string();
+    const auto object_id = first_object.value().get()->id();
+
+    const auto duplicate = w.tq->duplicate_queue(pid, first.value());
+    ASSERT_TRUE(duplicate.ok()) << duplicate.error_string();
+    EXPECT_NE(duplicate.value(), first.value());
+    auto duplicate_object = process->handle_table().lookup(Handle::from_raw(duplicate.value()));
+    ASSERT_TRUE(duplicate_object.ok()) << duplicate_object.error_string();
+    EXPECT_EQ(duplicate_object.value().get()->id(), object_id);
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+
+    auto* other_process = w.new_process("task-queue-handle-table-other.exe");
+    ASSERT_NE(other_process, nullptr);
+    EXPECT_FALSE(w.tq->dispatch(other_process->pid_value(), duplicate.value(),
+                                XTaskQueuePort::Work, 0).ok());
+
+    first_object.value().release();
+    duplicate_object.value().release();
+    ASSERT_TRUE(w.tq->close_queue(pid, first.value()).ok());
+    EXPECT_TRUE(w.tq->dispatch(pid, duplicate.value(), XTaskQueuePort::Work, 0).ok());
+    ASSERT_TRUE(w.tq->close_queue(pid, duplicate.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(process->handle_table().lookup(first_handle).ok());
+
+    const auto reused = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(reused.ok()) << reused.error_string();
+    EXPECT_NE(reused.value(), first.value());
+    ASSERT_TRUE(w.tq->close_queue(pid, reused.value()).ok());
 }
 
 TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) {

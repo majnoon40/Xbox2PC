@@ -1800,98 +1800,128 @@ Result<void> TaskQueueService::on_shutdown() {
         process_exit_observer_id_ = 0;
     }
     const auto revoked = api_reg_.revoke_owner(id());
+    std::vector<std::uint64_t> pids;
     {
         std::lock_guard lock(lock_);
-        for (auto& entry : queues_) {
-            entry.second->terminated = true;
-            entry.second->work_callbacks.clear();
-            entry.second->completion_callbacks.clear();
+        for (const auto& [pid, ids] : process_queue_objects_) {
+            (void)ids;
+            pids.push_back(pid);
         }
-        for (auto& queue : retired_queues_) {
-            queue->terminated = true;
-            queue->work_callbacks.clear();
-            queue->completion_callbacks.clear();
-        }
-        queues_.clear();
-        retired_queues_.clear();
     }
-    queue_cv_.notify_all();
+    for (const auto pid : pids) release_process(pid);
     owned_.clear();
-    if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
+    if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound)
         return Result<void>(observer_removed.errc(), observer_removed.context());
-    }
     if (!revoked.ok()) return Result<void>(revoked.errc(), revoked.context());
     return Result<void>::ok_result();
+}
+
+Result<RefGuard> TaskQueueService::lookup_queue(
+    std::uint64_t process_id, std::uint64_t queue_id) const {
+    if (process_id == 0 || queue_id == 0)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null task-queue handle or process id");
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<RefGuard>(RuntimeErrc::NotFound, "task-queue owner process does not exist");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr)
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "task-queue owner is not a managed process");
+    auto object = owner->handle_table().lookup(Handle::from_raw(queue_id));
+    if (!object.ok()) return Result<RefGuard>(object.errc(), object.context());
+    auto* queue = object.value().get() != nullptr ? object.value().get()->as<Queue>() : nullptr;
+    if (queue == nullptr)
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue in this process");
+    if (queue->owner_process_id != process_id)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "task queue handle belongs to another process");
+    return Result<RefGuard>(std::move(object.value()));
 }
 
 Result<std::uint64_t> TaskQueueService::create_queue(
     std::uint64_t process_id, std::uint32_t work_mode,
     std::uint32_t completion_mode) {
     const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
-    if (work_mode != manual || completion_mode != manual) {
-        return Result<std::uint64_t>(
-            RuntimeErrc::InvalidArgument,
+    if (work_mode != manual || completion_mode != manual)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
             "only manual dispatch mode is implemented; other modes require callback scheduling");
-    }
-    std::lock_guard lock(lock_);
-    if (next_id_ == 0 || next_id_ == UINT64_MAX) {
-        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
-                                     "task queue handle space exhausted");
-    }
-    const std::uint64_t queue_id = next_id_++;
-    auto queue = std::make_shared<Queue>();
+    if (process_id == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "task queue requires a process owner");
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<std::uint64_t>(RuntimeErrc::NotFound, "task-queue owner process does not exist");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr || owner->state() == ProcessState::Terminating ||
+        owner->state() == ProcessState::Terminated || owner->state() == ProcessState::Failed)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "task-queue owner process is not live");
+
+    auto queue = std::make_unique<Queue>();
     queue->owner_process_id = process_id;
     queue->work_mode = work_mode;
     queue->completion_mode = completion_mode;
-    queues_.emplace(queue_id, std::move(queue));
-    return Result<std::uint64_t>(queue_id);
+    auto object_id = pm_.objects().register_object(std::move(queue));
+    if (!object_id.ok()) return Result<std::uint64_t>(object_id.errc(), object_id.context());
+    auto object = pm_.objects().lookup_id(object_id.value());
+    if (!object.ok()) {
+        (void)pm_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(object.errc(), object.context());
+    }
+    auto handle = owner->handle_table().create(*object.value().get());
+    if (!handle.ok()) {
+        object.value().release();
+        (void)pm_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(handle.errc(), handle.context());
+    }
+    bool rejected = false;
+    {
+        std::lock_guard lock(lock_);
+        const auto state = owner->state();
+        rejected = state == ProcessState::Terminating ||
+                   state == ProcessState::Terminated || state == ProcessState::Failed;
+        if (!rejected) process_queue_objects_[process_id].push_back(object_id.value());
+        else (void)owner->handle_table().close(handle.value());
+    }
+    if (rejected) {
+        object.value().release();
+        process.value().release();
+        (void)pm_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
+                                     "task-queue owner process terminated during creation");
+    }
+    return Result<std::uint64_t>(handle.value().raw());
 }
 
 Result<std::uint64_t> TaskQueueService::duplicate_queue(
     std::uint64_t process_id, std::uint64_t queue_id) {
+    auto queue = lookup_queue(process_id, queue_id);
+    if (!queue.ok()) return Result<std::uint64_t>(queue.errc(), queue.context());
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
     std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end()) {
-        return Result<std::uint64_t>(RuntimeErrc::NotFound, "unknown queue handle");
-    }
-    if (it->second->owner_process_id != process_id) {
-        return Result<std::uint64_t>(RuntimeErrc::InvalidHandle,
-                                     "task queue handle belongs to another process");
-    }
-    if (next_id_ == 0 || next_id_ == UINT64_MAX) {
-        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
-                                     "task queue handle space exhausted");
-    }
-    const std::uint64_t duplicate_id = next_id_++;
-    queues_.emplace(duplicate_id, it->second);
-    return Result<std::uint64_t>(duplicate_id);
+    auto* value = queue.value().get()->as<Queue>();
+    if (value == nullptr || value->terminated)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "task queue is terminated");
+    auto duplicate = owner->handle_table().duplicate(Handle::from_raw(queue_id));
+    if (!duplicate.ok()) return Result<std::uint64_t>(duplicate.errc(), duplicate.context());
+    return Result<std::uint64_t>(duplicate.value().raw());
 }
 
 Result<void> TaskQueueService::submit_callback(
     std::uint64_t process_id, std::uint64_t queue_id, XTaskQueuePort port,
     std::uint64_t callback_context, std::uint64_t callback_va) {
     if (process_id == 0 || callback_va == 0 ||
-        (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion)) {
+        (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion))
         return Result<void>(RuntimeErrc::InvalidArgument,
-                            "callback submission requires a process, valid port, and non-null guest callback");
-    }
+            "callback submission requires a process, valid port, and non-null guest callback");
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    auto* queue = queue_ref.value().get()->as<Queue>();
+    if (queue == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue");
     std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end())
-        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
-    const auto& queue = it->second;
-    if (queue->owner_process_id != process_id)
-        return Result<void>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
     if (queue->terminated)
-        return Result<void>(RuntimeErrc::ProcessTerminated,
-                            "cannot submit callbacks to a terminated queue");
-    auto& callbacks = port == XTaskQueuePort::Work
-        ? queue->work_callbacks : queue->completion_callbacks;
+        return Result<void>(RuntimeErrc::ProcessTerminated, "cannot submit callbacks to a terminated queue");
+    auto& callbacks = port == XTaskQueuePort::Work ? queue->work_callbacks : queue->completion_callbacks;
     constexpr std::size_t kMaxPendingCallbacksPerPort = 4096;
     if (callbacks.size() >= kMaxPendingCallbacksPerPort)
-        return Result<void>(RuntimeErrc::OutOfResources,
-                            "manual task queue callback limit reached");
+        return Result<void>(RuntimeErrc::OutOfResources, "manual task queue callback limit reached");
     callbacks.push_back(Queue::Callback{callback_context, callback_va, false});
     queue_cv_.notify_all();
     return Result<void>::ok_result();
@@ -1900,54 +1930,34 @@ Result<void> TaskQueueService::submit_callback(
 Result<bool> TaskQueueService::dispatch(
     std::uint64_t process_id, std::uint64_t queue_id, XTaskQueuePort port,
     std::uint32_t timeout_ms, const GuestCallbackInvoker& invoke_callback) {
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<bool>(queue_ref.errc(), queue_ref.context());
+    auto* queue = queue_ref.value().get()->as<Queue>();
+    if (queue == nullptr) return Result<bool>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue");
     std::unique_lock lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end())
-        return Result<bool>(RuntimeErrc::NotFound, "unknown queue handle");
-    const auto queue = it->second;
-    if (queue->owner_process_id != process_id)
-        return Result<bool>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
     if (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion)
         return Result<bool>(RuntimeErrc::InvalidArgument, "unknown XTaskQueuePort value");
-    auto& callbacks = port == XTaskQueuePort::Work
-        ? queue->work_callbacks : queue->completion_callbacks;
+    auto& callbacks = port == XTaskQueuePort::Work ? queue->work_callbacks : queue->completion_callbacks;
     ++queue->active_dispatches;
     const auto finish_dispatch = [&] {
         if (queue->active_dispatches != 0) --queue->active_dispatches;
-        const bool still_referenced = std::any_of(
-            queues_.begin(), queues_.end(),
-            [&](const auto& entry) { return entry.second == queue; });
-        if (!still_referenced && queue->active_dispatches == 0) {
-            // No handle or in-flight dispatch can consume the remaining work.
+        if (queue->terminated && queue->active_dispatches == 0) {
             queue->work_callbacks.clear();
             queue->completion_callbacks.clear();
-            retired_queues_.erase(
-                std::remove(retired_queues_.begin(), retired_queues_.end(), queue),
-                retired_queues_.end());
         }
     };
-    const auto ready = [&] {
-        const bool still_referenced = std::any_of(
-            queues_.begin(), queues_.end(),
-            [&](const auto& entry) { return entry.second == queue; });
-        return !callbacks.empty() || queue->terminated || !still_referenced;
-    };
+    const auto ready = [&] { return !callbacks.empty() || queue->terminated; };
     if (callbacks.empty() && !queue->terminated) {
-        if (timeout_ms == 0xFFFFFFFFu)
-            queue_cv_.wait(lock, ready);
-        else if (timeout_ms != 0)
-            (void)queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), ready);
+        if (timeout_ms == 0xFFFFFFFFu) queue_cv_.wait(lock, ready);
+        else if (timeout_ms != 0) (void)queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), ready);
     }
     if (callbacks.empty()) {
         finish_dispatch();
         return Result<bool>(false);
     }
-
     if (!invoke_callback) {
         finish_dispatch();
-        return Result<bool>(RuntimeErrc::InvalidState,
-                            "manual guest callback dispatch requires an execution backend");
+        return Result<bool>(RuntimeErrc::InvalidState, "manual guest callback dispatch requires an execution backend");
     }
     auto callback = callbacks.front();
     callbacks.pop_front();
@@ -1957,14 +1967,12 @@ Result<bool> TaskQueueService::dispatch(
 
     Result<void> invoked = Result<void>::ok_result();
     try {
-        invoked = invoke_callback(callback.callback_va,
-                                  callback.context, callback.canceled);
+        invoked = invoke_callback(callback.callback_va, callback.context, callback.canceled);
     } catch (const std::exception& error) {
         invoked = Result<void>(RuntimeErrc::PlatformError,
                                std::string("guest callback invoker threw: ") + error.what());
     } catch (...) {
-        invoked = Result<void>(RuntimeErrc::PlatformError,
-                               "guest callback invoker threw an unknown exception");
+        invoked = Result<void>(RuntimeErrc::PlatformError, "guest callback invoker threw an unknown exception");
     }
     lock.lock();
     if (queue->active_callbacks != 0) --queue->active_callbacks;
@@ -1972,93 +1980,105 @@ Result<bool> TaskQueueService::dispatch(
     queue_cv_.notify_all();
     lock.unlock();
     if (!invoked.ok())
-        return Result<bool>(invoked.errc(),
-                            "guest task-queue callback failed: " + invoked.error_string());
+        return Result<bool>(invoked.errc(), "guest task-queue callback failed: " + invoked.error_string());
     return Result<bool>(true);
 }
 
 Result<void> TaskQueueService::close_queue(
     std::uint64_t process_id, std::uint64_t queue_id) {
-    std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end())
-        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
-    const auto queue = it->second;
-    if (queue->owner_process_id != process_id)
-        return Result<void>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
-    queues_.erase(it);
-    const bool has_alias = std::any_of(
-        queues_.begin(), queues_.end(),
-        [&](const auto& entry) { return entry.second == queue; });
-    if (!has_alias) {
-        if (queue->active_dispatches != 0) {
-            if (std::find(retired_queues_.begin(), retired_queues_.end(), queue) ==
-                retired_queues_.end())
-                retired_queues_.push_back(queue);
-        } else {
-            // Pending callbacks cannot be reached after the final handle closes.
-            queue->work_callbacks.clear();
-            queue->completion_callbacks.clear();
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto object_id = queue_ref.value().get()->id();
+    bool last_handle = false;
+    {
+        std::lock_guard lock(lock_);
+        auto closed = owner->handle_table().close(Handle::from_raw(queue_id));
+        if (!closed.ok()) return closed;
+        const auto remaining = owner->handle_table().list_handles();
+        last_handle = std::none_of(remaining.begin(), remaining.end(),
+            [&](const auto& info) { return info.object_id == object_id; });
+        if (last_handle) {
+            auto* queue = queue_ref.value().get()->as<Queue>();
+            if (queue != nullptr) {
+                queue->terminated = true;
+                for (auto& callback : queue->work_callbacks) callback.canceled = true;
+                for (auto& callback : queue->completion_callbacks) callback.canceled = true;
+                if (queue->active_dispatches == 0) {
+                    queue->work_callbacks.clear();
+                    queue->completion_callbacks.clear();
+                }
+            }
+            auto it = process_queue_objects_.find(process_id);
+            if (it != process_queue_objects_.end()) {
+                auto& ids = it->second;
+                ids.erase(std::remove(ids.begin(), ids.end(), object_id), ids.end());
+                if (ids.empty()) process_queue_objects_.erase(it);
+            }
         }
     }
     queue_cv_.notify_all();
+    if (last_handle) {
+        queue_ref.value().release();
+        process.value().release();
+        return pm_.objects().destroy(object_id);
+    }
     return Result<void>::ok_result();
 }
 
 Result<void> TaskQueueService::terminate_queue(
     std::uint64_t process_id, std::uint64_t queue_id, bool wait) {
-    std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end()) {
-        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    auto* queue = queue_ref.value().get()->as<Queue>();
+    if (queue == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue");
+    {
+        std::lock_guard lock(lock_);
+        queue->terminated = true;
+        for (auto& callback : queue->work_callbacks) callback.canceled = true;
+        for (auto& callback : queue->completion_callbacks) callback.canceled = true;
+        (void)wait;
     }
-    if (it->second->owner_process_id != process_id) {
-        return Result<void>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
-    }
-    it->second->terminated = true;
-    for (auto& callback : it->second->work_callbacks) callback.canceled = true;
-    for (auto& callback : it->second->completion_callbacks) callback.canceled = true;
-    (void)wait; // waiting for completion is not supported by the manual guest-thread model
     queue_cv_.notify_all();
     return Result<void>::ok_result();
 }
 
 void TaskQueueService::release_process(std::uint64_t process_id) {
-    std::lock_guard lock(lock_);
-    for (auto& queue : retired_queues_) {
-        if (queue->owner_process_id == process_id) {
-            queue->terminated = true;
-            queue->work_callbacks.clear();
-            queue->completion_callbacks.clear();
+    std::vector<std::uint64_t> object_ids;
+    {
+        std::lock_guard lock(lock_);
+        const auto it = process_queue_objects_.find(process_id);
+        if (it == process_queue_objects_.end()) return;
+        object_ids = std::move(it->second);
+        process_queue_objects_.erase(it);
+    }
+    for (const auto object_id : object_ids) {
+        auto object = pm_.objects().lookup_id(object_id);
+        if (object.ok()) {
+            if (auto* queue = object.value().get()->as<Queue>()) {
+                std::lock_guard lock(lock_);
+                queue->terminated = true;
+                queue->work_callbacks.clear();
+                queue->completion_callbacks.clear();
+            }
+            object.value().release();
         }
+        queue_cv_.notify_all();
+        (void)pm_.objects().destroy(object_id);
     }
-    for (auto& entry : queues_) {
-        if (entry.second->owner_process_id == process_id) {
-            entry.second->terminated = true;
-            entry.second->work_callbacks.clear();
-            entry.second->completion_callbacks.clear();
-        }
-    }
-    for (auto it = queues_.begin(); it != queues_.end();) {
-        if (it->second->owner_process_id == process_id) it = queues_.erase(it);
-        else ++it;
-    }
-    retired_queues_.erase(
-        std::remove_if(retired_queues_.begin(), retired_queues_.end(),
-            [&](const auto& queue) { return queue->owner_process_id == process_id; }),
-        retired_queues_.end());
-    queue_cv_.notify_all();
 }
 
 std::size_t TaskQueueService::live_queues() const {
     std::lock_guard lock(lock_);
-    std::unordered_set<const Queue*> unique;
-    unique.reserve(queues_.size() + retired_queues_.size());
-    for (const auto& entry : queues_) unique.insert(entry.second.get());
-    for (const auto& queue : retired_queues_) unique.insert(queue.get());
-    return unique.size();
+    std::size_t count = 0;
+    for (const auto& [pid, ids] : process_queue_objects_) {
+        (void)pid;
+        count += ids.size();
+    }
+    return count;
 }
 
 // ── TimingService ────────────────────────────────────────────────────────

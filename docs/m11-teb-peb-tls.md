@@ -47,9 +47,9 @@ vector slot. Index 0 is valid for this module-vector model.
   The process environment maintains a stable image-base-to-index mapping;
   collisions receive another free slot. The registry is bounded to 64 modules
   and assignments are not recycled during that environment's lifetime.
-- LastErrorValue is stored per thread at TEB+0x68 and exposed through typed
-  host-side accessors. The Win32 SetLastError/GetLastError import adapters are
-  not yet connected to the execution context.
+- LastErrorValue is stored per thread at TEB+0x68. The Win32
+  SetLastError/GetLastError import adapters are connected through the
+  execution-context marshalling bridge and use the same guest TEB storage.
 - TLS callback execution and compiler-generated TLS reads are not claimed to
   work end to end; native GS setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full

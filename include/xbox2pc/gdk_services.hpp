@@ -186,8 +186,8 @@ public:
     Result<void> on_initialize() override;
     Result<void> on_shutdown() override;
 
-    // Queue handle ids (XTaskQueueHandle modeled as uint64 ids; the
-    // runtime's own handle system is used for ownership).
+    // Queue handles are encoded by the owning process's M4 HandleTable;
+    // aliases use independent slots/generations in the same guest handle namespace.
     Result<std::uint64_t> create_queue(std::uint64_t process_id,
                                         std::uint32_t work_mode,
                                         std::uint32_t completion_mode);
@@ -210,7 +210,9 @@ public:
     std::size_t live_queues() const;
 
 private:
-    struct Queue {
+    struct Queue : RuntimeObject {
+        XBOX2PC_RUNTIME_OBJECT_TYPE(Queue, TaskQueue)
+        Queue() : RuntimeObject(TypeId::TaskQueue) {}
         std::uint64_t owner_process_id = 0;
         bool terminated = false;
         std::uint32_t work_mode = 0;
@@ -221,14 +223,12 @@ private:
         std::uint32_t active_callbacks = 0;
         std::uint32_t active_dispatches = 0;
     };
+    Result<RefGuard> lookup_queue(std::uint64_t process_id, std::uint64_t queue_id) const;
     ApiRegistry& api_reg_;
     ProcessManager& pm_;
     mutable std::mutex lock_;
     std::condition_variable queue_cv_;
-    std::map<std::uint64_t, std::shared_ptr<Queue>> queues_;
-    // Keep callback-bearing queues alive after the last public handle closes.
-    std::vector<std::shared_ptr<Queue>> retired_queues_;
-    std::uint64_t next_id_ = 1;
+    std::map<std::uint64_t, std::vector<std::uint64_t>> process_queue_objects_;
     std::uint64_t process_exit_observer_id_ = 0;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };
