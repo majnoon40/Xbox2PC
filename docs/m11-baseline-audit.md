@@ -1,260 +1,380 @@
 # M11 baseline audit
 
-**Audit scope:** merged `main` at `5dcda95b2620530c89ad0cb1ebb250cbae078cf4` (M10 merge commit).  
-**Phase:** M11 Phase 0 only. No feature code was changed for this audit.  
-**Method:** source inspection of the loader, memory manager, execution engine/context, ABI bridge, GDK services, process/thread/handle managers, PAL, tests, and existing documentation.
+**Audit scope:** Phase 0 only. Source inspection of the merged `main` at
+`5dcda95b2620530c89ad0cb1ebb250cbae078cf4` (M10 merge commit), dated
+2026-11-23. No feature code is included in this slice.
 
-This is a baseline report, not a design approval and not a claim of Windows or Xbox kernel equivalence. Source line references below refer to the audited commit.
+**Method:** Findings below are based on the implementation and tests present
+at that revision. This is a source audit, not a fresh local build or a
+benchmark run. Source pointers below identify the relevant implementation areas at this
+baseline commit; line numbers may move as M11 changes the source.
 
 ## Executive summary
 
-The repository already has a narrow end-to-end execution demonstration: a synthetic PE loaded through the package/VFS and loader path executes a tiny instruction sequence in the deterministic interpreter and returns 42. That is useful proof of the M4–M8 plumbing, but it is **not** a native PE process runner and does not demonstrate a conventional Windows program reaching `ExitProcess`.
+M10 provides useful process, thread, address-space, synchronization, API
+marshalling, and task-queue foundations. It does **not** yet provide a
+general-purpose Windows x64 process environment or an end-to-end native PE
+runner.
 
-The main M11 blockers are concrete:
+The current execution backend is an interpreter over a modeled guest address
+space. API imports are represented by synthetic guest dispatch addresses and
+handled by the interpreter's marshalling bridge. The runtime has no TEB/PEB,
+no guest GS-base setup, no implicit loader-managed TLS, no Windows SEH
+unwinder, and no single guest-visible handle namespace spanning all services.
 
-- Only the bounded deterministic interpreter is implemented. No native backend, native call thunk, guest GS-base management, or host-fault containment exists.
-- The current guest address space is a logical Xbox-VA coordinate system backed by an unrelated `mmap(nullptr)` host mapping. Native instruction fetches and ordinary guest pointers cannot use those logical addresses directly.
-- There is no TEB/PEB. Existing TLS is an explicit per-thread byte map, not Windows implicit TLS through `gs:[0x58]`.
-- The handle system is split between runtime/per-process `HandleTable` objects and a separate monotonic task-queue ID map. The current handle bit layout does not satisfy M11's nonzero-multiple-of-four requirement.
-- Event/mutex/semaphore waits observe managed-thread cancellation; an infinite task-queue dispatch does not. Because process-exit observers run only after thread drain, a managed guest thread blocked in infinite `XTaskQueueDispatch` can prevent the observer that would wake it from running.
-- Relocation processing is not sized or optimized for 600k entries. The current benchmark exercises only a tiny synthetic relocation set, and the current relocation loop can toggle page protections repeatedly for each relocation targeting a non-writable section.
+A notable lifecycle gap is also visible: Win32 event/mutex/semaphore waits poll
+for managed-thread cancellation, but an infinite manual task-queue dispatch
+wait is not cancellation-aware. Process-exit observers that release queues run
+only after ProcessManager has joined the process's threads. A thread blocked in
+that dispatch can therefore prevent the cleanup callback that would wake it.
 
-No feature implementation should begin until these findings are accepted as the baseline.
+These findings support investigating native execution as the primary x86-64
+path, but they do not by themselves settle the native execution design.
 
 ---
 
-## 1. Can a current backend run a PE from entry to exit? What blocks it?
+## 1. Can a current backend run a PE from entry to exit?
 
-### Finding: narrowly yes for a synthetic PE; no general/native process runner
+**Answer: only a restricted, explicitly driven PE execution path exists. There
+is no general native PE runner.**
 
-The implemented backend is `DeterministicBackend`, labeled `deterministic-test`. Its source and public header describe a bounded instruction subset, not a general x86-64 emulator. The instruction loop in `src/execution_engine.cpp` rejects unsupported instructions with structured outcomes. The interface `IExecutionEngine` permits other backends, but no native implementation is registered or present.
+Evidence:
 
-There is a real end-to-end test, `ExecE2eTest.VfsPackageLoadResolveExecuteCleanup`, in `tests/execution_test.cpp:1987-2126`. It builds a synthetic PE containing:
+- `src/execution_engine.cpp` implements `DeterministicBackend` as an
+  interpreter loop. It checks a bounded execution budget, asks the x86
+  interpreter to execute one instruction, and handles guest faults as
+  structured `ExecutionResult` values. The code constructs
+  `x86::Interpreter` and calls `step_at_rip()`; it does not transfer control
+  to native guest instructions.
+- The interpreter's supported instruction set is deliberately bounded.
+  Unsupported instructions produce guest faults. AVX/VEX/EVEX and broad
+  architectural coverage are not a goal of this backend.
+- `ExecutionContext::prepare_entry` in
+  `src/execution_context.cpp` validates a loaded image's entry point,
+  prepares the Microsoft x64 entry stack, installs a completion sentinel, and
+  records resolved import bindings. `invoke()` then calls the selected
+  `IExecutionEngine`. This is a runtime/test API, not a command-line PE
+  process runner.
+- Imported calls are intercepted when RIP equals a synthetic API-binding
+  address. The bridge resolves the import identity, extracts arguments,
+  validates guest pointers, dispatches through `ApiRegistry`, and resumes at
+  the guest return address. See `src/execution_engine.cpp` and
+  `src/execution_context.cpp`.
+- The PE loader maps images, applies the currently supported relocation subset,
+  resolves imports, and creates loader objects. Loading/preparing an image is
+  not equivalent to executing an arbitrary Windows program. See
+  `src/image_loader.cpp`.
+- Existing execution tests exercise bounded guest snippets and synthetic PE
+  fixtures; they do not demonstrate an independently built Windows PE
+  completing a normal process lifecycle through a user-facing `run` command.
+- The M10 API surface does not yet cover all calls in the proposed Phase 1
+  fixture. In particular, this revision has no registered
+  `SetLastError`, `GetLastError`, or `ExitProcess` implementation. The
+  existing TLS helper is explicit rather than automatic (see section 3).
 
-- `mov rax, 20`
-- `add rax, 22`
-- `ret`
-
-The test places that PE in a synthetic XPK package, mounts and discovers it through VFS, loads it with the M6 loader, prepares an M8 execution context, invokes `DeterministicBackend`, and asserts a return value of 42. This is a meaningful entry-to-return integration test for the implemented subset.
-
-It does **not** demonstrate a normal PE process running to `ExitProcess`:
-
-- The sample returns through the M8 completion sentinel; it does not call `ExitProcess`.
-- The test supplies explicit synthetic PID/TID values and a deterministic backend.
-- The test does not execute CRT startup, compiler-generated TLS access, C++ exception unwinding, or a general Windows API surface.
-- The M6 loader explicitly separates loading/preparation from execution; `prepare_exec()` validates and describes an entry point but does not start it (`include/xbox2pc/image_loader.hpp:37-46)).
-- The current CLI exposes inspect/validation/static-analysis/compatibility-report functionality; there is no `xbox2pc run` command or backend-selection runner in `src/m9_cli.cpp` and `tools/xbox2pc_cli.cpp`.
-
-### Blockers
-
-1. No native x86-64 execution backend.
-2. Interpreter coverage is intentionally bounded and excludes large parts of the ISA (including SIMD/VEX/EVEX and other classes); see `include/xbox2pc/execution_engine.hpp`, `src/execution_engine.cpp`, and `include/xbox2pc/x64_decoder.hpp:9-24`.
-3. No guest TEB/PEB, implicit TLS, last-error state, or Windows exception unwinder.
-4. No native executable mapping at the guest virtual addresses.
-5. No executable host-shim thunk for imported APIs.
-6. No process-level runner connecting loader, process/thread lifecycle, entry invocation, exit-code propagation, trace output, and cleanup.
-
-**Conclusion:** the existing E2E test is a good interpreter oracle and integration fixture. It must not be described as general PE execution or native execution.
+**Conclusion:** A synthetic PE can be loaded and a restricted entry path can
+be driven through the interpreter where its instructions and imports are
+supported. The current tree does not establish that a freestanding Windows
+PE can run from its real entry point to process exit. There is no native
+backend or `xbox2pc run` implementation at this baseline.
 
 ## 2. How does guest code reach host shims?
 
-### Current interpreter path
+**Answer: through synthetic API-binding addresses and an interpreter-side
+marshalling bridge, not through native executable thunks.**
 
-The M7 resolver writes deterministic synthetic dispatch values in the reserved `0x5100xxxx` range into resolved IAT slots. The deterministic backend recognizes these values as API bindings and calls the M8 marshalling bridge. The bridge:
+Current path:
 
-1. identifies the exact imported DLL/export binding;
-2. extracts arguments according to the per-API `MarshalPlan` and Microsoft x64 register/stack model;
-3. validates and reads guest pointers through `GuestMemory`;
-4. dispatches through `ApiRegistry`;
-5. writes documented output buffers back through guest memory and updates the modeled return state.
+1. The loader resolves imports and records their library/export identity.
+2. `ExecutionContext::prepare_entry` assigns the resolved imports synthetic
+   API-binding addresses in the execution request.
+3. The interpreter recognizes a binding address as a special dispatch point.
+4. The bridge reads the guest return address from `[RSP]`, extracts arguments
+   according to the call's ABI plan, validates pointer ranges through
+   `GuestMemory`, and invokes the registered host implementation.
+5. The interpreter resumes at the guest return address.
 
-The exact import identity is retained in `ExecutionRequest::api_bindings`; the execution context does not treat an arbitrary address in the synthetic range as sufficient identity. See `include/xbox2pc/execution_engine.hpp`, `src/execution_engine.cpp`, `src/execution_context.cpp:144-230`, and `src/api_compat.cpp`.
+Relevant implementation: `src/execution_context.cpp`,
+`src/execution_engine.cpp`, `src/xbox_abi.cpp`, and
+`src/guest_memory.cpp`.
 
-### ABI work that already exists
+The existing ABI model covers important Microsoft x64 mechanics:
 
-`src/xbox_abi.cpp:101-242` models the Microsoft x64 call layout:
+- Integer arguments in RCX, RDX, R8, and R9.
+- Floating-point arguments in XMM0–XMM3 according to argument position.
+- 32-byte shadow space.
+- Stack arguments after the return-address and shadow-space area.
+- 16-byte call-frame alignment and an 8-byte return-address slot at callee
+  entry.
+- Return values through the modeled CPU state.
 
-- positional integer/pointer arguments use RCX, RDX, R8, R9;
-- floating-point arguments use the corresponding XMM position;
-- the caller reserves 32 bytes of shadow space;
-- later arguments spill to stack slots;
-- the modeled stack frame preserves the documented 16-byte alignment rules and return-address placement.
+The ABI code prepares and extracts a **modeled** CPU/guest stack frame. It does
+not provide a native assembly thunk that switches from executing guest code
+to a host C++ shim while preserving host callee-saved registers, stack
+alignment, shadow space, floating-point state, and exception boundaries.
 
-This is CPU-state/guest-memory preparation. It is not a native host call thunk.
+Guest pointers are guest virtual addresses, not host pointers. The current
+bridge uses `GuestMemory` to validate and copy data through the M4
+`AddressSpace`; this is an important boundary to preserve for native shims.
 
-### Native-path gap
-
-A native CPU executing a guest `call [IAT]` would jump to the synthetic value in the IAT. That value is not currently an executable thunk. There is no assembly bridge that:
-
-- saves/restores the required host callee-saved state;
-- switches from the guest stack to a controlled host stack;
-- maintains Microsoft x64 shadow-space and alignment requirements at the guest/host boundary;
-- switches or restores GS state as needed;
-- invokes the typed `ApiRegistry` implementation;
-- writes results back to guest state without exposing arbitrary host pointers.
-
-The current no-host-function-pointer rule is sound for the interpreter bridge, but native execution needs a real, executable thunk mechanism rather than reusing the interpreter's synthetic-address interception unchanged.
-
-**Conclusion:** ABI layout and typed API dispatch exist as a model. Native thunk execution does not.
+**Conclusion:** The current shim mechanism is interpreter-specific. Native
+execution will need an actual ABI transition path; the existing marshalling
+plans and pointer bridge are reusable concepts, not an already implemented
+native thunk layer.
 
 ## 3. What exists for TEB/PEB, and where does GS-relative access resolve?
 
-### Finding: no TEB or PEB implementation
+**Answer: no TEB/PEB implementation or guest GS-base setup was found.**
 
-The audited source has no TEB/PEB structure or per-process/per-thread allocation for those structures. In particular:
+- There are no guest TEB or PEB structures allocated in each process/thread's
+  M4 address space.
+- There is no code setting or retrieving a guest GS base. The source search
+  found no `ARCH_SET_GS`, `wrgsbase`, or equivalent GS-base implementation.
+- There is no mapping for `gs:[0x30]`, `gs:[0x60]`, or
+  `gs:[0x58]`; guest GS-relative loads therefore have no Windows TEB
+  semantics in the current runtime.
+- `ExecutionContext::Info` records process/thread identity, stack bounds,
+  and the image TLS index, but it is not a TEB.
+- M7/M10 TLS support consists of `tls_assign_index` and the explicit
+  `tls_init_thread` helper in `src/gdk_services.cpp`. It copies a module's
+  TLS template and zero-fill into an `RtThread` TLS slot. It does not build
+  the Windows TLS pointer array at `gs:[0x58]`, install a TEB, or make
+  compiler-generated Windows TLS access work automatically.
+- `docs/thread-execution.md` explicitly describes TLS materialization as the
+  explicit `api::tls_init_thread` operation and says implicit loader-side TLS
+  allocation is not claimed.
+- TLS callback execution exists as a separately invoked execution operation;
+  it is not proof that the complete Windows process/thread TLS lifecycle is
+  automatically driven by the loader.
 
-- `cpu::CpuState` contains 16 GPRs, RIP, RFLAGS, XMM registers, MXCSR, and x87 control word; it has no FS/GS base fields (`include/xbox2pc/guest_cpu_state.hpp:66-99`).
-- The decoder can represent an operand's segment as `Gs` (`include/xbox2pc/x64_decoder.hpp:91-114`), but that is decode metadata, not a GS-base implementation or a memory-resolution rule.
-- The deterministic backend does not implement a general segment-relative memory execution path.
-- The Linux PAL exposes memory/thread primitives but no guest GS-base context API or save/restore abstraction.
-- There is no `ThreadLocalStoragePointer` implementation and no `gs:[0x58]` resolution.
+**Conclusion:** The proposed TEB/PEB and implicit TLS work is new
+functionality, not a small extension of an existing GS implementation.
 
-Therefore GS-relative access currently resolves nowhere as a guest Windows TEB access. It is not redirected to a TEB or TLS array.
+## 4. Handle representation across services; colliding token spaces?
 
-### Existing TLS is not implicit Windows TLS
+**Answer: M4 has generation-checked per-table handles, but the guest-facing
+service surface is not unified.**
 
-There are three separate pieces:
+M4 `Handle` is a 64-bit encoded token. At this revision it contains:
 
-1. `decode_tls()` validates and reports PE TLS template/index/callback metadata (`src/image_loader.cpp:1226-1378`).
-2. `tls_assign_index()` assigns a runtime bookkeeping index per process/image.
-3. `tls_init_thread()` copies template bytes, appends zero-fill bytes, and stores the result using `RtThread::tls_set(index, ...)` (`src/gdk_services.cpp:2100-2178`).
+- 9 low bits for object type,
+- 31 bits for generation,
+- 15 bits for slot index,
+- 9 high bits for table ID.
 
-`RtThread` stores a map from a 64-bit key to a byte vector. That is not a guest-memory TLS block referenced through a TEB. The current helper does not build the TLS pointer array at `gs:[0x58]`, and it does not write the PE TLS index slot. The loader reports per-thread template materialization as unsupported; `ExecutionContext::prepare_entry` retains the TLS index as metadata but does not allocate implicit TLS (`src/image_loader.cpp:1399-1618`, `src/execution_context.cpp:144-230`, `docs/thread-execution.md`).
+`HandleTable` validates the owning table, slot, generation, and object type.
+Closing a slot advances its generation, so stale handles are rejected.
+Processes own their own M4 handle tables. See
+`include/xbox2pc/handle_manager.hpp` and `src/handle_manager.cpp`.
 
-M8's separate TLS callback helper invokes callbacks with reason `DLL_PROCESS_ATTACH` only. It does not implement the full process/thread attach/detach lifecycle and documented ordering. The normal loader path validates/counts callbacks but does not automatically execute the complete lifecycle.
+M10 guest synchronization objects (events, mutexes, semaphores) are registered
+in the owning process's M4 `HandleTable`. Their raw encoded values are
+validated against that process table. The registered `CloseHandle`
+implementation currently dispatches only to the synchronization-object close
+path. It is not a general object-type dispatcher.
 
-### Last-error state
+Task queues use a separate namespace:
 
-There is no TEB-backed last-error slot and no registered `SetLastError`/`GetLastError` implementation in the current API descriptor/implementation set. Error strings and typed runtime errors are internal diagnostics; they are not the Windows per-thread last-error contract.
+- `TaskQueueService::next_id_` issues monotonically increasing 64-bit IDs.
+- The queue map is keyed by those IDs and stores shared queue objects.
+- Duplicate queue handles are new IDs referring to the same shared queue.
+- `XTaskQueueCloseHandle` closes those IDs through TaskQueueService.
+- These IDs do not use M4 `HandleTable` slots, generation checks, or the
+  M4 table ID.
 
-**Conclusion:** TEB/PEB, GS-base management, implicit TLS, TLS index-slot initialization, complete callback reasons/order, and last-error APIs are all M11 work.
+The task-queue counter currently starts at small values, while normal
+generation-encoded M4 handles have generation bits set. No immediate numeric
+collision is demonstrated by the current allocation sequence. However, they
+are separate token spaces with no global uniqueness contract. Treating both
+as interchangeable Windows `HANDLE` values, or adding generic
+`CloseHandle` dispatch without first unifying the representation, would be
+unsafe.
 
-## 4. Handle representation across services; colliding token spaces
+The M4 encoding also does not implement the M11 proposal's explicit
+nonzero-multiple-of-four guest handle encoding. Its generation protection is
+useful and should not be confused with that requested guest ABI.
 
-### M4 handle representation
+**Conclusion:** There is a reusable M4 object/handle manager, but Phase 3
+requires a guest-visible unified namespace and type-directed close semantics.
+It should not create a second independent owner of object lifetime.
 
-`Handle` is a 64-bit token with this layout (`include/xbox2pc/handle_manager.hpp:22-55`):
+## 5. Lock order across ProcessManager, services, and observers
 
-| Bits | Field |
-|---|---|
-| 0–8 | object type |
-| 9–39 | generation |
-| 40–54 | slot index |
-| 55–63 | table ID |
+**Answer: locks are locally scoped and several nested orders can be observed,
+but there is no single documented global lock-order contract.**
 
-Generation checks reject stale slot reuse; table IDs prevent a token from one table resolving in another table. Each `HandleTable` has a 32K-slot maximum. There is a runtime root table and process-owned tables.
+The following table records the principal locks and observed nesting. It is
+not a claim that every possible path has been exhaustively proven deadlock-free.
 
-This representation is not the M11 format requirement: the object type occupies the low bits, so the raw value is not guaranteed to be a nonzero multiple of four. For example, built-in Event, Mutex, and Semaphore type IDs are 3, 4, and 5 (`include/xbox2pc/runtime_object.hpp:24-34`).
-
-### Current service ownership is split
-
-- Win32 synchronization objects are registered with `ObjectManager` and placed in the owning `ManagedProcess::handle_table()`. `GameRuntimeService` separately tracks `(PID, raw handle) -> object ID` for cleanup (`src/gdk_services.cpp:1199-1258)).
-- Loaded images also receive a process-table handle (`src/image_loader.cpp:1570-1618`).
-- Process/thread/runtime objects can use the runtime root table.
-- Task queues do **not** use `HandleTable`. `TaskQueueService` assigns monotonically increasing service IDs from `next_id_`, starting at 1, and stores them in its own `queues_` map (`include/xbox2pc/gdk_services.hpp:174-220`, `src/gdk_services.cpp:1795-1837)).
-- Task queues close through `XTaskQueueCloseHandle`; the current Win32 `CloseHandle` implementation only recognizes synchronization objects (`src/gdk_services.cpp:760-830)).
-
-Consequently, numerically equal values can exist in the task-queue token space and the process handle-table token space. They are currently disambiguated by which API/service receives the value, not by one unified per-process object table.
-
-### M11 implication
-
-The unified table is not a small wrapper around the current maps. It must become the authoritative per-process registration/lookup/close path for synchronization objects, task queues, and later object types. The current raw encoding also needs to be reconciled with the M11 alignment requirement while preserving stale-generation and cross-process rejection.
-
-## 5. Lock ownership and observed lock order
-
-There is no single global lock-order document in the current repository. The following table records the important locks and nested paths observed in the audited source. It is not a claim that every possible path has been exhaustively model-checked.
-
-| Owner | Lock(s) | Observed nesting / notes |
+| Lock / owner | Protects | Observed interactions / cautions |
 |---|---|---|
-| `ProcessManager` | `lock_` | Protects PID/object map, limits, and exit observers. Some paths hold it while looking up objects and querying process/address-space statistics. |
-| `ManagedProcess` | `detail_lock_` | Protects module/thread lists and process suspension bookkeeping. Process transitions are routed through process-model state locks. |
-| `ObjectManager` | object-map `lock_`, `drain_mutex_` | Object lookup pins under the map lock. Destruction marks the object, drops the map lock while waiting for pins, runs `on_destroy()` outside the map lock, then reacquires it to erase. |
-| `HandleTable` | per-table `shared_mutex` | Protects slots/free list. Lookup releases the table lock before resolving the object ID through `ObjectManager`. |
-| `AddressSpace` | `Impl::lock` | Protects the sorted region map and host protection changes. |
-| `GameRuntimeService` | `state_lock_`, `sync_transaction_lock_` | State maps use `state_lock_`. Guest wait/signal/close transactions serialize through `sync_transaction_lock_`, then take individual event/mutex/semaphore locks. Some close paths hold the transaction lock while validating process/table ownership. |
-| `TaskQueueService` | `lock_` + `queue_cv_` | Queue map, callback queues, and dispatch counts use one lock. Dispatch releases it before invoking a guest callback. |
-| `RtThread` | `transition_lock_`, execution-gate mutex | Thread state/metadata and cooperative park/cancel state are separately synchronized. |
-| Guest sync objects | per-object mutex/condition variable | Event, guest mutex, and semaphore state is protected internally; service transaction lock serializes cross-object wait-all probes with signal/release/close. |
+| `ProcessManager::lock_` | PID/object map, pending thread count, exit-observer registry | Termination takes this lock while invoking exit observers. Observer callbacks therefore execute under this lock and must not re-enter ProcessManager, as the public header explicitly states. |
+| `ManagedProcess::detail_lock_` | Thread and module lists; process-suspended thread IDs | Thread IDs are generally snapshotted and the lock released before object lookup/join. |
+| `ObjectManager` internal lock | Runtime-object registry and lookup/destruction | Used to pin process/thread/sync objects. RefGuards keep objects alive across operations. |
+| Per-process `HandleTable::lock_` | Handle slots, generations, rights | Sync-handle lookup/close reaches this table after resolving the owning process. |
+| `AddressSpace::Impl::lock` | Guest VM region map and backing protection transitions | Region metadata changes and PAL protection operations are serialized here. |
+| `GameRuntimeService::sync_transaction_lock_` | Multi-object wait transactions and sync close/set/reset operations | Some operations first resolve a process-owned handle; wait-all coordinates several object acquisitions under this transaction lock. |
+| `GameRuntimeService::state_lock_` | Service-side process/TLS/sync-object bookkeeping | The process-exit observer acquires it, removes process state, then destroys objects after releasing it. |
+| Sync-object internal locks | Event, mutex, semaphore state and wait conditions | Wait paths poll/cancel and interact with these objects; wait-all must keep its transaction/rollback discipline consistent. |
+| `TaskQueueService::lock_` | Queue map, callback queues, dispatch counts, termination state | Dispatch waits on `queue_cv_`; it unlocks before invoking a guest callback. Process-exit observer cleanup takes this lock. |
+| `RtThread` transition/gate locks | Thread state and cooperative execution gate | Process termination requests stop/cancel and joins threads before resource teardown. |
 
-### Important observer ordering
+Important observer behavior:
 
-`ProcessManager::terminate_process` invokes process-exit observers while holding `ProcessManager::lock_` (`src/process_management.cpp:305-388`). The Game Runtime observer then takes `GameRuntimeService::state_lock_` and later destroys retired objects; the task-queue observer takes `TaskQueueService::lock_` (`src/gdk_services.cpp:851-967`, `1721-1795`, `1687-1720`).
+- `ProcessManager::terminate_process` stops and joins threads, closes the
+  process handle table, releases guest memory, detaches threads, and marks the
+  process terminated before it invokes observers.
+- It invokes observers while holding `ProcessManager::lock_` to serialize
+  callback execution with observer removal.
+- `GameRuntimeService::release_process` and
+  `TaskQueueService::release_process` acquire their respective service locks.
+- The header contract requires observers to be short, non-throwing, and
+  non-reentrant with respect to ProcessManager.
 
-The current contract explicitly forbids observer callbacks from re-entering `ProcessManager`; observer removal takes the same manager lock and therefore serializes with callback execution. This is a fragile global lock boundary: callbacks are required to remain short and non-reentrant.
+An easily missed naming detail: `ProcessManager::find_locked` does not
+actually acquire `ProcessManager::lock_`; it resolves the process through
+`ObjectManager::lookup_handle`. Do not infer a lock acquisition from that
+helper's name.
 
-### Observed nested orders to preserve or deliberately redesign
+**Conclusion:** M11 Phase 7 should establish and test a real global lock-order
+policy. In particular, observer callbacks should not perform substantial
+cleanup while holding the ProcessManager lock. The M11 plan's enqueue-PID,
+cleanup-outside-manager-lock approach addresses this risk, but is not
+implemented at this baseline.
 
-- Process-manager map operations can nest manager lock → object lookup/pin; process statistics can continue into address-space, process-detail, and handle-table locks.
-- Process-exit notification nests ProcessManager lock → service state/queue lock → (after service map locks are released) ObjectManager destruction.
-- Guest sync close nests sync-transaction lock → process lookup → process handle-table lookup/close → service state lock. Wait probes serialize sync-transaction lock → individual sync-object lock.
-- Task-queue dispatch waits on its condition variable with the queue lock released by the condition-variable wait and releases the queue lock before calling the guest callback.
+## 6. What happens if a process terminates while a thread is blocked in a wait?
 
-M11 should turn this observed order into a maintained lock-order table and move process-exit cleanup out of the ProcessManager lock as specified in Phase 7. The current callback-under-manager-lock contract should not be silently carried forward.
+**Answer: Win32 synchronization waits are designed to observe cancellation;
+task-queue dispatch has a significant cancellation gap.**
 
-## 6. Process termination while a thread is blocked in a wait
+For Win32 synchronization objects:
 
-### Win32 event/mutex/semaphore waits
+- `ProcessManager::terminate_process` calls `request_stop()` on each owned
+  thread before joining it.
+- `RtThread::request_stop` sets the stop flag, cancels the cooperative
+  execution gate, and invokes a registered cancellation waker when present.
+- `GameRuntimeService::wait_object` resolves the managed guest thread,
+  marks it Blocked when appropriate, checks the stop flag, and uses bounded
+  wait slices for events, mutexes, and semaphores. The wait returns a
+  thread-termination error when cancellation is observed.
+- Process termination then joins each thread with a 50 ms attempt. If a thread
+  has not exited, termination returns a deferred/timeout error and leaves
+  process handles and guest memory intact for a retry. It does not continue
+  tearing down memory underneath a live thread.
+- Process-exit observers run only after the join and teardown succeed.
 
-`ProcessManager::terminate_process` transitions the process toward termination, calls `request_stop()` on each owned thread, and joins each thread with a 50 ms timeout before closing handles or releasing the address space (`src/process_management.cpp:305-367`).
+For task queues:
 
-`RtThread::request_stop()` sets the stop flag, cancels the cooperative execution gate, and invokes a registered cancellation waker (`src/thread_model.cpp:442-479`). The M10 Win32 wait implementation resolves the calling managed thread by PID/TID, marks it blocked, and checks its stop flag and suspension gate in bounded 2 ms wait slices (`src/gdk_services.cpp:1331-1472`). Wait-all also checks stop/suspension between bounded attempts.
+- `TaskQueueService::dispatch` can wait on `queue_cv_` for an infinite
+  timeout. Its predicate checks for queued callbacks, queue termination, or
+  loss of all public handles.
+- The dispatch wait does not take the guest thread's stop token or register a
+  cancellation waker.
+- The process-exit observer that calls `TaskQueueService::release_process`
+  runs only after ProcessManager has joined all process threads.
+- Therefore, if a process thread is blocked indefinitely in task-queue
+  dispatch with no callback arriving, termination may wait for that thread;
+  the observer that would terminate and notify the queue cannot run until
+  after the join. The 50 ms join attempt can return deferred, leaving the
+  process in Terminating until the blocked dispatch is independently woken.
 
-For a correctly identified managed thread blocked in these specific Win32 waits, termination is expected to be observed promptly. If a thread is blocked in an operation that does not observe cancellation, or cannot be resolved to its managed `RtThread`, process termination can return a deferred error after the bounded join. In that case the process-owned handles and address space are intentionally left intact for a retry; they are not released underneath a still-running thread.
+**Conclusion:** The M11 Phase 7 infinite-`WaitForSingleObject` test should be
+supported by the existing cancellation polling, but it still needs an
+end-to-end regression test under TSAN. The task-queue dispatch cancellation
+cycle is a concrete defect to fix: process termination must wake it before
+joining, or dispatch must observe the managed thread's cancellation state.
 
-### Confirmed lifecycle defect: infinite task-queue dispatch
+## 7. Loader performance and memory at ~600k relocations / ~180 MB images
 
-`TaskQueueService::dispatch` can block indefinitely in `queue_cv_.wait(lock, ready)` for an infinite timeout. Its readiness predicate is based on queued callbacks, queue termination, or loss of all public aliases. The dispatch API has no guest PID/TID cancellation parameter and does not register a managed-thread cancellation waker (`src/gdk_services.cpp:1868-1947`).
+**Answer: the code has bounded parsing and a contiguous backing mapping, but
+there is no demonstrated benchmark at the proposed scale. The current
+algorithm has a likely scaling hotspot.**
 
-The process-exit observer that calls `TaskQueueService::release_process` is invoked only after ProcessManager has drained the process's threads and marked the process terminated (`src/process_management.cpp:305-367`, `src/gdk_services.cpp:1753-1763`). Therefore a managed guest thread blocked in infinite `XTaskQueueDispatch` can prevent the process from reaching the observer that would terminate the queue and wake that dispatch. The current test `ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch` uses a separate host `std::thread` waiter, not a managed process-owned guest thread (`tests/api_compat_test.cpp:1384-1426)); it does not cover this cycle.
+Memory layout:
 
-**Conclusion:** the M11 termination test must cover every blocking guest-facing service, not only `WaitForSingleObject`. Task-queue dispatch needs a pre-teardown cancellation/wake path or another lifecycle arrangement that breaks the cycle without freeing guest state early.
+- Each M4 `AddressSpace` reserves one host backing mapping for its configured
+  capacity. Guest Xbox virtual addresses are translated to offsets within this
+  host mapping; they are not directly mapped at their guest numeric address.
+- The Linux PAL uses `mmap(nullptr, ...)` and applies per-range
+  `mprotect`. It does not request a fixed mapping at the guest VA.
+- The default `ProcessManager::create_process` address-space capacity is
+  16 MiB. A roughly 180 MB image therefore requires an explicitly larger
+  process capacity before section/header reservations and other allocations
+  can fit.
+- The loader reserves/maps image headers and sections into the existing
+  address space. It does not create a native host mapping that makes guest
+  addresses directly executable as-is.
 
-## 7. Loader performance and memory at ~600k relocations and ~180 MB images
+Relocation behavior:
 
-### Current bounds and data flow
+- `decode_relocations` walks the relocation directory and materializes a
+  `std::vector<RelocBlock>`, with a nested vector of entries in each block.
+  It enforces `limits_.max_relocations`, so parsing is bounded, but all
+  decoded entries remain resident until application completes.
+- `apply_relocations` validates supported relocation types before writes.
+  At this revision, only ABSOLUTE padding and DIR64 are accepted; other types
+  are rejected.
+- For each DIR64 relocation, it linearly scans `layout.sections` to find
+  the section containing the target. At approximately 600,000 entries, this
+  is O(relocations × section-count) section checks, rather than a single
+  indexed lookup per entry.
+- The relocation path also records sections whose protection was changed so
+  that protections can be restored. The image mapping itself consumes the
+  process's configured backing capacity; committed pages and relocation
+  metadata add further memory cost.
+- A loader benchmark source exists, but this audit found no recorded result
+  demonstrating a 180 MB image or approximately 600,000 relocations. No
+  measured peak RSS, load time, relocation throughput, or allocation profile
+  is available at this baseline.
 
-- The loader caps image size at 256 MiB and relocation count at 1 Mi entries (`include/xbox2pc/image_loader.hpp:69-83`). A 180 MB image and 600k relocations are therefore within current configured structural bounds.
-- `ImageLoader::load_image` receives the complete file buffer, validates it, maps headers and sections, copies section bytes into the process AddressSpace, decodes/applies relocations if rebased, resolves imports, decodes TLS, and registers a loaded-image object (`src/image_loader.cpp:1399-1618`).
-- `AddressSpace` owns one host PAL mapping per process. The Linux PAL reserves it with `mmap(nullptr, ...)`; guest Xbox VAs are logical coordinates. `AddressSpace::translate()` converts a guest VA into a different host pointer within that backing mapping (`src/memory_management.cpp:117-139,709-726`, `src/pal_linux.cpp` memory-region implementation).
-- Mapping touches pages by zeroing section extents and copying raw section data. Thus a large loaded image requires the original file buffer plus populated guest backing pages and loader metadata. The exact resident peak has not been measured for a 180 MB fixture.
-
-### Confirmed relocation hot path
-
-`decode_relocations()` builds a vector of relocation blocks, each containing a dynamically grown vector of entries (`src/image_loader.cpp:433-512`). It does not pre-size the entry storage from a validated count.
-
-For every DIR64 entry, `apply_relocations()`:
-
-1. linearly scans `layout.sections` to find the target section;
-2. checks the original `host->protection` value;
-3. for a section whose original protection is not writable, calls `protect_region(..., ReadWrite)` and appends another entry to `flipped`;
-4. calls `apply_dir64()`, which resolves the target through `AddressSpace::translate()`;
-5. after the loop, restores every recorded protection in reverse order.
-
-The test of `host->protection` is against the original layout value, not a tracked “already flipped” set. Therefore a read-only or executable section receiving many relocations can be toggled RX/RO → RW repeatedly once per relocation, and the `flipped` vector can contain repeated entries for the same section. This is a concrete scalability problem for hundreds of thousands of relocations, not merely an unmeasured concern (`src/image_loader.cpp:867-953`).
-
-The per-entry section scan is O(relocations × section-count). The per-entry translate also performs an AddressSpace region lookup. The decode stage retains all relocation entries in vectors at once.
-
-### Benchmark coverage gap
-
-`tests/loader_bench.cpp` describes a small synthetic image and relocation benchmark. The fixture creates two relocation blocks with 32 entries each (64 entries total), despite the nearby comment describing 96 entries. It does not benchmark 600k relocations or an image near 180 MB. No audited benchmark result establishes load time, peak RSS, allocation count, or protection-call count at the M11 target scale.
-
-### Native execution makes the address model a blocker too
-
-The current host mapping is not located at the logical guest VA. The guest CPU model's RIP and pointers are guest coordinates, while `translate()` returns a separate host pointer. A native CPU cannot fetch instructions from the logical guest RIP unless the memory architecture is extended to provide executable mappings at the guest addresses (or a deliberately designed equivalent mapping strategy). The current loader's relocation delta is based on the logical guest image base, not the unrelated host mmap address.
-
-**Conclusion:** do not infer that the current loader is ready for a 180 MB native image. First add representative large-image measurements and fix the per-relocation protection churn. Native execution also requires reconciling the logical guest-VA/host-mmap split with M4 ownership rather than introducing a second memory manager.
+**Conclusion:** Before claiming support for this scale, add reproducible
+synthetic stress fixtures and measure peak memory and load time. The
+per-relocation linear section scan is the first algorithmic hotspot to
+profile. The guest-to-host address translation model is also a major
+architectural constraint for direct native execution: the current guest VA
+space is an abstraction over a separate host mapping.
 
 ---
 
-## Phase 0 decision record
+## Phase 0 findings and implications
 
-The audit supports the following constraints for later M11 design work; it does not implement them:
+1. **Native execution is absent.** The current backend is an interpreter and
+   synthetic API dispatch system.
+2. **ABI marshalling exists, native thunks do not.** Preserve the M8
+   validation/marshalling boundary while designing a real host transition.
+3. **Windows thread/process environment is absent.** TEB/PEB, GS-relative
+   addressing, implicit TLS, and automatic TLS callback lifecycle must be
+   added.
+4. **Guest handles are split across services.** The M4 handle table is a
+   strong foundation, but task queues remain outside its namespace and
+   `CloseHandle` is synchronization-only.
+5. **Global lock ordering is undocumented.** Observer callbacks run under the
+   ProcessManager lock; Phase 7 should move cleanup outside that lock.
+6. **Task-queue waits are not termination-aware.** This is a concrete lifecycle
+   issue; Win32 synchronization waits already have cooperative cancellation
+   polling but need end-to-end validation.
+7. **Large-image performance is unproven.** The relocation decoder retains
+   all entries and application linearly scans sections for each relocation.
 
-1. Keep the deterministic interpreter as a bounded test oracle/tracing backend. Do not expand its ISA merely to avoid using the native x86-64 host.
-2. A native backend cannot be connected safely until guest VA mapping, GS-base switching, native API thunks, and host-fault containment are specified together.
-3. Reuse M4's process/thread/handle/address-space owners. Do not add parallel TEB, handle, or memory ownership registries that can diverge from those managers.
-4. Treat the infinite task-queue dispatch termination cycle as an existing defect to fix in the lifecycle slice.
-5. Make large-relocation and large-image benchmarks part of the loader work before claiming the 600k/180 MB target.
-6. Keep unsupported APIs and platform imports explicitly unsupported/partial until their behavior and tests exist.
+No feature-code or native-execution architecture decision is made by this
+audit. Phase 1 test binaries and measurements should expose the remaining
+behavioral gaps before the native execution design is finalized.
 
-**No feature code was changed during Phase 0.** The “what broke in M1–M10” deliverable remains a separate final-audit artifact and should be based on confirmed defects and their fixing commits, not reconstructed from memory.
+
+## Source map (line numbers at the audited M10 commit)
+
+| Audit question | Primary source locations |
+|---|---|
+| PE load and execution | `src/image_loader.cpp:1399–1535`; `src/execution_context.cpp:144–235, 253–330`; `src/execution_engine.cpp:132–325` |
+| API shims and ABI | `src/execution_engine.cpp:180–325, 444–560`; `src/xbox_abi.cpp:131–243, 245–310`; `src/guest_memory.cpp:1–160` |
+| TEB/PEB and TLS | `src/gdk_services.cpp:2103–2185`; `docs/thread-execution.md:67–80`; the audit found no TEB/PEB or GS-base implementation |
+| Handle representation | `include/xbox2pc/handle_manager.hpp:1–70`; `src/handle_manager.cpp:68–245`; `src/gdk_services.cpp:1199–1259, 1657–1698, 1795–1838` |
+| Locks and observers | `include/xbox2pc/process_management.hpp:145–160`; `src/process_management.cpp:305–405, 844–850`; `include/xbox2pc/gdk_services.hpp:152–164, 220–240` |
+| Wait termination | `src/gdk_services.cpp:1331–1650, 1868–1975, 1996–2023`; `src/process_management.cpp:305–368`; `src/thread_model.cpp:442–456` |
+| Loader scale and memory | `src/image_loader.cpp:433–555, 867–950, 1399–1535`; `src/memory_management.cpp:117–315, 709–755`; `src/pal_linux.cpp:577–650` |
+
+The absence findings are repository-wide source searches at the audited commit,
+not claims inferred from a single missing declaration. In particular, searches
+for `ARCH_SET_GS`, `wrgsbase`, `RtlLookupFunctionEntry`,
+`RtlVirtualUnwind`, `SetLastError`, `GetLastError`, and `ExitProcess`
+found no runtime implementations at this baseline.
