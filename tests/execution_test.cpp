@@ -1915,6 +1915,9 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     blob.push_back(0xC3);   // cb1 @ 0x1100
     while (blob.size() < 0x110) blob.push_back(0x90);
     blob.push_back(0xC3);   // cb2 @ 0x1110
+    // The decoder may inspect up to 15 bytes from an instruction start.
+    // Keep the final callback away from the virtual end of the RX section.
+    while (blob.size() < 0x200) blob.push_back(0x90);
     spec.text_payloads.push_back({0x1000, blob});
     spec.tls.template_data = {1, 2, 3, 4};
     spec.tls.callback_vas = {0x140001100, 0x140001110};   // preferred base VAs
