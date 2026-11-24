@@ -2008,6 +2008,58 @@ TEST(NativeExecutionTest, EnforcesChildExecutionDeadline) {
 #endif
 }
 
+TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    ExecWorld world;
+    auto [process_handle, process] = world.new_process("native-pe-return.exe");
+    ASSERT_NE(process, nullptr);
+
+    test::PeBuildSpec spec;
+    spec.image_base = process->address_space().base();
+    spec.text_payloads.push_back(
+        {0x1000, {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3}}; // mov eax, 42; ret
+    auto image = test::PeBuilder(spec).build();
+    diag::Diagnostics parse_diagnostics;
+    auto parsed = pe::parse(image.data(), image.size(), "native-pe-return.exe",
+                            parse_diagnostics);
+    loader::ImageLoader loader;
+    api::ApiResolver resolver(world.reg);
+    loader::LoadDiagnostics load_diagnostics;
+    loader::LoadResult loaded;
+    auto image_handle = loader.load_image(
+        world.pm, world.core.objects(), process_handle, parsed, image.data(),
+        image.size(), &resolver, load_diagnostics, loaded);
+    ASSERT_TRUE(image_handle.ok()) << loaded.error;
+
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(
+        process->pid_value(), 0x84, process->address_space()).ok());
+    ExecutionRequest req;
+    req.entry_va = loaded.exec.entry_va;
+    req.completion_va = kCompletionSentinel;
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    ASSERT_EQ(result.outcome, Outcome::Returned)
+        << (result.exception.has_value() ? result.exception->detail : "no native execution exception");
+    EXPECT_EQ(result.return_value, 42u);
+    ASSERT_TRUE(loader.unload_image(world.pm, world.core.objects(),
+                                    process_handle, image_handle.value()).ok());
+    ASSERT_TRUE(world.pm.terminate_process(process_handle, 0).ok());
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
 // ── TLS callbacks ─────────────────────────────────────────────────────────
 
 TEST(TlsExecTest, PlanValidationAndExecution) {
