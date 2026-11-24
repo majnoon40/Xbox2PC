@@ -25,6 +25,7 @@ public:
     Result<void> set_image_base(std::uint64_t image_base);
     std::uint64_t peb_base() const { return peb_va_; }
     std::uint64_t process_id() const { return process_id_; }
+    std::uint64_t space_id() const { return space_.space_id(); }
     bool initialized() const { return initialized_; }
 
 private:

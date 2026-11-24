@@ -137,6 +137,13 @@ Result<void> ExecutionContext::initialize() {
     if (process_environment_ == nullptr) {
         process_environment_ = std::make_shared<GuestProcessEnvironment>(space_);
     }
+    if (process_environment_->space_id() != space_.space_id()) {
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "shared PEB belongs to a different address space");
+    }
     auto process_result = process_environment_->initialize(process_id_);
     if (!process_result.ok()) {
         (void)space_.release_region(stack_region_va_);
