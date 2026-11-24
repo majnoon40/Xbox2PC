@@ -332,8 +332,75 @@ void parse_exports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
 //   [28] dwTimeStamp (bound timestamp).
 // Thunk arrays use the exact same encoding as the regular import INT
 // (8-byte PE32+ thunks, ordinal flag bit 63), so resolution is shared.
+// ── directory 3: exception directory (.pdata RUNTIME_FUNCTION array) ──────
+// Layout: array of 12-byte entries {u32 begin, u32 end, u32 unwind}. The
+// loader sorts by begin (pairs of begin+end for function fragments) so the
+// RIP lookup is a binary search. Malformed entries are warned and skipped;
+// the table stays sorted by (begin, end).
+void parse_exception_table(PeImage& img, const std::uint8_t* base, std::uint64_t size,
+                           diag::Diagnostics& diags) {
+    if (img.directories.size() <= kDirException) return;
+    const auto& dir = img.directories[kDirException];
+    if (dir.rva == 0 && dir.size == 0) return;
+    img.exceptions.present = true;
+    if (dir.size == 0) {
+        diags.warning("exception directory has zero size; no unwind data");
+        return;
+    }
+    if (dir.size % 12 != 0) {
+        diags.warning("exception directory size " + std::to_string(dir.size) +
+                      " is not a multiple of 12; trailing bytes ignored");
+    }
+    const auto off = rva_to_offset(img, dir.rva);
+    if (!off.has_value()) {
+        diags.warning("exception directory RVA " + std::to_string(dir.rva) +
+                      " does not map to any section; unwind data unavailable");
+        return;
+    }
+    if (!in_range(*off, dir.size, size)) {
+        diags.warning("exception directory truncated; unwind data unavailable", *off);
+        return;
+    }
+    const std::uint64_t count = dir.size / 12;
+    // Hostile-count guard: cap at 1M entries (12 MB of .pdata — far beyond
+    // any legitimate image) and warn when clamped.
+    constexpr std::uint64_t kCap = 1ull << 20;
+    const std::uint64_t n = count > kCap ? kCap : count;
+    if (n != count)
+        diags.warning("exception entry count clamped from " + std::to_string(count) +
+                      " to " + std::to_string(n));
+    TableReader rd{base, size};
+    auto& table = img.exceptions.functions;
+    table.reserve(n);
+    for (std::uint64_t i = 0; i < n; ++i) {
+        RuntimeFunction fn;
+        fn.begin_rva = rd.u32(*off + i * 12);
+        fn.end_rva = rd.u32(*off + i * 12 + 4);
+        fn.unwind_info_rva = rd.u32(*off + i * 12 + 8);
+        if (fn.end_rva < fn.begin_rva) {
+            diags.warning("RUNTIME_FUNCTION entry " + std::to_string(i) +
+                          " has end < begin; entry skipped");
+            continue;
+        }
+        if (fn.begin_rva == 0 && fn.end_rva == 0) {
+            diags.warning("RUNTIME_FUNCTION entry " + std::to_string(i) +
+                          " is empty; entry skipped");
+            continue;
+        }
+        table.push_back(fn);
+    }
+    // (begin, end) sort keeps equal-begin fragments ordered by end, so the
+    // lookup's "last entry with begin <= rva" resolves to the largest
+    // fragment — matching the PE loader's documented merge behavior.
+    std::sort(table.begin(), table.end(), [](const RuntimeFunction& a,
+                                             const RuntimeFunction& b) {
+        return a.begin_rva != b.begin_rva ? a.begin_rva < b.begin_rva
+                                          : a.end_rva < b.end_rva;
+    });
+}
+
 void parse_delay_imports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
-                         diag::Diagnostics& diags) {
+                          diag::Diagnostics& diags) {
     if (img.directories.size() <= kDirDelayImport) return;
     const auto& dir = img.directories[kDirDelayImport];
     if (dir.rva == 0 && dir.size == 0) {

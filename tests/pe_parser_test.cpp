@@ -515,3 +515,122 @@ int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }
+
+// ── M11 Phase 6: exception directory (.pdata) parsing + RIP lookup ───────
+
+namespace {
+
+std::vector<std::uint8_t> pdata_entry(std::uint32_t begin, std::uint32_t end,
+                                      std::uint32_t unwind) {
+    std::vector<std::uint8_t> e(12);
+    for (int i = 0; i < 4; ++i) {
+        e[i] = static_cast<std::uint8_t>(begin >> (8 * i));
+        e[4 + i] = static_cast<std::uint8_t>(end >> (8 * i));
+        e[8 + i] = static_cast<std::uint8_t>(unwind >> (8 * i));
+    }
+    return e;
+}
+
+std::vector<std::uint8_t> concat(const std::vector<std::vector<std::uint8_t>>& parts) {
+    std::vector<std::uint8_t> out;
+    for (const auto& p : parts) out.insert(out.end(), p.begin(), p.end());
+    return out;
+}
+
+}  // namespace
+
+TEST(PdataRuntimeFunctionLookup, ParsesSortsAndLooksUp) {
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    // Three deliberately unsorted fragments covering .text code ranges.
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1100, 0x1140, 0x2000),
+        pdata_entry(0x1080, 0x10A0, 0x2010),
+        pdata_entry(0x1200, 0x1280, 0x2020),
+    });
+    const PeImage img = parse_ok(PeBuilder(s).build(), diags);
+
+    ASSERT_TRUE(img.exceptions.present);
+    ASSERT_EQ(img.exceptions.functions.size(), 3u);
+    // Sorted by begin_rva.
+    EXPECT_EQ(img.exceptions.functions[0].begin_rva, 0x1080u);
+    EXPECT_EQ(img.exceptions.functions[1].begin_rva, 0x1100u);
+    EXPECT_EQ(img.exceptions.functions[2].begin_rva, 0x1200u);
+
+    // In-range lookups resolve (begin inclusive, end exclusive).
+    const auto* f1 = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(f1, nullptr);
+    EXPECT_EQ(f1->end_rva, 0x10A0u);
+    EXPECT_EQ(f1->unwind_info_rva, 0x2010u);
+    const auto* f2 = img.exceptions.find_function(0x113Fu);
+    ASSERT_NE(f2, nullptr);
+    EXPECT_EQ(f2->begin_rva, 0x1100u);
+    const auto* f3 = img.exceptions.find_function(0x127Fu);
+    ASSERT_NE(f3, nullptr);
+    EXPECT_EQ(f3->unwind_info_rva, 0x2020u);
+
+    // End is exclusive; before-first and gap addresses do not resolve.
+    EXPECT_EQ(img.exceptions.find_function(0x107Fu), nullptr);
+    EXPECT_EQ(img.exceptions.find_function(0x10A0u), nullptr);  // gap 0x10A0..0x1100
+    EXPECT_EQ(img.exceptions.find_function(0x1140u), nullptr);  // gap 0x1140..0x1200
+    EXPECT_EQ(img.exceptions.find_function(0x1280u), nullptr);  // past last end
+}
+
+TEST(PdataRuntimeFunctionLookup, EqualBeginFragmentsResolveLargestEnd) {
+    // Function fragments sharing a begin_rva (chained unwind) sort by end;
+    // the lookup must resolve to the LAST such entry (largest end).
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1100, 0x1140, 0x2000),
+        pdata_entry(0x1100, 0x1200, 0x2008),  // fragment with larger end
+    });
+    const PeImage img = parse_ok(PeBuilder(s).build(), diags);
+    ASSERT_EQ(img.exceptions.functions.size(), 2u);
+    const auto* f = img.exceptions.find_function(0x1150u);
+    ASSERT_NE(f, nullptr);
+    EXPECT_EQ(f->end_rva, 0x1200u);
+    EXPECT_EQ(f->unwind_info_rva, 0x2008u);
+    const auto* first = img.exceptions.find_function(0x1100u);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first->end_rva, 0x1200u);
+}
+
+TEST(PdataRuntimeFunctionLookup, MalformedEntriesSkippedWithWarnings) {
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, 0x2000),   // valid
+        pdata_entry(0x10B0, 0x10A0, 0x2004),   // end < begin: skipped
+        pdata_entry(0, 0, 0),                  // empty: skipped
+        pdata_entry(0x1100, 0x1140, 0x2008),   // valid
+    });
+    const PeImage img = parse_ok(PeBuilder(s).build(), diags);
+    ASSERT_TRUE(img.exceptions.present);
+    ASSERT_EQ(img.exceptions.functions.size(), 2u);
+    EXPECT_EQ(img.exceptions.functions[0].begin_rva, 0x1080u);
+    EXPECT_EQ(img.exceptions.functions[1].begin_rva, 0x1100u);
+    // Both malformed entries produced diagnostics warnings.
+    EXPECT_GE(diags.count(xbox2pc::diag::Severity::Warning), 2u);
+}
+
+TEST(PdataRuntimeFunctionLookup, TrailingBytesWarned) {
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    auto payload = concat({pdata_entry(0x1080, 0x10A0, 0x2000)});
+    payload.push_back(0xAB);  // 13 bytes: not a multiple of 12
+    payload.push_back(0xCD);
+    s.exception_directory_payload = payload;
+    const PeImage img = parse_ok(PeBuilder(s).build(), diags);
+    ASSERT_TRUE(img.exceptions.present);
+    EXPECT_EQ(img.exceptions.functions.size(), 1u);
+    EXPECT_GE(diags.count(xbox2pc::diag::Severity::Warning), 1u);
+}
+
+TEST(PdataRuntimeFunctionLookup, AbsentDirectoryYieldsEmptyTable) {
+    Diagnostics diags;
+    const PeImage img = parse_ok(PeBuilder(default_spec()).build(), diags);
+    EXPECT_FALSE(img.exceptions.present);
+    EXPECT_TRUE(img.exceptions.functions.empty());
+    EXPECT_EQ(img.exceptions.find_function(0x1000u), nullptr);
+}

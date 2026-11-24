@@ -161,6 +161,41 @@ struct ExportTable {
     std::vector<ExportedFunction> functions;    // resolved view
 };
 
+// x64 .pdata entry (RUNTIME_FUNCTION): 12 bytes, RVAs relative to the
+// image base. begin is inclusive, end exclusive; unwind points at the
+// .xdata UNWIND_INFO blob.
+struct RuntimeFunction {
+    std::uint32_t begin_rva = 0;
+    std::uint32_t end_rva = 0;
+    std::uint32_t unwind_info_rva = 0;
+};
+
+// Directory 3 (.pdata) contents, sorted by begin_rva for lookup.
+struct ExceptionTable {
+    bool present = false;
+    std::vector<RuntimeFunction> functions;  // sorted by begin_rva
+
+    // Find the function covering rva (begin inclusive, end exclusive).
+    // Returns nullptr when no entry covers the address. Binary search:
+    // .pdata is sorted by begin_rva in valid images; entries with equal
+    // begin_rva (from malformed inputs) resolve to the LAST entry, which
+    // is the largest-end entry after the parser's (begin, end) sort.
+    const RuntimeFunction* find_function(std::uint32_t rva) const {
+        std::size_t lo = 0;
+        std::size_t hi = functions.size();
+        while (lo < hi) {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            if (functions[mid].begin_rva <= rva) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo == 0) return nullptr;
+        const RuntimeFunction* candidate = &functions[lo - 1];
+        if (rva < candidate->begin_rva || rva >= candidate->end_rva)
+            return nullptr;
+        return candidate;
+    }
+};
+
 struct ImportTable {
     bool present = false;
     std::vector<ImportEntry> entries;
@@ -235,6 +270,7 @@ struct PeImage {
     ImportTable imports;
     ExportTable exports;
     DelayImportTable delay_imports;  // M2: directory 13 (delayimp)
+    ExceptionTable exceptions;       // M11 Phase 6: directory 3 (.pdata)
 
     // classification helpers
     bool is_x86_64() const { return coff.machine == kMachineAmd64; }

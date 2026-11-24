@@ -20,4 +20,10 @@ void parse_exports(PeImage& img, const std::uint8_t* data, std::uint64_t size,
 void parse_delay_imports(PeImage& img, const std::uint8_t* data, std::uint64_t size,
                          diag::Diagnostics& diags);
 
+// M11 Phase 6: exception directory parsing (RUNTIME_FUNCTION array,
+// directory 3 / .pdata). Entries are sorted by (begin, end) for the
+// RIP-indexed binary-search lookup on PeImage::exceptions.
+void parse_exception_table(PeImage& img, const std::uint8_t* data, std::uint64_t size,
+                           diag::Diagnostics& diags);
+
 }  // namespace xbox2pc::pe
