@@ -21,6 +21,27 @@ ManagedProcess::ManagedProcess(std::uint64_t pid, std::string image_name,
 
 ManagedProcess::~ManagedProcess() = default;
 
+Result<IXMemAllocator*> ManagedProcess::ensure_xmem_allocator(
+    std::uint64_t arena_size, std::uint64_t max_bytes) {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed) {
+        return Result<IXMemAllocator*>(RuntimeErrc::ProcessTerminated,
+                                       "cannot create XMem allocator for a terminating process");
+    }
+    if (xmem_allocator_ != nullptr)
+        return Result<IXMemAllocator*>(xmem_allocator_.get());
+
+    auto created = GuestXMemAllocator::create(
+        *space_, arena_size, "proc-" + std::to_string(pid_) + "-xmem",
+        max_bytes);
+    if (!created.ok())
+        return Result<IXMemAllocator*>(created.errc(), created.context());
+    xmem_allocator_ = std::move(created.value());
+    return Result<IXMemAllocator*>(xmem_allocator_.get());
+}
+
 Result<void> ManagedProcess::add_module_descriptor(const ModuleDescriptor& mod) {
     std::lock_guard lock(detail_lock_);
     const ProcessState cur = state();

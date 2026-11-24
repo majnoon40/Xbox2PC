@@ -905,6 +905,42 @@ TEST(WaitSetTest, WaitAllMutexRollback) {
 
 // ── processes: manager lifecycle + cleanup + rollback ─────────────────────
 
+TEST(ProcessMgmtTest, ProcessOwnsXMemAllocatorUntilTermination) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    ProcessManager pm(core.objects());
+    auto ph = pm.create_process("xmem-process.exe", 8ull << 20);
+    ASSERT_TRUE(ph.ok());
+    rt::ModuleDescriptor mod;
+    mod.module_name = "xmem-process.exe";
+    mod.is_valid_pe = true;
+    ASSERT_TRUE(pm.initialize_process(ph.value(), mod, rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(pm.start_process(ph.value()).ok());
+
+    auto process_guard = pm.find_process(ph.value());
+    ASSERT_TRUE(process_guard.ok());
+    auto* process = process_guard.value().get()->as<ManagedProcess>();
+    ASSERT_NE(process, nullptr);
+    auto allocator_result = process->ensure_xmem_allocator(1ull << 20, 512ull << 10);
+    ASSERT_TRUE(allocator_result.ok()) << allocator_result.error_string();
+    auto* allocator = allocator_result.value();
+    ASSERT_NE(allocator, nullptr);
+
+    auto allocation = allocator->allocate(4096, 64, "process-heap", true);
+    ASSERT_TRUE(allocation.ok()) << allocation.error_string();
+    EXPECT_EQ(allocation.value() % 64, 0u);
+    auto again = process->ensure_xmem_allocator(2ull << 20, 0);
+    ASSERT_TRUE(again.ok());
+    EXPECT_EQ(again.value(), allocator);
+    EXPECT_EQ(process->address_space().stats().region_count, 1u);
+
+    ASSERT_TRUE(pm.terminate_process(ph.value(), 0).ok());
+    EXPECT_EQ(process->address_space().stats().region_count, 0u);
+    EXPECT_EQ(process->ensure_xmem_allocator(1ull << 20).errc(),
+              RuntimeErrc::ProcessTerminated);
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
 TEST(ProcessMgmtTest, FullLifecycleWithCleanup) {
     rt::RuntimeCore core;
     ASSERT_TRUE(core.initialize().ok());
