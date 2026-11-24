@@ -54,3 +54,8 @@ vector slot. Index 0 is valid for this module-vector model.
   work end to end; native GS setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full
   Windows TLS allocation model.
+
+
+### LastError API bridge
+
+`SetLastError` and `GetLastError` are registered kernel32 imports. `ExecutionContext` binds its non-owning `GuestThreadEnvironment` pointer to the engine; the marshalling bridge forwards that same pointer to API implementations. Both APIs read/write TEB `LastErrorValue` at offset `0x68`, with no separate host-side error map. Calls without an initialized guest thread environment are rejected. The pointer is valid only during synchronous execution-context dispatch.

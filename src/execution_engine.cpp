@@ -295,7 +295,8 @@ ExecutionResult DeterministicBackend::run(
                 };
             auto dispatched = marshal_and_dispatch(
                 io_cpu, mem, registry_, plan.value(), pid_, depth,
-                cfg_.max_dispatch_depth, tid_, callback_invoker);
+                cfg_.max_dispatch_depth, tid_, callback_invoker,
+                thread_environment_);
             --impl_->dispatch_depth;
             if (!dispatched.ok()) {
                 fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
@@ -447,7 +448,8 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
                                           std::uint32_t depth,
                                           std::uint32_t max_depth,
                                           std::uint64_t tid,
-                                          const api::GuestCallbackInvoker& invoke_callback) {
+                                          const api::GuestCallbackInvoker& invoke_callback,
+                                          GuestThreadEnvironment* thread_environment) {
     using Ret = Result<MarshalResult>;
     if (depth >= max_depth) {
         return Ret(RuntimeErrc::OutOfResources,
@@ -489,6 +491,7 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
     api::ApiContext ctx;
     ctx.process_id = pid;
     ctx.thread_id = tid;
+    ctx.thread_environment = thread_environment;
     ctx.invoke_guest_callback = invoke_callback;
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&
@@ -698,8 +701,12 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     } else if (id == "QueryPerformanceCounter" || id == "QueryPerformanceFrequency") {
         plan.call.args.push_back(ptr_out(8)); plan.out_buffer_args.push_back(0);
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
-    } else if (id == "GetCurrentProcessId" || id == "GetCurrentThreadId") {
+    } else if (id == "GetCurrentProcessId" || id == "GetCurrentThreadId" ||
+               id == "GetLastError") {
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "SetLastError") {
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Void;
     } else if (id == "CreateMutexW") {
         plan.call.args.push_back(ptr_in(0)); plan.call.args.push_back(int_arg());
         plan.call.args.push_back(ptr_in(0)); plan.call.ret = abi::CallSpec::ReturnKind::Int;

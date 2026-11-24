@@ -550,6 +550,39 @@ std::vector<ApiDescriptor> builtin_descriptors() {
 
     {
         ApiDescriptor a;
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "SetLastError";
+        a.convention = Convention::None;
+        a.param_count = 1;
+        a.ret = ReturnKind::Void;
+        a.signature = "VOID SetLastError(DWORD dwErrCode)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-LAST-ERROR]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setlasterror";
+        a.notes = "stores the error value in the calling guest thread's TEB; requires an initialized execution context";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetLastError";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD GetLastError()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-LAST-ERROR]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror";
+        a.notes = "reads the error value from the calling guest thread's TEB; requires an initialized execution context";
+        add(a);
+    }
+
         a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
         a.convention = Convention::X64Microsoft; a.param_count = 4;
         a.ret = ReturnKind::Uint32;

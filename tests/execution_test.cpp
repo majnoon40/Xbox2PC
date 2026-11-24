@@ -2350,7 +2350,63 @@ TEST(GuestProcessEnvironmentTest, ConcurrentRequestsForSameImageReturnOneIndex) 
 }
 
 
-TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
+TEST(BridgeTest, SetAndGetLastErrorUseTheBoundGuestTeb) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("last-error-api.exe");
+    (void)process_handle;
+    auto process_environment = std::make_shared<GuestProcessEnvironment>(process->address_space());
+    ExecutionContext context(0x501, 0x601, process->address_space(), w.reg,
+        ExecutionConfig::default_validated().value(), "last-error-api", process_environment);
+    ASSERT_TRUE(context.initialize().ok());
+
+    api::TimingService timing(w.reg);
+    ASSERT_TRUE(timing.on_initialize().ok());
+
+    guest::GuestMemory mem(process->address_space());
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack stack(0x2003F000ull, 0x1000);
+
+    const auto* set_desc = w.reg.find("kernel32", "SetLastError");
+    const auto* get_desc = w.reg.find("kernel32", "GetLastError");
+    ASSERT_NE(set_desc, nullptr);
+    ASSERT_NE(get_desc, nullptr);
+    auto set_plan = plan_for_descriptor(*set_desc);
+    auto get_plan = plan_for_descriptor(*get_desc);
+    ASSERT_TRUE(set_plan.ok()) << set_plan.error_string();
+    ASSERT_TRUE(get_plan.ok()) << get_plan.error_string();
+
+    std::vector<abi::ArgValue> set_args(1);
+    set_args[0].kind = abi::ArgKind::Int;
+    set_args[0].int_v = 0x1234ABCDu;
+    auto prepared = abi::prepare_call(cpu_state, 0x51000001,
+        set_plan.value().call, set_args, HostStack::writer(&stack));
+    ASSERT_TRUE(prepared.ok()) << prepared.error_string();
+    auto set_result = marshal_and_dispatch(cpu_state, mem, w.reg,
+        set_plan.value(), 0x501, 0, 64, 0x601, {}, context.guest_environment_mut());
+    ASSERT_TRUE(set_result.ok()) << set_result.error_string();
+    EXPECT_TRUE(set_result.value().api_result.ok);
+    EXPECT_EQ(context.guest_environment()->last_error().value(), 0x1234ABCDu);
+
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, 0x20040000);
+    HostStack get_stack(0x2003F000ull, 0x1000);
+    auto get_prepared = abi::prepare_call(cpu_state, 0x51000002,
+        get_plan.value().call, {}, HostStack::writer(&get_stack));
+    ASSERT_TRUE(get_prepared.ok()) << get_prepared.error_string();
+    auto get_result = marshal_and_dispatch(cpu_state, mem, w.reg,
+        get_plan.value(), 0x501, 0, 64, 0x601, {}, context.guest_environment_mut());
+    ASSERT_TRUE(get_result.ok()) << get_result.error_string();
+    EXPECT_TRUE(get_result.value().api_result.ok);
+    EXPECT_EQ(get_result.value().api_result.return_value, 0x1234ABCDu);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 0x1234ABCDu);
+
+    ASSERT_TRUE(timing.on_shutdown().ok());
+    ASSERT_TRUE(context.destroy().ok());
+}
+
+TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {TEST(GuestThreadEnvironmentTest, LastErrorIsThreadLocalAndUsesTebField) {
     AddressSpace space(16ull << 20, 0x37000000, "guest-last-error-test");
     api::ApiRegistry registry;
     auto process = std::make_shared<exec::GuestProcessEnvironment>(space);

@@ -8,6 +8,7 @@
 // No host function pointers are exposed; dispatch goes through
 // IApiImplementation under the ApiContext contract.
 
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/gdk_services.hpp"
 
 #include <algorithm>
@@ -655,6 +656,37 @@ public:
     std::string describe() const override {
         return "Win32: GetCurrentThreadId (guest calling-thread context)";
     }
+};
+
+class SetLastErrorImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.thread_environment == nullptr || !ctx.thread_environment->initialized()) {
+            out.error = "SetLastError requires an initialized guest thread environment";
+            return false;
+        }
+        const auto result = ctx.thread_environment->set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
+        if (!result.ok()) { out.error = result.error_string(); return false; }
+        out.note = "stored in the calling guest thread's TEB";
+        return true;
+    }
+    std::string describe() const override { return "Win32: SetLastError (guest TEB LastErrorValue)"; }
+};
+
+class GetLastErrorImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.thread_environment == nullptr || !ctx.thread_environment->initialized()) {
+            out.error = "GetLastError requires an initialized guest thread environment";
+            return false;
+        }
+        const auto result = ctx.thread_environment->last_error();
+        if (!result.ok()) { out.error = result.error_string(); return false; }
+        out.return_value = result.value();
+        out.note = "read from the calling guest thread's TEB";
+        return true;
+    }
+    std::string describe() const override { return "Win32: GetLastError (guest TEB LastErrorValue)"; }
 };
 
 class CreateEventWImpl : public IApiImplementation {
@@ -2058,10 +2090,16 @@ Result<void> TimingService::on_initialize() {
     const auto r4 = api_reg_.register_implementation(
         "kernel32", "GetCurrentThreadId",
         keep(std::make_shared<CurrentThreadIdImpl>()), owner);
+    const auto r5 = api_reg_.register_implementation(
+        "kernel32", "SetLastError", keep(std::make_shared<SetLastErrorImpl>()), owner);
+    const auto r6 = api_reg_.register_implementation(
+        "kernel32", "GetLastError", keep(std::make_shared<GetLastErrorImpl>()), owner);
     if (!r1.ok()) return r1;
     if (!r2.ok()) return r2;
     if (!r3.ok()) return r3;
     if (!r4.ok()) return r4;
+    if (!r5.ok()) return r5;
+    if (!r6.ok()) return r6;
     return Result<void>::ok_result();
 }
 

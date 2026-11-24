@@ -384,7 +384,7 @@ Result<ExecutionResult> ExecutionContext::invoke(
                         "request stack not usable in this context's space");
         }
     }
-    auto bound = engine.bind_execution_context(process_id_, thread_id_, space_);
+    auto bound = engine.bind_execution_context(process_id_, thread_id_, space_, guest_environment_.get());
     if (!bound.ok()) {
         return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
     }
@@ -545,7 +545,8 @@ Result<TlsCallbackResult> execute_tls_callbacks(
     // (DLL_PROCESS_ATTACH=1), R8=Reserved.
     auto bound = engine.bind_execution_context(ctx.info().process_id,
                                                ctx.info().thread_id,
-                                               ctx.memory().space());
+                                               ctx.memory().space(),
+                                               ctx.guest_environment_mut());
     if (!bound.ok()) {
         return Ret(bound.errc(), "bind TLS callback execution context: " +
                                      bound.error_string());

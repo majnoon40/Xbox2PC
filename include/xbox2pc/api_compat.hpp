@@ -66,6 +66,8 @@
 #include "xbox2pc/runtime_error.hpp"
 #include "xbox2pc/service_registry.hpp"
 
+namespace xbox2pc::rt::exec { class GuestThreadEnvironment; }
+
 namespace xbox2pc::rt::api {
 
 // ── calling conventions (metadata layer) ──────────────────────────────────
@@ -136,6 +138,7 @@ using GuestCallbackInvoker = std::function<Result<void>(std::uint64_t callback_v
     std::uint64_t callback_context, bool canceled)>;
 
 struct ApiContext {
+    exec::GuestThreadEnvironment* thread_environment = nullptr; // non-owning; synchronous dispatch only
     // The calling process (0 = runtime-global / no process).
     std::uint64_t process_id = 0;
     // Calling guest thread (0 = unavailable/runtime-global). Distinct from
