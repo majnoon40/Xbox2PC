@@ -297,7 +297,11 @@ ExecutionResult DeterministicBackend::run(
             auto dispatched = marshal_and_dispatch(
                 io_cpu, mem, registry_, plan.value(), pid_, depth,
                 cfg_.max_dispatch_depth, tid_, callback_invoker,
-                thread_environment_);
+                thread_environment_, req.control
+                    ? std::function<bool()>([control = req.control] {
+                          return control->is_cancelled();
+                      })
+                    : std::function<bool()>{});
             --impl_->dispatch_depth;
             if (!dispatched.ok()) {
                 fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
@@ -450,7 +454,8 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
                                           std::uint32_t max_depth,
                                           std::uint64_t tid,
                                           const api::GuestCallbackInvoker& invoke_callback,
-                                          GuestThreadEnvironment* thread_environment) {
+                                          GuestThreadEnvironment* thread_environment,
+                                          const std::function<bool()>& cancellation_requested) {
     using Ret = Result<MarshalResult>;
     if (depth >= max_depth) {
         return Ret(RuntimeErrc::OutOfResources,
@@ -501,10 +506,7 @@ Result<MarshalResult> marshal_and_dispatch(CpuState& io_cpu,
         };
     }
     ctx.invoke_guest_callback = invoke_callback;
-    if (req.control != nullptr) {
-        const auto control = req.control;
-        ctx.cancellation_requested = [control] { return control->is_cancelled(); };
-    }
+    ctx.cancellation_requested = cancellation_requested;
     ctx.arg_count = 0;
     for (std::size_t i = 0; i < args.value().size() &&
                             i < api::ApiContext::kMaxArgs;
