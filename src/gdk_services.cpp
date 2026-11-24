@@ -1954,7 +1954,8 @@ Result<void> TaskQueueService::submit_callback(
 
 Result<bool> TaskQueueService::dispatch(
     std::uint64_t process_id, std::uint64_t queue_id, XTaskQueuePort port,
-    std::uint32_t timeout_ms, const GuestCallbackInvoker& invoke_callback) {
+    std::uint32_t timeout_ms, const GuestCallbackInvoker& invoke_callback,
+    const std::function<bool()>& cancellation_requested) {
     auto queue_ref = lookup_queue(process_id, queue_id);
     if (!queue_ref.ok()) return Result<bool>(queue_ref.errc(), queue_ref.context());
     auto* queue = queue_ref.value().get()->as<Queue>();
@@ -1972,9 +1973,33 @@ Result<bool> TaskQueueService::dispatch(
         }
     };
     const auto ready = [&] { return !callbacks.empty() || queue->terminated; };
-    if (callbacks.empty() && !queue->terminated) {
-        if (timeout_ms == 0xFFFFFFFFu) queue_cv_.wait(lock, ready);
-        else if (timeout_ms != 0) (void)queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), ready);
+    const bool infinite = timeout_ms == 0xFFFFFFFFu;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(infinite ? 0u : timeout_ms);
+    while (!ready()) {
+        if (cancellation_requested && cancellation_requested()) {
+            finish_dispatch();
+            return Result<bool>(RuntimeErrc::ThreadTerminated,
+                                "task-queue dispatch canceled by guest-thread termination");
+        }
+        if (timeout_ms == 0) break;
+        // Bounded park intervals let the managed thread's cooperative
+        // cancellation become visible even when no queue event is signaled.
+        constexpr auto kCancellationPoll = std::chrono::milliseconds(2);
+        if (infinite) {
+            queue_cv_.wait_for(lock, kCancellationPoll);
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) break;
+            const auto remaining = deadline - now;
+            queue_cv_.wait_for(lock, std::min(remaining,
+                std::chrono::steady_clock::duration(kCancellationPoll)));
+        }
+    }
+    if (cancellation_requested && cancellation_requested()) {
+        finish_dispatch();
+        return Result<bool>(RuntimeErrc::ThreadTerminated,
+                            "task-queue dispatch canceled by guest-thread termination");
     }
     if (callbacks.empty()) {
         finish_dispatch();
