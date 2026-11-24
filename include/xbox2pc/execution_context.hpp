@@ -205,6 +205,13 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
 // per-callback results; a callback failure is reported, NOT silently
 // ignored; recursion is impossible (one pass, plan-level guard), and
 // partial failure still completes the remaining cleanup.
+enum class TlsCallbackReason : std::uint32_t {
+    ProcessDetach = 0,
+    ProcessAttach = 1,
+    ThreadAttach = 2,
+    ThreadDetach = 3,
+};
+
 struct TlsCallbackResult {
     std::uint32_t executed = 0;
     std::uint32_t failed = 0;
@@ -212,7 +219,8 @@ struct TlsCallbackResult {
 };
 Result<TlsCallbackResult> execute_tls_callbacks(
     ExecutionContext& ctx, const TlsCallbackPlan& plan,
-    IExecutionEngine& engine, std::uint64_t image_handle_va);
+    IExecutionEngine& engine, std::uint64_t image_handle_va,
+    TlsCallbackReason reason = TlsCallbackReason::ProcessAttach);
 
 // ── limits registry (runtime-wide, thread-safe) ─────────────────────────
 

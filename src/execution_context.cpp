@@ -548,11 +548,21 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
 
 Result<TlsCallbackResult> execute_tls_callbacks(
     ExecutionContext& ctx, const TlsCallbackPlan& plan,
-    IExecutionEngine& engine, std::uint64_t image_handle_va) {
+    IExecutionEngine& engine, std::uint64_t image_handle_va,
+    TlsCallbackReason reason) {
     using Ret = Result<TlsCallbackResult>;
     TlsCallbackResult out;
-    // Documented callback ABI: RCX=DllHandle, RDX=Reason
-    // (DLL_PROCESS_ATTACH=1), R8=Reserved.
+    switch (reason) {
+        case TlsCallbackReason::ProcessDetach:
+        case TlsCallbackReason::ProcessAttach:
+        case TlsCallbackReason::ThreadAttach:
+        case TlsCallbackReason::ThreadDetach:
+            break;
+        default:
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "unknown TLS callback notification reason");
+    }
+    // Documented callback ABI: RCX=DllHandle, RDX=Reason, R8=Reserved.
     auto bound = engine.bind_execution_context(ctx.info().process_id,
                                                ctx.info().thread_id,
                                                ctx.memory().space(),
@@ -576,7 +586,7 @@ Result<TlsCallbackResult> execute_tls_callbacks(
         spec.ret = abi::CallSpec::ReturnKind::Void;
         std::vector<abi::ArgValue> vals(3);
         vals[0].int_v = image_handle_va;
-        vals[1].int_v = 1;   // DLL_PROCESS_ATTACH
+        vals[1].int_v = static_cast<std::uint32_t>(reason);
         vals[2].int_v = 0;
         // Write the frame via the context's guest memory.
         struct W { guest::GuestMemory* m; };

@@ -51,9 +51,11 @@ vector slot. Index 0 is valid for this module-vector model.
   SetLastError/GetLastError import adapters are connected through the
   execution-context marshalling bridge and use the same guest TEB storage.
 - A bounded TLS callback planner validates the callback array and executable
-  targets. The explicit callback runner currently invokes the planned callbacks
-  with `DLL_PROCESS_ATTACH`; automatic process/thread attach-detach lifecycle
-  integration and compiler-generated TLS reads remain incomplete. Native GS
+  targets. The explicit callback runner accepts the four documented notification
+  reasons (`DLL_PROCESS_ATTACH`, `DLL_PROCESS_DETACH`, `DLL_THREAD_ATTACH`,
+  and `DLL_THREAD_DETACH`) and passes the selected reason in RDX. Automatic
+  process/thread lifecycle wiring and compiler-generated TLS reads remain
+  incomplete. Native GS
   setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full
   Windows TLS allocation model.

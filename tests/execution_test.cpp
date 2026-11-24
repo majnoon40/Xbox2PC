@@ -1984,8 +1984,29 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
                       std::to_string(res.value().first_failure->fault_address)
                 : "no callback failure detail");
     EXPECT_EQ(res.value().failed, 0u) << (res.value().first_failure.has_value() ? res.value().first_failure->detail + " rip=" + std::to_string(res.value().first_failure->rip) + " fault=" + std::to_string(res.value().first_failure->fault_address) : "no callback exception recorded");
+    auto thread_attach = execute_tls_callbacks(
+        ctx, plan.value(), engine, out.exec.image_base,
+        TlsCallbackReason::ThreadAttach);
+    ASSERT_TRUE(thread_attach.ok()) << thread_attach.error_string();
+    EXPECT_EQ(thread_attach.value().executed, 2u);
+    EXPECT_EQ(thread_attach.value().failed, 0u);
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph, h.value());
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsExecTest, RejectsUnknownCallbackReason) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-invalid-reason.exe");
+    auto cfg = ExecutionConfig::default_validated().value();
+    ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg, "tls-invalid-reason");
+    DeterministicBackend engine(w.reg, cfg);
+    TlsCallbackPlan empty_plan;
+    auto result = execute_tls_callbacks(
+        ctx, empty_plan, engine, 0,
+        static_cast<TlsCallbackReason>(99));
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.errc(), RuntimeErrc::InvalidArgument);
     (void)w.pm.terminate_process(ph, 0);
 }
 
