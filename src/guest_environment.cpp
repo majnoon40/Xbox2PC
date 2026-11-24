@@ -150,6 +150,20 @@ Result<void> GuestThreadEnvironment::initialize(std::uint64_t thread_id) {
     return Result<void>::ok_result();
 }
 
+Result<void> GuestThreadEnvironment::set_stack_bounds(
+    std::uint64_t stack_base, std::uint64_t stack_limit) {
+    if (!initialized_) {
+        return Result<void>(RuntimeErrc::InvalidState, "TEB not initialized");
+    }
+    if (stack_limit == 0 || stack_base <= stack_limit) {
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "stack base must be greater than a nonzero stack limit");
+    }
+    auto base = memory_.write_u64(teb_va_ + kTebStackBaseOffset, stack_base);
+    if (!base.ok()) return base;
+    return memory_.write_u64(teb_va_ + kTebStackLimitOffset, stack_limit);
+}
+
 Result<std::uint64_t> GuestThreadEnvironment::install_tls_module(
     std::uint32_t index, const std::uint8_t* template_bytes,
     std::size_t template_size, std::size_t zero_fill_bytes) {
