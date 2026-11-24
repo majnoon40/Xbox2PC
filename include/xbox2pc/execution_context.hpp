@@ -52,6 +52,7 @@
 #include "xbox2pc/guest_cpu_state.hpp"
 #include "xbox2pc/guest_memory.hpp"
 #include "xbox2pc/guest_exceptions.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/memory_management.hpp"
 #include "xbox2pc/runtime_object.hpp"
@@ -142,6 +143,9 @@ public:
     guest::GuestMemory& memory() { return mem_; }
     std::shared_ptr<ExecutionControl> execution_control() const;
     std::uint32_t run_count() const { return runs_; }
+    const GuestThreadEnvironment* guest_environment() const { return guest_environment_.get(); }
+    // Guest GS base for the future native-entry thunk; the interpreter does not consume it.
+    std::uint64_t guest_gs_base() const { return guest_environment_ ? guest_environment_->teb_base() : 0; }
 
 private:
     std::uint64_t process_id_;
@@ -150,6 +154,7 @@ private:
     api::ApiRegistry& api_reg_;
     ExecutionConfig cfg_;
     guest::GuestMemory mem_;
+    std::unique_ptr<GuestThreadEnvironment> guest_environment_;
     cpu::CpuState cpu_;
     Info info_;
     ContextState state_ = ContextState::Created;

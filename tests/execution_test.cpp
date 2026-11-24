@@ -2224,3 +2224,22 @@ TEST(GuestThreadEnvironmentTest, InstallsPerThreadTlsTemplateAndZeroFill) {
     EXPECT_EQ(env.read_tls(3, 15, contents, 2).errc(), RuntimeErrc::InvalidArgument);
     EXPECT_EQ(env.read_tls(4, 0, contents, 1).errc(), RuntimeErrc::NotFound);
 }
+
+
+TEST(ExecutionContextM11Test, InitializationOwnsGuestEnvironmentAndGuestGsBase) {
+    AddressSpace space(32ull << 20, 0x32000000, "execution-context-m11");
+    api::ApiRegistry registry;
+    ExecutionConfig config;
+    ExecutionContext context(0x91, 0xA2, space, registry, config, "m11-context");
+    EXPECT_EQ(context.guest_gs_base(), 0u);
+    ASSERT_TRUE(context.initialize().ok());
+    ASSERT_NE(context.guest_environment(), nullptr);
+    EXPECT_EQ(context.guest_gs_base(), context.guest_environment()->teb_base());
+    guest::GuestMemory memory(space);
+    EXPECT_EQ(memory.read_u64(context.guest_gs_base() +
+                 GuestThreadEnvironment::kTebPebOffset).value(),
+              context.guest_environment()->peb_base());
+    ASSERT_TRUE(context.destroy().ok());
+    EXPECT_EQ(context.guest_gs_base(), 0u);
+    EXPECT_EQ(space.stats().region_count, 0u);
+}

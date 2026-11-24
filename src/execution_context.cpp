@@ -128,6 +128,18 @@ Result<void> ExecutionContext::initialize() {
     // Committed regions default RW (M4 discipline) — exactly the stack's
     // required protection; no W^X exception needed.
     stack_region_va_ = stack_va;
+    // M11.3: materialize documented user-mode TEB/PEB fields and the
+    // per-thread TLS vector in guest memory. This records a guest GS base;
+    // host GS is configured only by the later native execution thunk.
+    auto environment = std::make_unique<GuestThreadEnvironment>(space_);
+    auto environment_result = environment->initialize(process_id_, thread_id_);
+    if (!environment_result.ok()) {
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return environment_result;
+    }
+    guest_environment_ = std::move(environment);
     info_.stack_top = stack_va + cfg_.max_stack_bytes - 64;   // usable top
     info_.stack_size = cfg_.max_stack_bytes;
     // Align the top 16 [MS-X64STACK].
@@ -157,6 +169,10 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
                    "image is not Prepared (M6 requires Prepared state)");
     }
     const auto& exec = image.exec();
+    if (guest_environment_ != nullptr) {
+        auto peb_image = guest_environment_->set_image_base(exec.image_base);
+        if (!peb_image.ok()) return Ret(peb_image.errc(), peb_image.context());
+    }
     // Entry validation: inside the image extent + executable region.
     {
         auto v = validate_entry_point(exec, space_);
@@ -317,6 +333,8 @@ Result<void> ExecutionContext::destroy() {
         return Result<void>(RuntimeErrc::InvalidState,
                             "cannot destroy while executing");
     }
+    // TEB, PEB, TLS vector and TLS blocks are released before the stack.
+    guest_environment_.reset();
     if (stack_region_va_ != 0) {
         auto r = space_.release_region(stack_region_va_);
         if (!r.ok()) {
