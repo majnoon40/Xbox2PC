@@ -210,9 +210,13 @@ public:
     std::size_t live_queues() const;
 
 private:
-    struct Queue : RuntimeObject {
+    struct Queue : RuntimeObject, IGuestHandleCloser {
         XBOX2PC_RUNTIME_OBJECT_TYPE(Queue, TaskQueue)
         Queue() : RuntimeObject(TypeId::TaskQueue) {}
+        Result<void> close_guest_handle(std::uint64_t process_id,
+                                        std::uint64_t raw_handle,
+                                        RefGuard&& object_pin) override;
+        TaskQueueService* service = nullptr;
         std::uint64_t owner_process_id = 0;
         bool terminated = false;
         std::uint32_t work_mode = 0;
@@ -224,6 +228,9 @@ private:
         std::uint32_t active_dispatches = 0;
     };
     Result<RefGuard> lookup_queue(std::uint64_t process_id, std::uint64_t queue_id) const;
+    Result<void> close_queue_with_guard(std::uint64_t process_id,
+                                        std::uint64_t queue_id,
+                                        RefGuard&& queue_ref);
     ApiRegistry& api_reg_;
     ProcessManager& pm_;
     mutable std::mutex lock_;

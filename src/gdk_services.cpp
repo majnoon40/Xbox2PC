@@ -855,7 +855,7 @@ public:
         auto r=svc_.close_sync_handle(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
         if(!r.ok())out.note=r.error_string(); return true;
     }
-    std::string describe() const override { return "Win32: CloseHandle (supported synchronization handles)"; }
+    std::string describe() const override { return "Win32: CloseHandle (supported synchronization and task-queue handles)"; }
 private: GameRuntimeService& svc_;
 };
 
@@ -1687,22 +1687,45 @@ Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
 }
 
 Result<void> GameRuntimeService::close_sync_handle(std::uint64_t pid, std::uint64_t handle) {
-    std::lock_guard transaction(sync_transaction_lock_);
-    auto object = lookup_sync_object(pid, handle);
-    if (!object.ok()) return Result<void>(object.errc(), object.context());
+    if (pid == 0 || handle == 0)
+        return Result<void>(RuntimeErrc::InvalidHandle, "null process or guest handle");
     auto process = process_manager_.find_process_by_pid(pid);
     if (!process.ok()) return Result<void>(process.errc(), process.context());
     auto* owner = process.value().get()->as<ManagedProcess>();
-    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
-    const auto object_id = object.value().get()->id();
-    if (auto* mutex = object.value().get()->as<RtGuestMutex>()) mutex->close();
-    if (auto* semaphore = object.value().get()->as<RtGuestSemaphore>()) semaphore->close();
-    auto closed = owner->handle_table().close(Handle::from_raw(handle));
+    if (owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    auto candidate = owner->handle_table().lookup(Handle::from_raw(handle));
+    if (!candidate.ok()) return Result<void>(candidate.errc(), candidate.context());
+    auto* object = candidate.value().get();
+    if (object != nullptr && object->type_id() == TypeId::TaskQueue) {
+        auto* closer = dynamic_cast<IGuestHandleCloser*>(object);
+        if (closer == nullptr)
+            return Result<void>(RuntimeErrc::ObjectTypeMismatch,
+                                "task-queue object does not implement guest handle close");
+        return closer->close_guest_handle(pid, handle, std::move(candidate.value()));
+    }
+    candidate.value().release();
+
+    std::lock_guard transaction(sync_transaction_lock_);
+    auto sync_object = lookup_sync_object(pid, handle);
+    if (!sync_object.ok())
+        return Result<void>(sync_object.errc(), sync_object.context());
+    auto current_process = process_manager_.find_process_by_pid(pid);
+    if (!current_process.ok())
+        return Result<void>(current_process.errc(), current_process.context());
+    auto* current_owner = current_process.value().get()->as<ManagedProcess>();
+    if (current_owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto object_id = sync_object.value().get()->id();
+    if (auto* mutex = sync_object.value().get()->as<RtGuestMutex>()) mutex->close();
+    if (auto* semaphore = sync_object.value().get()->as<RtGuestSemaphore>()) semaphore->close();
+    auto closed = current_owner->handle_table().close(Handle::from_raw(handle));
     if (!closed.ok()) return closed;
     {
         std::lock_guard lock(state_lock_);
         const auto erased = sync_objects_.erase({pid, handle});
-        if (erased == 0) return Result<void>(RuntimeErrc::InvalidHandle, "synchronization handle already closed");
+        if (erased == 0)
+            return Result<void>(RuntimeErrc::InvalidHandle, "synchronization handle already closed");
         retired_sync_objects_[pid].push_back(object_id);
     }
     return Result<void>::ok_result();
@@ -1853,6 +1876,7 @@ Result<std::uint64_t> TaskQueueService::create_queue(
 
     auto queue = std::make_unique<Queue>();
     queue->owner_process_id = process_id;
+    queue->service = this;
     queue->work_mode = work_mode;
     queue->completion_mode = completion_mode;
     auto object_id = pm_.objects().register_object(std::move(queue));
@@ -1984,15 +2008,30 @@ Result<bool> TaskQueueService::dispatch(
     return Result<bool>(true);
 }
 
+Result<void> TaskQueueService::Queue::close_guest_handle(
+    std::uint64_t process_id, std::uint64_t raw_handle, RefGuard&& object_pin) {
+    if (service == nullptr)
+        return Result<void>(RuntimeErrc::InvalidState, "task queue service is unavailable");
+    return service->close_queue_with_guard(process_id, raw_handle, std::move(object_pin));
+}
+
 Result<void> TaskQueueService::close_queue(
     std::uint64_t process_id, std::uint64_t queue_id) {
     auto queue_ref = lookup_queue(process_id, queue_id);
     if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    return close_queue_with_guard(process_id, queue_id, std::move(queue_ref.value()));
+}
+
+Result<void> TaskQueueService::close_queue_with_guard(
+    std::uint64_t process_id, std::uint64_t queue_id, RefGuard&& queue_ref) {
+    if (!queue_ref || queue_ref.get()->as<Queue>() == nullptr)
+        return Result<void>(RuntimeErrc::InvalidHandle, "task-queue object pin is invalid");
     auto process = pm_.find_process_by_pid(process_id);
     if (!process.ok()) return Result<void>(process.errc(), process.context());
     auto* owner = process.value().get()->as<ManagedProcess>();
-    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
-    const auto object_id = queue_ref.value().get()->id();
+    if (owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto object_id = queue_ref.get()->id();
     bool last_handle = false;
     {
         std::lock_guard lock(lock_);
@@ -2002,7 +2041,7 @@ Result<void> TaskQueueService::close_queue(
         last_handle = std::none_of(remaining.begin(), remaining.end(),
             [&](const auto& info) { return info.object_id == object_id; });
         if (last_handle) {
-            auto* queue = queue_ref.value().get()->as<Queue>();
+            auto* queue = queue_ref.get()->as<Queue>();
             if (queue != nullptr) {
                 queue->terminated = true;
                 for (auto& callback : queue->work_callbacks) callback.canceled = true;
@@ -2022,7 +2061,7 @@ Result<void> TaskQueueService::close_queue(
     }
     queue_cv_.notify_all();
     if (last_handle) {
-        queue_ref.value().release();
+        queue_ref.release();
         process.value().release();
         return pm_.objects().destroy(object_id);
     }

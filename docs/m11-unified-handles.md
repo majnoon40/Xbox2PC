@@ -19,11 +19,10 @@ increasing 64-bit handle namespace.
 
 ## Current boundary
 
-`XTaskQueueCloseHandle` closes the task-queue type through the task-queue
-service. The existing Win32 `CloseHandle` adapter still has its narrower
-synchronization-object dispatch and does not yet route TaskQueue handles.
-Therefore this is a shared token/object table foundation, not completion of
- the generic type-directed close API.
+`XTaskQueueCloseHandle` and Win32 `CloseHandle` both route TaskQueue handles
+through the owning task-queue service. Win32 `CloseHandle` also retains the
+synchronization-object close path. Other future object types still need to
+register a typed close path before they can be closed through the generic API.
 
 Automatic/thread-pool dispatch, delayed callbacks, and scheduler-aware
 cancellation remain unsupported.

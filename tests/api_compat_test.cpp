@@ -1099,6 +1099,26 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
 }
 
+TEST(GdkServiceTest, Win32CloseHandleDispatchesTaskQueueType) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-closehandle.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = process->pid_value();
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    const auto queue = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(queue.ok()) << queue.error_string();
+
+    ApiContext close;
+    close.process_id = pid;
+    close.arg_count = 1;
+    close.args[0] = queue.value();
+    const auto result = w.reg.dispatch("kernel32", "CloseHandle", close);
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.return_value, 1u);
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(w.tq->dispatch(pid, queue.value(), XTaskQueuePort::Work, 0).ok());
+}
+
 TEST(GdkServiceTest, TaskQueueHandlesUseTheProcessHandleTable) {
     ApiWorld w;
     auto* process = w.new_process("task-queue-handle-table.exe");
