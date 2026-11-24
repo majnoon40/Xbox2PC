@@ -565,6 +565,9 @@ Result<TlsCallbackResult> execute_tls_callbacks(
         // Prepare the callback frame on the context's CPU state.
         CpuState call = ctx.cpu();
         call.set_reg(Gpr::Sp, ctx.info().stack_top);
+        // The callback is a normal guest call: RET must resume at the
+        // engine's completion sentinel, not the reset context RIP (zero).
+        call.rip = kCompletionSentinel;
         abi::CallSpec spec;
         spec.args.resize(3);
         spec.args[0].kind = abi::ArgKind::Int;
