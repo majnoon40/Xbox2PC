@@ -164,6 +164,15 @@ Result<void> ExecutionContext::initialize() {
     info_.stack_size = cfg_.max_stack_bytes;
     // Align the top 16 [MS-X64STACK].
     info_.stack_top &= ~0xFull;
+    auto stack_bounds = guest_environment_->set_stack_bounds(
+        stack_va + cfg_.max_stack_bytes, stack_va);
+    if (!stack_bounds.ok()) {
+        guest_environment_.reset();
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return stack_bounds;
+    }
     cpu_.reset();
     cpu_.set_reg(Gpr::Sp, info_.stack_top);
     state_ = ContextState::Initialized;
