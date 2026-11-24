@@ -1348,7 +1348,9 @@ TEST(GdkServiceTest, TaskQueueCallbackInvokerExceptionDoesNotLeakActiveDispatch)
 
 TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 303;
+    auto* process = w.new_process("task-queue-duplicate-lifetime.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto created = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1470,7 +1472,9 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
 
 TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 404;
+    auto* process = w.new_process("task-queue-final-close.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto created = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1503,8 +1507,12 @@ TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
 
 TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 101;
-    constexpr std::uint64_t foreign_pid = 202;
+    auto* owner_process = w.new_process("task-queue-owner.exe");
+    auto* foreign_process = w.new_process("task-queue-foreign.exe");
+    ASSERT_NE(owner_process, nullptr);
+    ASSERT_NE(foreign_process, nullptr);
+    const std::uint64_t owner_pid = owner_process->pid_value();
+    const std::uint64_t foreign_pid = foreign_process->pid_value();
     auto q = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
