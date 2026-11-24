@@ -1938,6 +1938,76 @@ TEST(NativeExecutionTest, RunsPositionIndependentReturnStubInFaultContainedChild
 #endif
 }
 
+TEST(NativeExecutionTest, CapturesInvalidInstructionWithoutCrashingParent) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x52000000, "native-invalid-opcode");
+    auto region = space.reserve_region_auto(space.page_size(), "native-ud2");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    const std::uint8_t code[] = {0x0F, 0x0B}; // UD2
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    ASSERT_TRUE(backend.bind_execution_context(0x72, 0x82, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::InvalidInstruction);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
+TEST(NativeExecutionTest, EnforcesChildExecutionDeadline) {
+#if defined(__SANITIZE_THREAD__)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    GTEST_SKIP() << "forked native execution is not exercised under TSan";
+#endif
+#endif
+#if defined(__linux__) && defined(__x86_64__)
+    AddressSpace space(4ull << 20, 0x53000000, "native-timeout");
+    auto region = space.reserve_region_auto(space.page_size(), "native-loop");
+    ASSERT_TRUE(region.ok());
+    ASSERT_TRUE(space.commit_region(region.value()).ok());
+    auto host = space.translate(region.value());
+    ASSERT_TRUE(host.ok());
+    const std::uint8_t code[] = {0xEB, 0xFE}; // jmp $
+    std::memcpy(host.value(), code, sizeof(code));
+    ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
+    NativeExecutionBackend backend(std::chrono::milliseconds(50));
+    ASSERT_TRUE(backend.bind_execution_context(0x73, 0x83, space).ok());
+    ExecutionRequest req;
+    req.entry_va = region.value();
+    cpu::CpuState cpu;
+    cpu.reset();
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(req, cpu, interrupted);
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::BudgetExceeded);
+#else
+    GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
+#endif
+}
+
 // ── TLS callbacks ─────────────────────────────────────────────────────────
 
 TEST(TlsExecTest, PlanValidationAndExecution) {

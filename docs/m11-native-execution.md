@@ -12,6 +12,8 @@ entrypoints directly on an x86-64 Linux host using the Microsoft x64 ABI.
   terminates that child and is reported as a guest fault; a timeout is reported
   as a budget fault.
 - The returned RAX value is copied back to the parent runtime.
+- Regression tests cover a normal return, an invalid-instruction host signal,
+  and forced termination when the child exceeds its deadline.
 
 ## Explicit limitations
 

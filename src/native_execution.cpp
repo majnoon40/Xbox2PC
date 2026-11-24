@@ -103,11 +103,8 @@ ExecutionResult NativeExecutionBackend::run(
     const auto deadline = std::chrono::steady_clock::now() + timeout_;
     bool reaped = false, timed_out = false, was_interrupted = false;
     while (!reaped) {
-        if (interrupted.load(std::memory_order_acquire)) {
-            was_interrupted = true; (void)::kill(child, SIGKILL);
-        } else if (std::chrono::steady_clock::now() >= deadline) {
-            timed_out = true; (void)::kill(child, SIGKILL);
-        }
+        // Observe completion before applying the deadline/cancellation. This
+        // avoids classifying a child that just returned as timed out.
         const pid_t waited = ::waitpid(child, &status, WNOHANG);
         if (waited == child) { reaped = true; break; }
         if (waited < 0 && errno != EINTR) {
@@ -118,9 +115,17 @@ ExecutionResult NativeExecutionBackend::run(
             return fail(GuestFault::Internal,
                         std::string("native child wait failed: ") + std::strerror(saved_errno));
         }
+        if (interrupted.load(std::memory_order_acquire)) {
+            was_interrupted = true;
+            (void)::kill(child, SIGKILL);
+        } else if (std::chrono::steady_clock::now() >= deadline) {
+            timed_out = true;
+            (void)::kill(child, SIGKILL);
+        }
         if (timed_out || was_interrupted) {
             while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-            reaped = true; break;
+            reaped = true;
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
