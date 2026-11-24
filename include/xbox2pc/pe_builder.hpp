@@ -56,7 +56,7 @@ struct RelocBlockSpec {
 };
 
 // TLS directory content to embed (M6): template bytes (planted in .rdata),
-// zero-fill size, and callback VAs (planted as an array; NEVER executed).
+// zero-fill size, and callback VAs (planted as an array for synthetic callback tests).
 struct TlsSpec {
     std::vector<std::uint8_t> template_data;   // copied to .rdata
     std::uint32_t zero_fill = 0;               // SizeOfZeroFill

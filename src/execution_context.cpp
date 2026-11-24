@@ -504,14 +504,24 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
         return Ret(RuntimeErrc::InvalidArgument,
                    "callback count nonzero with no array VA");
     }
-    // Read the callback VA array from guest memory (each 8 bytes).
+    // Validate the complete array range before reading any element. A
+    // wrapped VA must never redirect a malformed callback array into an
+    // unrelated low guest address.
+    const auto array_bytes =
+        static_cast<std::uint64_t>(tls.callback_count) * sizeof(std::uint64_t);
+    if (tls.callbacks_va > UINT64_MAX - array_bytes) {
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "TLS callback array address range overflows");
+    }
+    // An unreadable callback-array element makes the whole plan unreliable:
+    // do not silently skip it and execute a partial callback sequence.
     for (std::uint32_t i = 0; i < tls.callback_count; ++i) {
-        const std::uint64_t slot = tls.callbacks_va + static_cast<std::uint64_t>(i) * 8;
+        const std::uint64_t slot = tls.callbacks_va +
+            static_cast<std::uint64_t>(i) * sizeof(std::uint64_t);
         auto va = mem.read_u64(slot);
         if (!va.ok()) {
-            // Unreadable array slot: reject the ENTRY (not the plan).
-            ++plan.rejected_count;
-            continue;
+            return Ret(RuntimeErrc::NotFound,
+                       "TLS callback array contains an unreadable element");
         }
         if (va.value() == 0) {
             // Terminating NULL or padding: stop at the documented

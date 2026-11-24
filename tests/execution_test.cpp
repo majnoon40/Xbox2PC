@@ -1938,22 +1938,25 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     guest::GuestMemory mem(proc->address_space());
     auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
     ASSERT_TRUE(plan.ok()) << plan.error_string();
-    // The image base is relocated (preferred 0x140000000 is outside the
-    // space) — callback VAs in the TLS directory are ABSOLUTE VAs that
-    // relocation fixed up only for DIR64-referenced slots. The builder
-    // plants preferred-base VAs; the loader's DIR64 relocs fix the IAT,
-    // NOT the callback array (documented: the callback array entries are
-    // absolute VAs fixed by relocations in a real toolchain).
-    // The runtime's validation must therefore REJECT the un-relocated
-    // (out-of-space) callback VAs honestly — rejecting_count > 0 or
-    // typed failure. Both are honest outcomes; assert we don't crash and
-    // the note explains.
-    EXPECT_TRUE(plan.value().note.find("validated") != std::string::npos ||
-                plan.value().note.find("rejected") != std::string::npos);
+    // This test fixture does not synthesize relocation entries for its TLS
+    // callback array. Apply the equivalent of the loader's DIR64 fixups to
+    // the array VA and entries so the execution test exercises real callbacks
+    // at the relocated image address rather than passing an empty plan.
+    ASSERT_GE(tls.value()->callbacks_va, spec.image_base);
+    const auto callback_array_rva =
+        tls.value()->callbacks_va - spec.image_base;
+    tls.value()->callbacks_va = out.exec.image_base + callback_array_rva;
+    ASSERT_TRUE(mem.write_u64(tls.value()->callbacks_va,
+                              out.exec.image_base + 0x1100).ok());
+    ASSERT_TRUE(mem.write_u64(tls.value()->callbacks_va + sizeof(std::uint64_t),
+                              out.exec.image_base + 0x1110).ok());
+    auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
+    ASSERT_TRUE(plan.ok()) << plan.error_string();
+    ASSERT_EQ(plan.value().callbacks.size(), 2u);
+    EXPECT_EQ(plan.value().rejected_count, 0u);
 
-    // Execute whatever validated (0 or 2 callbacks) through the engine:
-    // the deterministic backend runs RET-only callback programs to
-    // completion; the documented callback ABI is prepared on the stack.
+    // Execute both synthetic RET-only callbacks through the deterministic
+    // backend; the documented callback ABI is prepared on the guest stack.
     ExecutionContext ctx(1, 1, proc->address_space(), w.reg, cfg, "tls-ctx");
     ASSERT_TRUE(ctx.initialize().ok());
     DeterministicBackend engine(w.reg, cfg);
@@ -1963,10 +1966,40 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
                                      out.exec.image_base);
     ASSERT_TRUE(res.ok());
     // Executed + failed == callbacks in the plan (nothing silently lost).
-    EXPECT_EQ(res.value().executed + res.value().failed,
-              plan.value().callbacks.size());
+    EXPECT_EQ(res.value().executed, 2u);
+    EXPECT_EQ(res.value().failed, 0u);
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph, h.value());
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsExecTest, CallbackArrayAddressOverflowRejected) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-overflow.exe");
+    guest::GuestMemory mem(proc->address_space());
+    loader::TlsInfo tls;
+    tls.present = true;
+    tls.callbacks_va = UINT64_MAX - 7;
+    tls.callback_count = 2;
+    auto cfg = ExecutionConfig::default_validated().value();
+    auto plan = plan_tls_callbacks(mem, tls, cfg);
+    EXPECT_FALSE(plan.ok());
+    EXPECT_EQ(plan.errc(), RuntimeErrc::InvalidArgument);
+    (void)w.pm.terminate_process(ph, 0);
+}
+
+TEST(TlsExecTest, UnreadableCallbackArrayRejectsWholePlan) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("tls-unreadable.exe");
+    guest::GuestMemory mem(proc->address_space());
+    loader::TlsInfo tls;
+    tls.present = true;
+    tls.callbacks_va = UINT64_MAX - 0x1000;
+    tls.callback_count = 1;
+    auto cfg = ExecutionConfig::default_validated().value();
+    auto plan = plan_tls_callbacks(mem, tls, cfg);
+    EXPECT_FALSE(plan.ok());
+    EXPECT_EQ(plan.errc(), RuntimeErrc::NotFound);
     (void)w.pm.terminate_process(ph, 0);
 }
 

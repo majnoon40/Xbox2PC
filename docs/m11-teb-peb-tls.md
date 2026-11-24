@@ -50,8 +50,11 @@ vector slot. Index 0 is valid for this module-vector model.
 - LastErrorValue is stored per thread at TEB+0x68. The Win32
   SetLastError/GetLastError import adapters are connected through the
   execution-context marshalling bridge and use the same guest TEB storage.
-- TLS callback execution and compiler-generated TLS reads are not claimed to
-  work end to end; native GS setup remains a later phase.
+- A bounded TLS callback planner validates the callback array and executable
+  targets. The explicit callback runner currently invokes the planned callbacks
+  with `DLL_PROCESS_ATTACH`; automatic process/thread attach-detach lifecycle
+  integration and compiler-generated TLS reads remain incomplete. Native GS
+  setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full
   Windows TLS allocation model.
 
