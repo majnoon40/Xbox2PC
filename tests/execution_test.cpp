@@ -1964,9 +1964,9 @@ TEST(NativeExecutionTest, PassesIntegerArgumentsInMicrosoftX64Registers) {
     ExecutionRequest req;
     req.entry_va = region.value();
     req.completion_va = kCompletionSentinel;
-    req.entry_spec.args = {{abi::ArgKind::Int}, {abi::ArgKind::Int}};
-    req.entry_spec.ret = abi::CallSpec::ReturnKind::Int;
-    req.entry_args = {{abi::ArgKind::Int, 19}, {abi::ArgKind::Int, 23}};
+    req.entry_spec.args = {{xbox2pc::rt::abi::ArgKind::Int}, {xbox2pc::rt::abi::ArgKind::Int}};
+    req.entry_spec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
+    req.entry_args = {{xbox2pc::rt::abi::ArgKind::Int, 19}, {xbox2pc::rt::abi::ArgKind::Int, 23}};
     cpu::CpuState cpu;
     cpu.reset();
     cpu.set_reg(cpu::Gpr::Rcx, 19);
@@ -2089,7 +2089,7 @@ TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
     ExecutionRequest req;
     req.entry_va = loaded.exec.entry_va;
     req.completion_va = kCompletionSentinel;
-    req.entry_spec.ret = abi::CallSpec::ReturnKind::Int;
+    req.entry_spec.ret = xbox2pc::rt::abi::CallSpec::ReturnKind::Int;
     cpu::CpuState cpu;
     cpu.reset();
     std::atomic<bool> interrupted{false};
