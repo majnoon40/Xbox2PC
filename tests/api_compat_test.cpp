@@ -1504,7 +1504,7 @@ TEST(GdkServiceTest, TaskQueueInfiniteDispatchObservesGuestCancellation) {
     std::atomic<bool> cancel{false};
     std::atomic<bool> entered{false};
     std::atomic<bool> finished{false};
-    xbox2pc::Result<bool> dispatch_result(false);
+    xbox2pc::rt::Result<bool> dispatch_result(false);
     std::thread waiter([&] {
         entered.store(true, std::memory_order_release);
         dispatch_result = w.tq->dispatch(
@@ -1527,7 +1527,7 @@ TEST(GdkServiceTest, TaskQueueInfiniteDispatchObservesGuestCancellation) {
     EXPECT_TRUE(entered_in_time);
     EXPECT_TRUE(finished.load(std::memory_order_acquire));
     EXPECT_FALSE(dispatch_result.ok());
-    EXPECT_EQ(dispatch_result.errc(), xbox2pc::RuntimeErrc::ThreadTerminated);
+    EXPECT_EQ(dispatch_result.errc(), xbox2pc::rt::RuntimeErrc::ThreadTerminated);
     EXPECT_TRUE(w.tq->close_queue(owner_pid, created.value()).ok());
 }
 
