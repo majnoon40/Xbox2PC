@@ -348,7 +348,8 @@ Result<MarshalResult> marshal_and_dispatch(cpu::CpuState& io_cpu,
                                            std::uint32_t max_depth,
                                            std::uint64_t tid = 0,
                                            const api::GuestCallbackInvoker& invoke_callback = {},
-                                           GuestThreadEnvironment* thread_environment = nullptr);
+                                           GuestThreadEnvironment* thread_environment = nullptr,
+                                           const std::function<bool()>& cancellation_requested = {});
 
 // ── completion sentinel + binding range ──────────────────────────────────
 
