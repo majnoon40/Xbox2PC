@@ -14,6 +14,9 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -979,6 +982,74 @@ TEST(ProcessMgmtTest, FullLifecycleWithCleanup) {
     EXPECT_EQ(after.thread_count, 0u);
     EXPECT_EQ(after.committed_bytes, 0u);
     EXPECT_EQ(after.region_count, 0u);
+    ASSERT_TRUE(core.shutdown().ok());
+}
+
+TEST(ProcessMgmtTest, ExitObserversRunUnlockedAndRemovalDrainsActiveCalls) {
+    rt::RuntimeCore core;
+    ASSERT_TRUE(core.initialize().ok());
+    ProcessManager pm(core.objects());
+    auto process = pm.create_process("observer.exe");
+    ASSERT_TRUE(process.ok());
+    rt::ModuleDescriptor module;
+    ASSERT_TRUE(pm.initialize_process(process.value(), module,
+                                      rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(pm.start_process(process.value()).ok());
+
+    std::mutex callback_mutex;
+    std::condition_variable callback_changed;
+    bool callback_entered = false;
+    bool release_callback = false;
+    std::atomic<bool> remove_started{false};
+    std::atomic<bool> remove_finished{false};
+    std::atomic<std::uint64_t> observed_pid{0};
+
+    auto observer = pm.add_process_exit_observer([&](std::uint64_t pid) {
+        // This call takes ProcessManager::lock_. It deadlocks if observers
+        // are still invoked while terminate_process owns that lock.
+        EXPECT_EQ(pm.process_count(), 1u);
+        observed_pid.store(pid, std::memory_order_release);
+        std::unique_lock lock(callback_mutex);
+        callback_entered = true;
+        callback_changed.notify_all();
+        callback_changed.wait(lock, [&] { return release_callback; });
+    });
+    ASSERT_TRUE(observer.ok());
+
+    std::thread terminator([&] {
+        EXPECT_TRUE(pm.terminate_process(process.value(), 17u).ok());
+    });
+    {
+        std::unique_lock lock(callback_mutex);
+        ASSERT_TRUE(callback_changed.wait_for(
+            lock, std::chrono::seconds(2), [&] { return callback_entered; }));
+    }
+
+    std::thread remover([&] {
+        remove_started.store(true, std::memory_order_release);
+        EXPECT_TRUE(pm.remove_process_exit_observer(observer.value()).ok());
+        remove_finished.store(true, std::memory_order_release);
+    });
+    while (!remove_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(remove_finished.load(std::memory_order_acquire));
+
+    {
+        std::lock_guard lock(callback_mutex);
+        release_callback = true;
+    }
+    callback_changed.notify_all();
+    terminator.join();
+    remover.join();
+
+    EXPECT_TRUE(remove_finished.load(std::memory_order_acquire));
+    EXPECT_NE(observed_pid.load(std::memory_order_acquire), 0u);
+    EXPECT_EQ(observed_pid.load(std::memory_order_acquire),
+              pm.resolve_pid(process.value()).ok()
+                  ? pm.resolve_pid(process.value()).value()
+                  : 0u);
     ASSERT_TRUE(core.shutdown().ok());
 }
 
