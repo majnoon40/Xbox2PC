@@ -1979,7 +1979,10 @@ TEST(TlsExecTest, PlanValidationAndExecution) {
     // Executed + failed == callbacks in the plan (nothing silently lost).
     ASSERT_EQ(res.value().executed, 2u)
         << (res.value().first_failure.has_value()
-                ? res.value().first_failure->detail : "no callback failure detail");
+                ? res.value().first_failure->detail + " rip=" +
+                      std::to_string(res.value().first_failure->rip) + " fault=" +
+                      std::to_string(res.value().first_failure->fault_address)
+                : "no callback failure detail");
     EXPECT_EQ(res.value().failed, 0u) << (res.value().first_failure.has_value() ? res.value().first_failure->detail + " rip=" + std::to_string(res.value().first_failure->rip) + " fault=" + std::to_string(res.value().first_failure->fault_address) : "no callback exception recorded");
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph, h.value());
