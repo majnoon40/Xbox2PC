@@ -544,14 +544,17 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
         // RX region (mapped image .text).
         auto x = mem.validate_exec(cb.va);
         if (!x.ok()) {
-            ++plan.rejected_count;
-            continue;
+            return Ret(RuntimeErrc::NotFound,
+                       "TLS callback target at VA " + std::to_string(cb.va) +
+                           " is not executable mapped guest memory");
         }
         plan.callbacks.push_back(cb);
     }
+    // A TLS callback array is an ordered initialization contract. Skipping
+    // one malformed target would silently execute a partial lifecycle, so
+    // reject the complete plan instead.
     plan.note = "validated " + std::to_string(plan.callbacks.size()) +
-                " callbacks (" + std::to_string(plan.rejected_count) +
-                " rejected)";
+                " callbacks";
     return Ret(plan);
 }
 
