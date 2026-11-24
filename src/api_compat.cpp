@@ -559,8 +559,8 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.ret = ReturnKind::Void;
         a.signature = "VOID SetLastError(DWORD dwErrCode)";
         a.category = registry::ApiCategory::WindowsWin32;
-        a.compat = ApiStatus::PartiallyImplemented;
-        a.impl = ApiStatus::PartiallyImplemented;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
         a.evidence = "[MS-LAST-ERROR]";
         a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setlasterror";
         a.notes = "stores the error value in the calling guest thread's TEB; requires an initialized execution context";
@@ -575,8 +575,8 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.ret = ReturnKind::Uint32;
         a.signature = "DWORD GetLastError()";
         a.category = registry::ApiCategory::WindowsWin32;
-        a.compat = ApiStatus::PartiallyImplemented;
-        a.impl = ApiStatus::PartiallyImplemented;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
         a.evidence = "[MS-LAST-ERROR]";
         a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror";
         a.notes = "reads the error value from the calling guest thread's TEB; requires an initialized execution context";
