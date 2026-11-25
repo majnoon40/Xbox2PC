@@ -271,3 +271,12 @@ target_link_libraries(security_regression_test PRIVATE
     gtest)
 target_compile_features(security_regression_test PRIVATE cxx_std_20)
 add_test(NAME security_regression_test COMMAND security_regression_test)
+
+# M11 Phase 7: adversarial lock-order + exit-code propagation suite.
+add_executable(m11_lock_order_test m11_lock_order_test.cpp)
+target_link_libraries(m11_lock_order_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    gtest)
+target_compile_features(m11_lock_order_test PRIVATE cxx_std_20)
+add_test(NAME m11_lock_order_test COMMAND m11_lock_order_test)
