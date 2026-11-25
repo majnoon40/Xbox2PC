@@ -24,6 +24,7 @@
 #include "xbox2pc/diagnostics.hpp"
 #include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
+#include "xbox2pc/run_cli.hpp"
 #include "xbox2pc/memory_management.hpp"
 #include "xbox2pc/package_vfs.hpp"
 #include "xbox2pc/packages.hpp"
@@ -2814,6 +2815,19 @@ int main(int argc, char** argv) {
     }
     const int m9_binary_result = xbox2pc::cli::run_m9_binary_cli(argc, argv);
     if (m9_binary_result >= 0) return m9_binary_result;
+    if (argc >= 2 && std::strcmp(argv[1], "run") == 0) {
+        if (argc < 3) {
+            std::fprintf(stderr, "usage: xbox2pc run <file> [--json <out>]\n");
+            return 2;
+        }
+        std::optional<std::string> json_out;
+        if (argc == 5 && std::strcmp(argv[3], "--json") == 0) json_out = argv[4];
+        else if (argc != 3) {
+            std::fprintf(stderr, "error: invalid run arguments\n");
+            return 2;
+        }
+        return xbox2pc::cli::run_file(argv[2], json_out);
+    }
     if (argc >= 2 && std::strcmp(argv[1], "interpreter-info") == 0) {
         std::optional<std::string> json_out;
         if (argc == 4 && std::strcmp(argv[2], "--json") == 0) json_out = argv[3];

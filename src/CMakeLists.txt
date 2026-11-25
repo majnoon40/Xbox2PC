@@ -272,6 +272,14 @@ target_link_libraries(xbox2pc_rt_api PUBLIC
     xbox2pc_rt_loader xbox2pc_rt_services xbox2pc_api_registry xbox2pc_compat_db)
 target_compile_features(xbox2pc_rt_api PUBLIC cxx_std_20)
 
+# M11 Phase 9: shared `xbox2pc run` entry (CLI tool + integration tests).
+add_library(xbox2pc_rt_run_cli STATIC run_cli.cpp)
+target_include_directories(xbox2pc_rt_run_cli PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_run_cli PUBLIC
+    xbox2pc_core xbox2pc_rt_execution xbox2pc_rt_abi xbox2pc_rt_loader
+    xbox2pc_rt_gdk xbox2pc_rt_procman xbox2pc_json xbox2pc_pe_parser)
+target_compile_features(xbox2pc_rt_run_cli PUBLIC cxx_std_20)
+
 add_library(xbox2pc_rt_gdk STATIC gdk_services.cpp graphics_service.cpp)
 target_include_directories(xbox2pc_rt_gdk PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_gdk PUBLIC
