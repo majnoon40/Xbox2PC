@@ -139,6 +139,79 @@ void* guest_wait_thread_main(xbox2pc::rt::RtThread& self, void* raw) {
 
 // ── 12.1 registry ─────────────────────────────────────────────────────────
 
+// ── M11 Phase 3: generic CloseHandle typed dispatch ───────────────────────
+
+TEST(CloseHandleTypedDispatchAndStaleRejection, HeapAndSyncRouting) {
+    // One world, two processes: A creates a private heap + an event, B is a
+    // stranger. CloseHandle must route by object type, reject foreign and
+    // stale handles, and refuse the process default heap.
+    ApiRegistry reg;
+    RuntimeCore core;
+    ProcessManager pm(core.objects());
+    GameRuntimeService* grt = nullptr;
+    {
+        auto svc = std::make_unique<GameRuntimeService>(reg, pm);
+        grt = svc.get();
+        ASSERT_TRUE(core.services().register_service(std::move(svc)).ok());
+    }
+    ASSERT_TRUE(core.initialize().ok());
+
+    auto pa = pm.create_process("close-a", 16ull << 20);
+    ASSERT_TRUE(pa.ok());
+    const auto pid_a = pm.resolve_pid(pa.value()).value();
+    auto pb = pm.create_process("close-b", 16ull << 20);
+    ASSERT_TRUE(pb.ok());
+    const auto pid_b = pm.resolve_pid(pb.value()).value();
+    // Sync objects require a started process (state-machine requirement).
+    for (const auto& [proc, name] : {std::pair{pa.value(), "close-a"},
+                                     std::pair{pb.value(), "close-b"}}) {
+        xbox2pc::rt::ModuleDescriptor module;
+        module.module_name = name;
+        module.is_valid_pe = true;
+        ASSERT_TRUE(pm.initialize_process(proc, module,
+                                          xbox2pc::rt::RuntimeConfig{}).ok());
+        ASSERT_TRUE(pm.start_process(proc).ok());
+    }
+
+    // Private heap + auto-reset event in process A.
+    auto heap = grt->heap_create(pid_a, 0);
+    ASSERT_TRUE(heap.ok());
+    auto event = grt->create_event(pid_a, false, false);
+    ASSERT_TRUE(event.ok());
+
+    // The process default heap refuses generic close (HeapDestroy semantics).
+    auto defheap = grt->process_heap(pid_a);
+    ASSERT_TRUE(defheap.ok());
+    ASSERT_NE(defheap.value(), 0u);
+    auto refused = grt->close_guest_object(pid_a, defheap.value());
+    ASSERT_FALSE(refused.ok());
+
+    // Foreign process: closing A's heap via B must fail (wrong table).
+    auto foreign = grt->close_guest_object(pid_b, heap.value());
+    ASSERT_FALSE(foreign.ok());
+
+    // Event routes through the sync path and closes.
+    auto closed_ev = grt->close_guest_object(pid_a, event.value());
+    ASSERT_TRUE(closed_ev.ok());
+    // Second close of the same event is stale.
+    auto stale_ev = grt->close_guest_object(pid_a, event.value());
+    ASSERT_FALSE(stale_ev.ok());
+
+    // Heap API on a live private heap works, then CloseHandle retires it...
+    auto block = grt->heap_alloc(pid_a, heap.value(), 128, false);
+    ASSERT_TRUE(block.ok());
+    auto closed = grt->close_guest_object(pid_a, heap.value());
+    ASSERT_TRUE(closed.ok());
+    // ...and the retired handle is stale for subsequent heap calls.
+    auto post = grt->heap_alloc(pid_a, heap.value(), 64, false);
+    ASSERT_FALSE(post.ok());
+    // Double close is stale.
+    auto stale = grt->close_guest_object(pid_a, heap.value());
+    ASSERT_FALSE(stale.ok());
+
+    (void)core.shutdown();
+}
+
 TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
     ApiRegistry reg;
     EXPECT_GE(reg.descriptor_count(), 18u);
@@ -152,6 +225,12 @@ TEST(ApiRegistryTest, BuiltInDescriptorsLoadAndValidate) {
 
 TEST(ApiRegistryTest, M10DescriptorsMatchImplementedPartialCoverage) {
     ApiRegistry reg;
+    const auto* last_error_set = reg.find("kernel32", "SetLastError");
+    const auto* last_error_get = reg.find("kernel32", "GetLastError");
+    ASSERT_NE(last_error_set, nullptr);
+    ASSERT_NE(last_error_get, nullptr);
+    EXPECT_EQ(last_error_set->impl, ApiStatus::FullyImplemented);
+    EXPECT_EQ(last_error_get->impl, ApiStatus::FullyImplemented);
     const auto* alloc = reg.find("kernel32", "VirtualAlloc");
     const auto* query = reg.find("kernel32", "VirtualQuery");
     const auto* free = reg.find("kernel32", "VirtualFree");
@@ -1050,7 +1129,9 @@ TEST(GdkServiceTest, DocumentedIdFallbacks) {
 
 TEST(GdkServiceTest, TaskQueueLifecycle) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 77;
+    auto* process = w.new_process("task-queue-lifecycle.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto q = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1095,6 +1176,67 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(gone.ok());   // unknown handle now
     // Unknown mode values rejected.
     EXPECT_FALSE(w.tq->create_queue(owner_pid, 99, 2).ok());
+}
+
+TEST(GdkServiceTest, Win32CloseHandleDispatchesTaskQueueType) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-closehandle.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = process->pid_value();
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    const auto queue = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(queue.ok()) << queue.error_string();
+
+    ApiContext close;
+    close.process_id = pid;
+    close.arg_count = 1;
+    close.args[0] = queue.value();
+    const auto result = w.reg.dispatch("kernel32", "CloseHandle", close);
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.return_value, 1u);
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(w.tq->dispatch(pid, queue.value(), XTaskQueuePort::Work, 0).ok());
+}
+
+TEST(GdkServiceTest, TaskQueueHandlesUseTheProcessHandleTable) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-handle-table.exe");
+    ASSERT_NE(process, nullptr);
+    const auto pid = process->pid_value();
+    const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
+    const auto first = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(first.ok()) << first.error_string();
+    const auto first_handle = xbox2pc::rt::Handle::from_raw(first.value());
+    EXPECT_EQ(first_handle.type(), static_cast<std::uint16_t>(xbox2pc::rt::TypeId::TaskQueue));
+    auto first_object = process->handle_table().lookup(first_handle);
+    ASSERT_TRUE(first_object.ok()) << first_object.error_string();
+    const auto object_id = first_object.value().get()->id();
+
+    const auto duplicate = w.tq->duplicate_queue(pid, first.value());
+    ASSERT_TRUE(duplicate.ok()) << duplicate.error_string();
+    EXPECT_NE(duplicate.value(), first.value());
+    auto duplicate_object = process->handle_table().lookup(xbox2pc::rt::Handle::from_raw(duplicate.value()));
+    ASSERT_TRUE(duplicate_object.ok()) << duplicate_object.error_string();
+    EXPECT_EQ(duplicate_object.value().get()->id(), object_id);
+    EXPECT_EQ(w.tq->live_queues(), 1u);
+
+    auto* other_process = w.new_process("task-queue-handle-table-other.exe");
+    ASSERT_NE(other_process, nullptr);
+    EXPECT_FALSE(w.tq->dispatch(other_process->pid_value(), duplicate.value(),
+                                XTaskQueuePort::Work, 0).ok());
+
+    first_object.value().release();
+    duplicate_object.value().release();
+    ASSERT_TRUE(w.tq->close_queue(pid, first.value()).ok());
+    EXPECT_TRUE(w.tq->dispatch(pid, duplicate.value(), XTaskQueuePort::Work, 0).ok());
+    ASSERT_TRUE(w.tq->close_queue(pid, duplicate.value()).ok());
+    EXPECT_EQ(w.tq->live_queues(), 0u);
+    EXPECT_FALSE(process->handle_table().lookup(first_handle).ok());
+
+    const auto reused = w.tq->create_queue(pid, manual, manual);
+    ASSERT_TRUE(reused.ok()) << reused.error_string();
+    EXPECT_NE(reused.value(), first.value());
+    ASSERT_TRUE(w.tq->close_queue(pid, reused.value()).ok());
 }
 
 TEST(GdkServiceTest, TaskQueueSubmitDispatchAndCancellationInvokeGuestCallback) {
@@ -1305,7 +1447,9 @@ TEST(GdkServiceTest, TaskQueueCallbackInvokerExceptionDoesNotLeakActiveDispatch)
 
 TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 303;
+    auto* process = w.new_process("task-queue-duplicate-lifetime.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto created = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1425,9 +1569,52 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
                                 XTaskQueuePort::Work, 0).ok());
 }
 
+TEST(GdkServiceTest, TaskQueueInfiniteDispatchObservesGuestCancellation) {
+    ApiWorld w;
+    auto* process = w.new_process("task-queue-cancel.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
+    auto created = w.tq->create_queue(
+        owner_pid,
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
+        static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual));
+    ASSERT_TRUE(created.ok());
+
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> entered{false};
+    std::atomic<bool> finished{false};
+    xbox2pc::rt::Result<bool> dispatch_result(false);
+    std::thread waiter([&] {
+        entered.store(true, std::memory_order_release);
+        dispatch_result = w.tq->dispatch(
+            owner_pid, created.value(), XTaskQueuePort::Work, 0xFFFFFFFFu, {},
+            [&] { return cancel.load(std::memory_order_acquire); });
+        finished.store(true, std::memory_order_release);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    while (!entered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(1)) {
+        std::this_thread::yield();
+    }
+    const bool entered_in_time = entered.load(std::memory_order_acquire);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    EXPECT_FALSE(finished.load(std::memory_order_acquire));
+    cancel.store(true, std::memory_order_release);
+    waiter.join();
+
+    EXPECT_TRUE(entered_in_time);
+    EXPECT_TRUE(finished.load(std::memory_order_acquire));
+    EXPECT_FALSE(dispatch_result.ok());
+    EXPECT_EQ(dispatch_result.errc(), xbox2pc::rt::RuntimeErrc::ThreadTerminated);
+    EXPECT_TRUE(w.tq->close_queue(owner_pid, created.value()).ok());
+}
+
 TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 404;
+    auto* process = w.new_process("task-queue-final-close.exe");
+    ASSERT_NE(process, nullptr);
+    const std::uint64_t owner_pid = process->pid_value();
     auto created = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1460,8 +1647,12 @@ TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
 
 TEST(GdkServiceTest, TaskQueueHandlesAreProcessScoped) {
     ApiWorld w;
-    constexpr std::uint64_t owner_pid = 101;
-    constexpr std::uint64_t foreign_pid = 202;
+    auto* owner_process = w.new_process("task-queue-owner.exe");
+    auto* foreign_process = w.new_process("task-queue-foreign.exe");
+    ASSERT_NE(owner_process, nullptr);
+    ASSERT_NE(foreign_process, nullptr);
+    const std::uint64_t owner_pid = owner_process->pid_value();
+    const std::uint64_t foreign_pid = foreign_process->pid_value();
     auto q = w.tq->create_queue(
         owner_pid,
         static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual),
@@ -1571,6 +1762,58 @@ TEST(GdkServiceTest, Win32VirtualMemoryLifecycle) {
     ASSERT_TRUE(released.ok); EXPECT_EQ(released.return_value, 1u);
     const auto stats = w.pm.process_stats(w.last_handle);
     EXPECT_EQ(stats.reserved_bytes, 0u); EXPECT_EQ(stats.committed_bytes, 0u);
+}
+
+// PAGE_NOCACHE / PAGE_WRITECOMBINE are host performance hints: accepted
+// and stripped so the base protection applies. PAGE_GUARD changes
+// observable semantics (one-shot fault) and stays rejected fail-closed.
+TEST(GdkServiceTest, PageProtectionModifiersAcceptedAndGuardRejected) {
+    ApiWorld w;
+    (void)w.new_process("page-protection-modifiers.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "page-protection-modifiers.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.arg_count = 4;
+    ctx.args[0] = 0;
+    ctx.args[1] = 0x2000;
+    ctx.args[2] = 0x3000;              // MEM_RESERVE | MEM_COMMIT
+    ctx.args[3] = 0x04 | 0x200u;       // PAGE_READWRITE | PAGE_NOCACHE
+    const auto nocache = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(nocache.ok);
+    EXPECT_NE(nocache.return_value, 0u);
+
+    ctx.args[3] = 0x04 | 0x1000u;      // PAGE_READWRITE | PAGE_WRITECOMBINE
+    const auto wc = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(wc.ok);
+    EXPECT_NE(wc.return_value, 0u);
+
+    ctx.args[3] = 0x04 | 0x100u;       // PAGE_READWRITE | PAGE_GUARD
+    const auto guard = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(guard.ok);
+    EXPECT_EQ(guard.return_value, 0u);
+
+    // VirtualProtect must agree with the decoder: modifiers fine, guard not.
+    ctx.arg_count = 4;
+    ctx.args[0] = nocache.return_value;
+    ctx.args[1] = 0x1000;
+    ctx.args[2] = 0x02 | 0x1000u;      // PAGE_READONLY | PAGE_WRITECOMBINE
+    ctx.args[3] = 0x7000;              // non-null old-protection out pointer
+    const auto prot = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(prot.ok);
+    EXPECT_EQ(prot.return_value, 1u);
+
+    ctx.args[2] = 0x02 | 0x100u;       // PAGE_READONLY | PAGE_GUARD
+    const auto prot_guard = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(prot_guard.ok);
+    EXPECT_EQ(prot_guard.return_value, 0u);
 }
 
 TEST(GdkServiceTest, VirtualAllocEnforcesWxPolicyForEveryAllocationForm) {
@@ -2004,6 +2247,65 @@ TEST(GdkServiceTest, ServiceInitializationOrderingAndRollback) {
     EXPECT_TRUE(core.services().shutdown_all().ok());
     r = reg.dispatch("xgameruntime", "XSystemGetDeviceType", ctx);
     EXPECT_FALSE(r.ok);   // revoked at shutdown
+}
+
+TEST(GdkServiceTest, LastErrorIsStoredPerGuestThread) {
+    ApiWorld w;
+    std::uint32_t first_thread_error = 0;
+    std::uint32_t second_thread_error = 0;
+    ApiContext first;
+    first.process_id = 1;
+    first.thread_id = 10;
+    first.set_last_error = [&](std::uint32_t value) {
+        first_thread_error = value;
+        return xbox2pc::rt::Result<void>::ok_result();
+    };
+    first.get_last_error = [&]() {
+        return xbox2pc::rt::Result<std::uint32_t>(first_thread_error);
+    };
+    ApiContext second;
+    second.process_id = 1;
+    second.thread_id = 11;
+    second.set_last_error = [&](std::uint32_t value) {
+        second_thread_error = value;
+        return xbox2pc::rt::Result<void>::ok_result();
+    };
+    second.get_last_error = [&]() {
+        return xbox2pc::rt::Result<std::uint32_t>(second_thread_error);
+    };
+
+    first.arg_count = 1;
+    first.args[0] = 0x12345678u;
+    const auto set_first = w.reg.dispatch("kernel32", "SetLastError", first);
+    ASSERT_TRUE(set_first.ok) << set_first.error;
+    EXPECT_EQ(first_thread_error, 0x12345678u);
+
+    first.arg_count = 0;
+    const auto get_first = w.reg.dispatch("kernel32", "GetLastError", first);
+    ASSERT_TRUE(get_first.ok) << get_first.error;
+    EXPECT_EQ(get_first.return_value, 0x12345678u);
+
+    second.arg_count = 1;
+    second.args[0] = 0x87654321u;
+    const auto set_second = w.reg.dispatch("kernel32", "SetLastError", second);
+    ASSERT_TRUE(set_second.ok) << set_second.error;
+    second.arg_count = 0;
+    const auto get_second = w.reg.dispatch("kernel32", "GetLastError", second);
+    ASSERT_TRUE(get_second.ok) << get_second.error;
+    EXPECT_EQ(get_second.return_value, 0x87654321u);
+
+    const auto still_first = w.reg.dispatch("kernel32", "GetLastError", first);
+    ASSERT_TRUE(still_first.ok) << still_first.error;
+    EXPECT_EQ(still_first.return_value, 0x12345678u);
+
+    ApiContext missing_environment;
+    missing_environment.arg_count = 0;
+    EXPECT_FALSE(w.reg.dispatch("kernel32", "GetLastError",
+                                missing_environment).ok);
+    missing_environment.arg_count = 1;
+    missing_environment.args[0] = 7;
+    EXPECT_FALSE(w.reg.dispatch("kernel32", "SetLastError",
+                                missing_environment).ok);
 }
 
 TEST(GdkServiceTest, CurrentProcessAndThreadIdentityQueries) {

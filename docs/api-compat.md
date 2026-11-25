@@ -76,6 +76,18 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | XTaskQueueSubmitDelayedCallback | `HRESULT ...(queue, port, delayMs, context, callback*)` | unsupported implementation |
 | XTaskQueueDuplicateHandle | `HRESULT ...(queue, duplicatedHandle*)` | partially-implemented (same-process shared queue handle; pending callbacks retain queue lifetime) |
 | WaitForMultipleObjects | `DWORD ...(count, HANDLE*, waitAll, timeout)` | partially-implemented (wait-any and transactional wait-all subsets) |
+| GetProcessHeap | `HANDLE GetProcessHeap()` | partially-implemented (per-process default heap over the xmem arena) |
+| HeapCreate | `HANDLE ...(DWORD, SIZE_T, SIZE_T)` | partially-implemented (private heap handle in the process arena) |
+| HeapAlloc | `LPVOID ...(HANDLE, DWORD, SIZE_T)` | partially-implemented (8-byte aligned arena sub-allocation) |
+| HeapFree | `BOOL ...(HANDLE, DWORD, LPVOID)` | partially-implemented (per-allocation arena release) |
+| HeapDestroy | `BOOL ...(HANDLE)` | partially-implemented (handle close; default heap refused) |
+| HeapReAlloc | `LPVOID ...(HANDLE, DWORD, LPVOID, SIZE_T)` | partially-implemented (moving realloc; prefix preserved; zeroed grown tail) |
+| HeapSize | `SIZE_T ...(HANDLE, DWORD, LPCVOID)` | partially-implemented (tracked allocation size; SIZE_MAX on error) |
+| CloseHandle | `BOOL ...(HANDLE)` | partially-implemented (typed dispatch: event/mutex/semaphore, task queue, private heap; default heap refused) |
+
+| XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation; low attribute byte maps to 8..4096 alignment, other bits ignored) |
+| D3D12CreateDevice | `HRESULT ...(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**)` | stubbed (null graphics provider: runtime-owned device object, process-scoped handle, traced; no GPU work) |
+| XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release; attributes ignored, exact base required) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 
@@ -202,6 +214,27 @@ evidence citation and documented signature. The verdict line never
 claims compatibility from recognition — coverage is reported as
 coverage, and the CLI prints the explicit note
 "import coverage is NOT game compatibility".
+
+## M11 platform-surface compatibility
+
+The per-import report above describes individual PE imports. M11 also
+tracks the broader Xbox platform boundary independently, so an implemented
+import must not be mistaken for a complete subsystem.
+
+| Platform area | M11 status | Evidence / boundary |
+|---|---|---|
+| Runtime and process | Partial | PE loading, process/thread managers, minimal TEB/PEB and per-thread TLS storage exist; automatic TLS attach/detach lifecycle and native guest execution remain incomplete. |
+| Memory and xmem | Partial | Process-owned xmem allocator and a subset of virtual-memory APIs exist; full Win32 allocation/protection/query semantics and complete Xbox allocator compatibility are not claimed. |
+| Synchronization and task queues | Partial | Supported event/mutex/semaphore waits and bounded manual task queues exist; unsupported queue modes, scheduler behavior, and broader lock-order proof remain open. |
+| Graphics | Stubbed (null provider) | `IGraphicsProvider` seam with a deterministic `NullGraphicsProvider` (`src/graphics_service.cpp`): `d3d12!D3D12CreateDevice` dispatches to a runtime-owned device object with a process-scoped generation-checked handle; command records and submission ordering are traced but never executed; unknown semantics fail closed. Traced, stubbed — never `Supported`. A real backend (Vulkan translation) is a separate milestone per `docs/graphics-roadmap.md`. |
+| Audio | Unsupported (boundary defined) | No audio provider or guest audio execution path is implemented. Any future audio provider must follow the graphics provider seam: evidence-backed imports only, runtime-owned objects with process-scoped handles, per-call tracing, and fail-closed unmodeled semantics. |
+| Storage | Unsupported (boundary defined) | No Xbox storage provider or title save-data compatibility is implemented. The package VFS (`src/vfs_process.cpp`) is read-only package inspection, not title storage. A future storage provider must meet the same provider-seam contract as graphics. |
+| Networking | Unsupported | No Xbox networking provider, service emulation, or online compatibility is implemented. |
+
+These are subsystem-level statuses, not a compatibility promise. Any API
+outside the implemented subset must remain explicitly Stubbed, Partially
+Implemented, or Unsupported in its import row. The report must not infer a
+platform feature from a recognized symbol alone.
 
 ## CLI
 

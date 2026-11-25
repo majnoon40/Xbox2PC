@@ -120,6 +120,29 @@ public:
     void release_process(std::uint64_t process_id);
     Result<VmRegion> query_memory_region(std::uint64_t process_id, std::uint64_t guest_address) const;
     Result<MemoryQuerySnapshot> query_memory_snapshot(std::uint64_t process_id) const;
+    // M11 Phase 4 heap + XMem import surface. Heap handles are process-
+    // scoped runtime objects; allocations come from the per-process xmem
+    // arena so Win32 heap memory and XMem share one teardown path.
+    Result<std::uint64_t> process_heap(std::uint64_t process_id);
+    Result<std::uint64_t> heap_create(std::uint64_t process_id, std::uint32_t options);
+    Result<std::uint64_t> heap_alloc(std::uint64_t process_id, std::uint64_t heap_handle,
+                                     std::uint64_t size, bool zero_initialize);
+    Result<void> heap_free(std::uint64_t process_id, std::uint64_t heap_handle,
+                           std::uint64_t address);
+    Result<void> heap_destroy(std::uint64_t process_id, std::uint64_t heap_handle);
+    // Generic CloseHandle dispatch (Phase 3): typed routing for sync
+    // objects, task queues, and heap handles. close_heap_object is the
+    // heap-only path (shared with heap_destroy).
+    Result<void> close_guest_object(std::uint64_t process_id, std::uint64_t handle);
+    Result<void> close_heap_object(std::uint64_t process_id, std::uint64_t heap_handle);
+    Result<std::uint64_t> heap_realloc(std::uint64_t process_id, std::uint64_t heap_handle,
+                                       std::uint64_t address, std::uint64_t new_size,
+                                       bool zero_tail);
+    Result<std::uint64_t> heap_size(std::uint64_t process_id, std::uint64_t heap_handle,
+                                    std::uint64_t address);
+    Result<std::uint64_t> xmem_alloc(std::uint64_t process_id, std::uint64_t size,
+                                     std::uint64_t alignment);
+    Result<void> xmem_free(std::uint64_t process_id, std::uint64_t address);
     Result<std::uint64_t> virtual_alloc(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t allocation_type, std::uint32_t protection);
     Result<void> virtual_free(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t free_type);
     Result<MemProtect> virtual_protect(std::uint64_t process_id, std::uint64_t address, std::uint64_t size, std::uint32_t protection);
@@ -151,9 +174,12 @@ public:
 private:
     Result<RefGuard> lookup_sync_object(std::uint64_t process_id, std::uint64_t handle) const;
     Result<std::uint64_t> create_sync_object(std::uint64_t process_id, std::unique_ptr<RuntimeObject> object);
+    Result<RefGuard> lookup_heap_object(std::uint64_t process_id, std::uint64_t handle) const;
+    Result<std::uint64_t> create_heap_object(std::uint64_t process_id, bool default_heap, std::uint32_t options);
     struct ProcState {
         std::uint64_t init_count = 0;
         bool uninit_failed_terminal = false;  // documented terminal state
+        std::uint64_t process_heap = 0;  // cached default-heap raw handle
     };
     ApiRegistry& api_reg_;
     ProcessManager& process_manager_;
@@ -186,8 +212,8 @@ public:
     Result<void> on_initialize() override;
     Result<void> on_shutdown() override;
 
-    // Queue handle ids (XTaskQueueHandle modeled as uint64 ids; the
-    // runtime's own handle system is used for ownership).
+    // Queue handles are encoded by the owning process's M4 HandleTable;
+    // aliases use independent slots/generations in the same guest handle namespace.
     Result<std::uint64_t> create_queue(std::uint64_t process_id,
                                         std::uint32_t work_mode,
                                         std::uint32_t completion_mode);
@@ -200,7 +226,8 @@ public:
     // thread; delayed and automatic dispatch modes remain unsupported.
     Result<bool> dispatch(std::uint64_t process_id, std::uint64_t queue_id,
                           XTaskQueuePort port, std::uint32_t timeout_ms,
-                          const GuestCallbackInvoker& invoke_callback = {});
+                          const GuestCallbackInvoker& invoke_callback = {},
+                          const std::function<bool()>& cancellation_requested = {});
     Result<void> close_queue(std::uint64_t process_id, std::uint64_t queue_id);
     Result<void> terminate_queue(std::uint64_t process_id,
                                  std::uint64_t queue_id, bool wait);
@@ -210,7 +237,13 @@ public:
     std::size_t live_queues() const;
 
 private:
-    struct Queue {
+    struct Queue : RuntimeObject, IGuestHandleCloser {
+        XBOX2PC_RUNTIME_OBJECT_TYPE(Queue, TaskQueue)
+        Queue() : RuntimeObject(TypeId::TaskQueue) {}
+        Result<void> close_guest_handle(std::uint64_t process_id,
+                                        std::uint64_t raw_handle,
+                                        RefGuard&& object_pin) override;
+        TaskQueueService* service = nullptr;
         std::uint64_t owner_process_id = 0;
         bool terminated = false;
         std::uint32_t work_mode = 0;
@@ -221,14 +254,15 @@ private:
         std::uint32_t active_callbacks = 0;
         std::uint32_t active_dispatches = 0;
     };
+    Result<RefGuard> lookup_queue(std::uint64_t process_id, std::uint64_t queue_id) const;
+    Result<void> close_queue_with_guard(std::uint64_t process_id,
+                                        std::uint64_t queue_id,
+                                        RefGuard&& queue_ref);
     ApiRegistry& api_reg_;
     ProcessManager& pm_;
     mutable std::mutex lock_;
     std::condition_variable queue_cv_;
-    std::map<std::uint64_t, std::shared_ptr<Queue>> queues_;
-    // Keep callback-bearing queues alive after the last public handle closes.
-    std::vector<std::shared_ptr<Queue>> retired_queues_;
-    std::uint64_t next_id_ = 1;
+    std::map<std::uint64_t, std::vector<std::uint64_t>> process_queue_objects_;
     std::uint64_t process_exit_observer_id_ = 0;
     std::vector<std::shared_ptr<IApiImplementation>> owned_;
 };

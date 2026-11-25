@@ -8,6 +8,7 @@
 // No host function pointers are exposed; dispatch goes through
 // IApiImplementation under the ApiContext contract.
 
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/gdk_services.hpp"
 
 #include <algorithm>
@@ -24,8 +25,19 @@ namespace {
 
 using loader::ImportStatus;
 
+// Win32 page-protection decoder. Modifier bits PAGE_NOCACHE (0x200) and
+// PAGE_WRITECOMBINE (0x1000) are host performance hints with no observable
+// guest behavior behind this runtime's host-backed pages, so they are
+// accepted and stripped. PAGE_GUARD (0x100) changes observable behavior
+// (one-shot access fault) that this runtime cannot deliver, so it stays
+// rejected fail-closed rather than silently ignored.
 Result<MemProtect> decode_win32_page_protection(std::uint32_t value) {
-    switch (value) {
+    constexpr std::uint32_t kModifierMask = 0x200u | 0x1000u;  // NOCACHE|WC
+    constexpr std::uint32_t kGuard = 0x100u;
+    if ((value & kGuard) != 0)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument,
+            "PAGE_GUARD requires one-shot fault semantics this runtime does not model");
+    switch (value & ~kModifierMask) {
         case 0x01u: return Result<MemProtect>(MemProtect::NoAccess);
         case 0x02u: return Result<MemProtect>(MemProtect::ReadOnly);
         case 0x04u: return Result<MemProtect>(MemProtect::ReadWrite);
@@ -185,6 +197,177 @@ private:
 };
 
 
+// ── heap objects (M11 Phase 4) ────────────────────────────────────────────
+// RtHeap is a lightweight handle object: allocations are carved from the
+// per-process xmem arena (ManagedProcess::allocate_xmem) so heap and XMem
+// memory share one tracked address-space accounting and teardown path.
+class RtHeap : public RuntimeObject {
+public:
+    XBOX2PC_RUNTIME_OBJECT_TYPE(RtHeap, MemoryRegion)
+    explicit RtHeap(bool default_heap, std::uint32_t options)
+        : RuntimeObject(TypeId::MemoryRegion),
+          default_(default_heap), options_(options) {}
+    bool is_default_heap() const { return default_; }
+    std::uint32_t options() const { return options_; }
+private:
+    bool default_;
+    std::uint32_t options_;
+};
+
+class HeapReAllocImpl : public IApiImplementation {
+public:
+    explicit HeapReAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4) return false;
+        constexpr std::uint32_t kZero = 0x8u;       // HEAP_ZERO_MEMORY
+        constexpr std::uint32_t kExceptions = 0x4u;  // HEAP_GENERATE_EXCEPTIONS
+        constexpr std::uint32_t kInPlace = 0x10u;    // HEAP_REALLOC_IN_PLACE_ONLY
+        const auto flags = static_cast<std::uint32_t>(ctx.args[1]);
+        if ((flags & ~(kZero | kExceptions | kInPlace)) != 0 ||
+            (flags & kExceptions) != 0 || (flags & kInPlace) != 0) {
+            out.return_value = 0;
+            out.note = "HeapReAlloc supports HEAP_ZERO_MEMORY; HEAP_GENERATE_EXCEPTIONS and HEAP_REALLOC_IN_PLACE_ONLY are not emulated";
+            return true;
+        }
+        auto r = svc_.heap_realloc(ctx.process_id, ctx.args[0], ctx.args[2],
+                                   ctx.args[3], (flags & kZero) != 0);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapReAlloc (moving realloc; prefix preserved)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapSizeImpl : public IApiImplementation {
+public:
+    explicit HeapSizeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        auto r = svc_.heap_size(ctx.process_id, ctx.args[0], ctx.args[2]);
+        out.return_value = r.ok() ? r.value() : ~0ull;  // documented SIZE_MAX error
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapSize (tracked allocation size)"; }
+private: GameRuntimeService& svc_;
+};
+class GetProcessHeapImpl : public IApiImplementation {
+public:
+    explicit GetProcessHeapImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 0) return false;
+        auto r = svc_.process_heap(ctx.process_id);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: GetProcessHeap (per-process default heap)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapCreateImpl : public IApiImplementation {
+public:
+    explicit HeapCreateImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        // HEAP_NO_SERIALIZE 0x1, HEAP_GENERATE_EXCEPTIONS 0x4 are documented
+        // option bits; anything else (or unknown bits) fails closed.
+        constexpr std::uint32_t kKnown = 0x1u | 0x4u;
+        const auto options = static_cast<std::uint32_t>(ctx.args[0]);
+        if ((options & ~kKnown) != 0) {
+            out.return_value = 0;
+            out.note = "HeapCreate supports HEAP_NO_SERIALIZE and HEAP_GENERATE_EXCEPTIONS option bits only";
+            return true;
+        }
+        auto r = svc_.heap_create(ctx.process_id, options);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapCreate (private heap within the process arena)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapAllocImpl : public IApiImplementation {
+public:
+    explicit HeapAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        constexpr std::uint32_t kZero = 0x8u;      // HEAP_ZERO_MEMORY
+        constexpr std::uint32_t kExceptions = 0x4u; // HEAP_GENERATE_EXCEPTIONS
+        const auto flags = static_cast<std::uint32_t>(ctx.args[1]);
+        if ((flags & ~(kZero | kExceptions)) != 0 || (flags & kExceptions) != 0) {
+            out.return_value = 0;
+            out.note = "HeapAlloc supports HEAP_ZERO_MEMORY; HEAP_GENERATE_EXCEPTIONS is not emulated";
+            return true;
+        }
+        // The heap handle is validated but allocations are tracked per
+        // allocation in the process arena (documented partial behavior).
+        auto r = svc_.heap_alloc(ctx.process_id, ctx.args[0], ctx.args[2],
+                                 (flags & kZero) != 0);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapAlloc (8-byte aligned arena sub-allocation)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapFreeImpl : public IApiImplementation {
+public:
+    explicit HeapFreeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 3) return false;
+        auto r = svc_.heap_free(ctx.process_id, ctx.args[0], ctx.args[2]);
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapFree (arena allocation release)"; }
+private: GameRuntimeService& svc_;
+};
+class HeapDestroyImpl : public IApiImplementation {
+public:
+    explicit HeapDestroyImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 1) return false;
+        auto r = svc_.heap_destroy(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "Win32: HeapDestroy (heap handle close; default heap refused)"; }
+private: GameRuntimeService& svc_;
+};
+class XMemAllocImpl : public IApiImplementation {
+public:
+    explicit XMemAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 2) return false;
+        // dwAttributes low byte encodes the base-2 alignment power on Xbox;
+        // only sane powers (8..4096 → 3..12) are honored, otherwise 8.
+        const auto attributes = static_cast<std::uint32_t>(ctx.args[1]);
+        std::uint64_t alignment = 8;
+        const auto power = attributes & 0xFFu;
+        if (power >= 3 && power <= 12) alignment = 1ull << power;
+        auto r = svc_.xmem_alloc(ctx.process_id, ctx.args[0], alignment);
+        out.return_value = r.ok() ? r.value() : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "GDK: XMemAlloc (aligned xmem arena allocation)"; }
+private: GameRuntimeService& svc_;
+};
+class XMemFreeImpl : public IApiImplementation {
+public:
+    explicit XMemFreeImpl(GameRuntimeService& svc) : svc_(svc) {}
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 2) return false;
+        auto r = svc_.xmem_free(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1u : 0u;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
+    }
+    std::string describe() const override { return "GDK: XMemFree (xmem arena release)"; }
+private: GameRuntimeService& svc_;
+};
 class VirtualAllocImpl : public IApiImplementation {
 public:
     explicit VirtualAllocImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -361,7 +544,7 @@ public:
         out.has_out = true;
         out.out_size = kSize;
         out.out_bytes_size = kSize;
-        out.note = "partial: free gaps are modeled inside the guest address-space reservation; mapped/image/shared memory types are unavailable";
+        out.note = "partial: free gaps are modeled inside the guest address-space reservation; shared/backing-file memory is not modeled";
         return true;
     }
     std::string describe() const override {
@@ -522,7 +705,8 @@ public:
         const auto r = svc_.dispatch(
             ctx.process_id, ctx.args[0],
             static_cast<XTaskQueuePort>(ctx.args[1]),
-            static_cast<std::uint32_t>(ctx.args[2]), ctx.invoke_guest_callback);
+            static_cast<std::uint32_t>(ctx.args[2]), ctx.invoke_guest_callback,
+            ctx.cancellation_requested);
         out.return_value = r.ok() && r.value() ? 1 : 0;   // documented bool
         out.note = "false when no callback was dispatched";
         if (!r.ok()) out.error = r.error_string();
@@ -657,6 +841,62 @@ public:
     }
 };
 
+class SetLastErrorImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 1 || !ctx.set_last_error) {
+            out.error = "SetLastError requires one argument and an initialized guest thread environment";
+            return false;
+        }
+        const auto result = ctx.set_last_error(static_cast<std::uint32_t>(ctx.args[0]));
+        if (!result.ok()) { out.error = result.error_string(); return false; }
+        return true;
+    }
+    std::string describe() const override { return "Win32: SetLastError (guest TEB LastErrorValue)"; }
+};
+
+class GetLastErrorImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 0 || !ctx.get_last_error) {
+            out.error = "GetLastError requires zero arguments and an initialized guest thread environment";
+            return false;
+        }
+        const auto result = ctx.get_last_error();
+        if (!result.ok()) { out.error = result.error_string(); return false; }
+        out.return_value = result.value();
+        return true;
+    }
+    std::string describe() const override { return "Win32: GetLastError (guest TEB LastErrorValue)"; }
+};
+
+class RaiseExceptionImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4) {
+            out.error = "RaiseException requires four arguments";
+            return false;
+        }
+        // The documented contract: dwExceptionCode uses bits 30/31 as
+        // severity (both set = fatal customer code); nNumberOfArguments
+        // is bounded at EXCEPTION_MAXIMUM_PARAMETERS (15). Arguments are
+        // validated; the payload is not yet materialized into a guest
+        // EXCEPTION_RECORD (phase-1 dispatch only).
+        if (ctx.args[2] > 15) {
+            out.error = "RaiseException argument count exceeds EXCEPTION_MAXIMUM_PARAMETERS (15)";
+            return false;
+        }
+        out.ok = true;                       // the DISPATCH succeeds...
+        out.raise_guest_exception = true;    // ...but does not return
+        out.exception_code = static_cast<std::uint32_t>(ctx.args[0]);
+        out.exception_flags = static_cast<std::uint32_t>(ctx.args[1]);
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: RaiseException (guest exception dispatch, phase-1 unwind)";
+    }
+};
+
 class CreateEventWImpl : public IApiImplementation {
 public:
     explicit CreateEventWImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -758,8 +998,15 @@ class SetEventImpl : public IApiImplementation {
 public:
     explicit SetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.set_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
-        if(!r.ok())out.note=r.error_string(); return true;
+        if (ctx.arg_count != 1) {
+            out.return_value = 0;
+            out.note = "SetEvent requires exactly one handle";
+            return true;
+        }
+        auto r = svc_.set_event(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: SetEvent"; }
 private: GameRuntimeService& svc_;
@@ -768,8 +1015,15 @@ class ResetEventImpl : public IApiImplementation {
 public:
     explicit ResetEventImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.reset_event(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
-        if(!r.ok())out.note=r.error_string(); return true;
+        if (ctx.arg_count != 1) {
+            out.return_value = 0;
+            out.note = "ResetEvent requires exactly one handle";
+            return true;
+        }
+        auto r = svc_.reset_event(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: ResetEvent"; }
 private: GameRuntimeService& svc_;
@@ -778,14 +1032,16 @@ class WaitForSingleObjectImpl : public IApiImplementation {
 public:
     explicit WaitForSingleObjectImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        if (ctx.args[1] > UINT32_MAX) {
+        if (ctx.arg_count != 2 || ctx.args[1] > UINT32_MAX) {
             out.return_value = 0xFFFFFFFFu;
             out.note = "WaitForSingleObject timeout exceeds DWORD";
             return true;
         }
-        auto r=svc_.wait_object(ctx.process_id,ctx.thread_id,ctx.args[0],static_cast<std::uint32_t>(ctx.args[1]));
-        out.return_value=r.ok()?r.value():0xFFFFFFFFu;
-        if(!r.ok())out.note=r.error_string(); return true;
+        auto r = svc_.wait_object(ctx.process_id, ctx.thread_id, ctx.args[0],
+                                  static_cast<std::uint32_t>(ctx.args[1]));
+        out.return_value = r.ok() ? r.value() : 0xFFFFFFFFu;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
     std::string describe() const override { return "Win32: WaitForSingleObject (event, mutex, semaphore handles)"; }
 private: GameRuntimeService& svc_;
@@ -820,10 +1076,17 @@ class CloseEventHandleImpl : public IApiImplementation {
 public:
     explicit CloseEventHandleImpl(GameRuntimeService& svc) : svc_(svc) {}
     bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
-        auto r=svc_.close_sync_handle(ctx.process_id,ctx.args[0]); out.return_value=r.ok()?1:0;
-        if(!r.ok())out.note=r.error_string(); return true;
+        if (ctx.arg_count != 1) {
+            out.return_value = 0;
+            out.note = "CloseHandle requires exactly one handle";
+            return true;
+        }
+        auto r = svc_.close_guest_object(ctx.process_id, ctx.args[0]);
+        out.return_value = r.ok() ? 1 : 0;
+        if (!r.ok()) out.note = r.error_string();
+        return true;
     }
-    std::string describe() const override { return "Win32: CloseHandle (supported synchronization handles)"; }
+    std::string describe() const override { return "Win32: CloseHandle (typed dispatch: event/mutex/semaphore, task queue, heap)"; }
 private: GameRuntimeService& svc_;
 };
 
@@ -903,7 +1166,19 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r22 = api_reg_.register_implementation("kernel32", "VirtualFree", keep(std::make_shared<VirtualFreeImpl>(*this)), owner);
     auto r23 = api_reg_.register_implementation("kernel32", "VirtualProtect", keep(std::make_shared<VirtualProtectImpl>(*this)), owner);
     auto r24 = api_reg_.register_implementation("kernel32", "WaitForMultipleObjects", keep(std::make_shared<WaitForMultipleObjectsImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24}) {
+    auto r25 = api_reg_.register_implementation("kernel32", "SetLastError", keep(std::make_shared<SetLastErrorImpl>()), owner);
+    auto r26 = api_reg_.register_implementation("kernel32", "GetLastError", keep(std::make_shared<GetLastErrorImpl>()), owner);
+    auto r26b = api_reg_.register_implementation("kernel32", "RaiseException", keep(std::make_shared<RaiseExceptionImpl>()), owner);
+    auto r27 = api_reg_.register_implementation("kernel32", "GetProcessHeap", keep(std::make_shared<GetProcessHeapImpl>(*this)), owner);
+    auto r28 = api_reg_.register_implementation("kernel32", "HeapCreate", keep(std::make_shared<HeapCreateImpl>(*this)), owner);
+    auto r29 = api_reg_.register_implementation("kernel32", "HeapAlloc", keep(std::make_shared<HeapAllocImpl>(*this)), owner);
+    auto r30 = api_reg_.register_implementation("kernel32", "HeapFree", keep(std::make_shared<HeapFreeImpl>(*this)), owner);
+    auto r31 = api_reg_.register_implementation("kernel32", "HeapDestroy", keep(std::make_shared<HeapDestroyImpl>(*this)), owner);
+    auto r31b = api_reg_.register_implementation("kernel32", "HeapReAlloc", keep(std::make_shared<HeapReAllocImpl>(*this)), owner);
+    auto r31c = api_reg_.register_implementation("kernel32", "HeapSize", keep(std::make_shared<HeapSizeImpl>(*this)), owner);
+    auto r32 = api_reg_.register_implementation("xmem", "XMemAlloc", keep(std::make_shared<XMemAllocImpl>(*this)), owner);
+    auto r33 = api_reg_.register_implementation("xmem", "XMemFree", keep(std::make_shared<XMemFreeImpl>(*this)), owner);
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26, &r26b, &r27, &r28, &r29, &r30, &r31, &r31b, &r31c, &r32, &r33}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();
@@ -1196,6 +1471,211 @@ Result<MemProtect> GameRuntimeService::virtual_protect(
     return process_manager_.protect_region_by_pid(pid, start, aligned, decoded.value());
 }
 
+// ── M11 Phase 4: heap + XMem service surface ─────────────────────────────
+
+Result<std::uint64_t> GameRuntimeService::process_heap(std::uint64_t pid) {
+    // Fast path under the state lock only; creation happens outside it so
+    // the service state lock is never held across ProcessManager calls
+    // (the manager lock is taken first in every other path).
+    {
+        std::lock_guard lock(state_lock_);
+        const auto it = procs_.find(pid);
+        if (it != procs_.end() && it->second.process_heap != 0)
+            return Result<std::uint64_t>(it->second.process_heap);
+    }
+    const auto handle = create_heap_object(pid, true, 0);
+    if (!handle.ok()) return handle;
+    std::lock_guard lock(state_lock_);
+    auto& st = procs_[pid];
+    if (st.process_heap == 0) st.process_heap = handle.value();
+    return Result<std::uint64_t>(st.process_heap);
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_create(std::uint64_t pid,
+                                                      std::uint32_t options) {
+    return create_heap_object(pid, false, options);
+}
+
+Result<std::uint64_t> GameRuntimeService::create_heap_object(
+    std::uint64_t pid, bool default_heap, std::uint32_t options) {
+    if (pid == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "heap creation requires a process");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr || owner->state() != ProcessState::Running)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "owner process is not running");
+    auto object_id = process_manager_.objects().register_object(
+        std::make_unique<RtHeap>(default_heap, options));
+    if (!object_id.ok()) return Result<std::uint64_t>(object_id.errc(), object_id.context());
+    auto reference = process_manager_.objects().lookup_id(object_id.value());
+    if (!reference.ok()) {
+        (void)process_manager_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(reference.errc(), reference.context());
+    }
+    auto handle = owner->handle_table().create(*reference.value().get());
+    if (!handle.ok()) {
+        reference.value().release();
+        (void)process_manager_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(handle.errc(), handle.context());
+    }
+    return Result<std::uint64_t>(handle.value().raw());
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_alloc(std::uint64_t pid,
+                                                     std::uint64_t heap_handle,
+                                                     std::uint64_t size,
+                                                     bool zero_initialize) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<std::uint64_t>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    // Rationale for the clamp: the arena is 4 MiB by default; a guest
+    // asking for more than the whole arena cannot be satisfied anyway.
+    if (size == 0 || size > (64ull << 20))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "HeapAlloc size must be 1..64 MiB");
+    return owner->allocate_xmem(size, 8, "heap", zero_initialize);
+}
+
+Result<void> GameRuntimeService::heap_free(std::uint64_t pid,
+                                           std::uint64_t heap_handle,
+                                           std::uint64_t address) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<void>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    return owner->free_xmem(address);
+}
+
+Result<void> GameRuntimeService::heap_destroy(std::uint64_t pid,
+                                              std::uint64_t heap_handle) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<void>(heap.errc(), heap.context());
+    {
+        auto* heap_obj = heap.value().get()->as<RtHeap>();
+        if (heap_obj != nullptr && heap_obj->is_default_heap())
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "the process default heap cannot be destroyed");
+    }
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto closed = owner->handle_table().close(Handle::from_raw(heap_handle));
+    if (!closed.ok()) return Result<void>(closed.errc(), closed.context());
+    std::lock_guard lock(state_lock_);
+    const auto pit = procs_.find(pid);
+    if (pit != procs_.end() && pit->second.process_heap == heap_handle)
+        pit->second.process_heap = 0;
+    return Result<void>();
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_realloc(
+    std::uint64_t pid, std::uint64_t heap_handle, std::uint64_t address,
+    std::uint64_t new_size, bool zero_tail) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<std::uint64_t>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    if (address == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "HeapReAlloc requires the original allocation base (null lpMem is HeapAlloc)");
+    if (new_size == 0 || new_size > (64ull << 20))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "HeapReAlloc size must be 1..64 MiB");
+    const auto old_info = owner->query_xmem(address);
+    if (!old_info.ok())
+        return Result<std::uint64_t>(old_info.errc(), old_info.context());
+    const auto old_size = old_info.value().size;
+    // Moving realloc: allocate the new block, copy the preserved prefix,
+    // free the old block. In-place resize is not attempted (documented
+    // partial behavior); failure of the new allocation leaves the original
+    // allocation completely untouched.
+    const auto fresh = owner->allocate_xmem(new_size, 8, "heap", false);
+    if (!fresh.ok()) return Result<std::uint64_t>(fresh.errc(), fresh.context());
+    const auto new_address = fresh.value();
+    const auto preserve = old_size < new_size ? old_size : new_size;
+    // Copy through the address space directly (translate + host memcpy).
+    // This keeps rt_gdk layered on rt_memory only; instantiating
+    // guest::GuestMemory here would require an rt_guestmem dependency that
+    // this library's layering does not have. Both blocks live inside the
+    // SAME single-reservation xmem arena (one contiguous committed region),
+    // so one translate per block resolves a contiguous host range; the
+    // congruence check fails closed if arena geometry ever changes.
+    auto& space = owner->address_space();
+    const auto src_t = space.translate(address);
+    const auto dst_t = space.translate(new_address);
+    if (!src_t.ok() || !dst_t.ok()) {
+        (void)owner->free_xmem(new_address);
+        return Result<std::uint64_t>(RuntimeErrc::InvalidState,
+                                     "realloc copy target unmappable");
+    }
+    if (preserve != 0) {
+        std::memcpy(static_cast<std::uint8_t*>(dst_t.value()),
+                    static_cast<const std::uint8_t*>(src_t.value()),
+                    static_cast<std::size_t>(preserve));
+    }
+    if (zero_tail && new_size > old_size) {
+        std::memset(static_cast<std::uint8_t*>(dst_t.value()) + old_size, 0,
+                    static_cast<std::size_t>(new_size - old_size));
+    }
+    const auto released = owner->free_xmem(address);
+    if (!released.ok()) {
+        // The old block could not be freed (double-free class of failure):
+        // roll back the copy target so we never leak two live blocks.
+        (void)owner->free_xmem(new_address);
+        return Result<std::uint64_t>(released.errc(), released.context());
+    }
+    return Result<std::uint64_t>(new_address);
+}
+
+Result<std::uint64_t> GameRuntimeService::heap_size(std::uint64_t pid,
+                                                    std::uint64_t heap_handle,
+                                                    std::uint64_t address) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<std::uint64_t>(heap.errc(), heap.context());
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto info = owner->query_xmem(address);
+    if (!info.ok()) return Result<std::uint64_t>(info.errc(), info.context());
+    return Result<std::uint64_t>(info.value().size);
+}
+
+Result<std::uint64_t> GameRuntimeService::xmem_alloc(std::uint64_t pid,
+                                                     std::uint64_t size,
+                                                     std::uint64_t alignment) {
+    if (pid == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "XMemAlloc requires a process");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    if (size == 0 || size > (64ull << 20))
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
+                                     "XMemAlloc size must be 1..64 MiB");
+    return owner->allocate_xmem(size, alignment, "xmem", false);
+}
+
+Result<void> GameRuntimeService::xmem_free(std::uint64_t pid,
+                                            std::uint64_t address) {
+    if (pid == 0)
+        return Result<void>(RuntimeErrc::InvalidArgument, "XMemFree requires a process");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    return owner->free_xmem(address);
+}
+
 Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,
                                                                   std::uint64_t raw) const {
     if (pid == 0 || raw == 0)
@@ -1212,6 +1692,24 @@ Result<RefGuard> GameRuntimeService::lookup_sync_object(std::uint64_t pid,
           (value->type_id() == TypeId::Mutex && value->as<RtGuestMutex>() != nullptr) ||
           (value->type_id() == TypeId::Semaphore && value->as<RtGuestSemaphore>() != nullptr))) {
         return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a supported synchronization object");
+    }
+    return Result<RefGuard>(std::move(object.value()));
+}
+
+Result<RefGuard> GameRuntimeService::lookup_heap_object(std::uint64_t pid,
+                                                           std::uint64_t raw) const {
+    if (pid == 0 || raw == 0)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null or runtime-global heap handle");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<RefGuard>(RuntimeErrc::NotFound, "heap owner process does not exist");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    auto object = owner->handle_table().lookup(Handle::from_raw(raw));
+    if (!object.ok()) return Result<RefGuard>(object.errc(), object.context());
+    auto* value = object.value().get();
+    if (value == nullptr || value->type_id() != TypeId::MemoryRegion ||
+        value->as<RtHeap>() == nullptr) {
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a heap object");
     }
     return Result<RefGuard>(std::move(object.value()));
 }
@@ -1375,8 +1873,9 @@ Result<std::uint32_t> GameRuntimeService::wait_object(
     } wait_state_restore{guest_runtime_thread, marked_blocked};
 
     const auto cancelled = [&guest_thread]() {
-        auto* object = guest_thread.get();
-        auto* thread = object != nullptr ? object->as<RtThread>() : nullptr;
+        auto* guest_object = guest_thread.get();
+        auto* thread = guest_object != nullptr
+            ? guest_object->as<RtThread>() : nullptr;
         return thread != nullptr && thread->stop_requested();
     };
     const auto wait_start_ns = pal::now_ns();
@@ -1655,25 +2154,114 @@ Result<std::uint32_t> GameRuntimeService::wait_event(std::uint64_t pid,
 }
 
 Result<void> GameRuntimeService::close_sync_handle(std::uint64_t pid, std::uint64_t handle) {
-    std::lock_guard transaction(sync_transaction_lock_);
-    auto object = lookup_sync_object(pid, handle);
-    if (!object.ok()) return Result<void>(object.errc(), object.context());
+    if (pid == 0 || handle == 0)
+        return Result<void>(RuntimeErrc::InvalidHandle, "null process or guest handle");
     auto process = process_manager_.find_process_by_pid(pid);
     if (!process.ok()) return Result<void>(process.errc(), process.context());
     auto* owner = process.value().get()->as<ManagedProcess>();
-    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
-    const auto object_id = object.value().get()->id();
-    if (auto* mutex = object.value().get()->as<RtGuestMutex>()) mutex->close();
-    if (auto* semaphore = object.value().get()->as<RtGuestSemaphore>()) semaphore->close();
-    auto closed = owner->handle_table().close(Handle::from_raw(handle));
+    if (owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    auto candidate = owner->handle_table().lookup(Handle::from_raw(handle));
+    if (!candidate.ok()) return Result<void>(candidate.errc(), candidate.context());
+    auto* object = candidate.value().get();
+    if (object != nullptr && object->type_id() == TypeId::TaskQueue) {
+        auto* closer = dynamic_cast<IGuestHandleCloser*>(object);
+        if (closer == nullptr)
+            return Result<void>(RuntimeErrc::ObjectTypeMismatch,
+                                "task-queue object does not implement guest handle close");
+        return closer->close_guest_handle(pid, handle, std::move(candidate.value()));
+    }
+    const bool is_heap = object != nullptr && object->type_id() == TypeId::MemoryRegion &&
+                         object->as<RtHeap>() != nullptr;
+    candidate.value().release();
+    if (is_heap) return close_heap_object(pid, handle);
+
+    std::lock_guard transaction(sync_transaction_lock_);
+    auto sync_object = lookup_sync_object(pid, handle);
+    if (!sync_object.ok())
+        return Result<void>(sync_object.errc(), sync_object.context());
+    auto current_process = process_manager_.find_process_by_pid(pid);
+    if (!current_process.ok())
+        return Result<void>(current_process.errc(), current_process.context());
+    auto* current_owner = current_process.value().get()->as<ManagedProcess>();
+    if (current_owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto object_id = sync_object.value().get()->id();
+    if (auto* mutex = sync_object.value().get()->as<RtGuestMutex>()) mutex->close();
+    if (auto* semaphore = sync_object.value().get()->as<RtGuestSemaphore>()) semaphore->close();
+    auto closed = current_owner->handle_table().close(Handle::from_raw(handle));
     if (!closed.ok()) return closed;
     {
         std::lock_guard lock(state_lock_);
         const auto erased = sync_objects_.erase({pid, handle});
-        if (erased == 0) return Result<void>(RuntimeErrc::InvalidHandle, "synchronization handle already closed");
+        if (erased == 0)
+            return Result<void>(RuntimeErrc::InvalidHandle, "synchronization handle already closed");
         retired_sync_objects_[pid].push_back(object_id);
     }
     return Result<void>::ok_result();
+}
+
+Result<void> GameRuntimeService::close_heap_object(std::uint64_t pid,
+                                                     std::uint64_t heap_handle) {
+    const auto heap = lookup_heap_object(pid, heap_handle);
+    if (!heap.ok()) return Result<void>(heap.errc(), heap.context());
+    {
+        auto* heap_obj = heap.value().get()->as<RtHeap>();
+        if (heap_obj != nullptr && heap_obj->is_default_heap())
+            return Result<void>(RuntimeErrc::InvalidArgument,
+                                "the process default heap cannot be closed");
+    }
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto closed = owner->handle_table().close(Handle::from_raw(heap_handle));
+    if (!closed.ok()) return Result<void>(closed.errc(), closed.context());
+    std::lock_guard lock(state_lock_);
+    const auto pit = procs_.find(pid);
+    if (pit != procs_.end() && pit->second.process_heap == heap_handle)
+        pit->second.process_heap = 0;
+    return Result<void>();
+}
+
+Result<void> GameRuntimeService::close_guest_object(std::uint64_t pid,
+                                                    std::uint64_t handle) {
+    // Generic CloseHandle dispatch: one entry point, typed routing.
+    // Sync objects (event/mutex/semaphore) keep the transactional path;
+    // task queues use their registered closer; heaps close as private
+    // heap handles. Everything else fails closed with ObjectTypeMismatch
+    // so unknown future types must register a close path before they
+    // become guest-visible through CloseHandle.
+    if (pid == 0 || handle == 0)
+        return Result<void>(RuntimeErrc::InvalidHandle, "null process or guest handle");
+    auto process = process_manager_.find_process_by_pid(pid);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    auto candidate = owner->handle_table().lookup(Handle::from_raw(handle));
+    if (!candidate.ok()) return Result<void>(candidate.errc(), candidate.context());
+    auto* object = candidate.value().get();
+    const auto type = object == nullptr ? TypeId::Invalid : object->type_id();
+    candidate.value().release();
+    switch (type) {
+    case TypeId::Event:
+    case TypeId::Mutex:
+    case TypeId::Semaphore:
+        return close_sync_handle(pid, handle);
+    case TypeId::TaskQueue:
+        return close_sync_handle(pid, handle);  // routes to the queue closer
+    case TypeId::MemoryRegion: {
+        // Heaps are the only MemoryRegion objects exposed as guest handles.
+        if (object->as<RtHeap>() == nullptr)
+            return Result<void>(RuntimeErrc::ObjectTypeMismatch,
+                                "memory region is not closable through CloseHandle");
+        return close_heap_object(pid, handle);
+    }
+    default:
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch,
+                            "object type is not closable through CloseHandle");
+    }
 }
 
 Result<void> GameRuntimeService::close_event(std::uint64_t pid, std::uint64_t handle) {
@@ -1688,7 +2276,7 @@ void GameRuntimeService::release_process(std::uint64_t process_id) {
     std::vector<std::uint64_t> objects_to_destroy;
     {
         std::lock_guard lock(state_lock_);
-        procs_.erase(process_id);
+        procs_.erase(process_id);  // drops the cached default-heap handle too
         for (auto it = ts_bits_.begin(); it != ts_bits_.end();) {
             if (it->first.first == process_id) it = ts_bits_.erase(it);
             else ++it;
@@ -1768,98 +2356,129 @@ Result<void> TaskQueueService::on_shutdown() {
         process_exit_observer_id_ = 0;
     }
     const auto revoked = api_reg_.revoke_owner(id());
+    std::vector<std::uint64_t> pids;
     {
         std::lock_guard lock(lock_);
-        for (auto& entry : queues_) {
-            entry.second->terminated = true;
-            entry.second->work_callbacks.clear();
-            entry.second->completion_callbacks.clear();
+        for (const auto& [pid, ids] : process_queue_objects_) {
+            (void)ids;
+            pids.push_back(pid);
         }
-        for (auto& queue : retired_queues_) {
-            queue->terminated = true;
-            queue->work_callbacks.clear();
-            queue->completion_callbacks.clear();
-        }
-        queues_.clear();
-        retired_queues_.clear();
     }
-    queue_cv_.notify_all();
+    for (const auto pid : pids) release_process(pid);
     owned_.clear();
-    if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound) {
+    if (!observer_removed.ok() && observer_removed.errc() != RuntimeErrc::NotFound)
         return Result<void>(observer_removed.errc(), observer_removed.context());
-    }
     if (!revoked.ok()) return Result<void>(revoked.errc(), revoked.context());
     return Result<void>::ok_result();
+}
+
+Result<RefGuard> TaskQueueService::lookup_queue(
+    std::uint64_t process_id, std::uint64_t queue_id) const {
+    if (process_id == 0 || queue_id == 0)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null task-queue handle or process id");
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<RefGuard>(RuntimeErrc::NotFound, "task-queue owner process does not exist");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr)
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "task-queue owner is not a managed process");
+    auto object = owner->handle_table().lookup(Handle::from_raw(queue_id));
+    if (!object.ok()) return Result<RefGuard>(object.errc(), object.context());
+    auto* queue = object.value().get() != nullptr ? object.value().get()->as<Queue>() : nullptr;
+    if (queue == nullptr)
+        return Result<RefGuard>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue in this process");
+    if (queue->owner_process_id != process_id)
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle, "task queue handle belongs to another process");
+    return Result<RefGuard>(std::move(object.value()));
 }
 
 Result<std::uint64_t> TaskQueueService::create_queue(
     std::uint64_t process_id, std::uint32_t work_mode,
     std::uint32_t completion_mode) {
     const auto manual = static_cast<std::uint32_t>(XTaskQueueDispatchMode::Manual);
-    if (work_mode != manual || completion_mode != manual) {
-        return Result<std::uint64_t>(
-            RuntimeErrc::InvalidArgument,
+    if (work_mode != manual || completion_mode != manual)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument,
             "only manual dispatch mode is implemented; other modes require callback scheduling");
-    }
-    std::lock_guard lock(lock_);
-    if (next_id_ == 0 || next_id_ == UINT64_MAX) {
-        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
-                                     "task queue handle space exhausted");
-    }
-    const std::uint64_t queue_id = next_id_++;
-    auto queue = std::make_shared<Queue>();
+    if (process_id == 0)
+        return Result<std::uint64_t>(RuntimeErrc::InvalidArgument, "task queue requires a process owner");
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<std::uint64_t>(RuntimeErrc::NotFound, "task-queue owner process does not exist");
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr || owner->state() == ProcessState::Terminating ||
+        owner->state() == ProcessState::Terminated || owner->state() == ProcessState::Failed)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "task-queue owner process is not live");
+
+    auto queue = std::make_unique<Queue>();
     queue->owner_process_id = process_id;
+    queue->service = this;
     queue->work_mode = work_mode;
     queue->completion_mode = completion_mode;
-    queues_.emplace(queue_id, std::move(queue));
-    return Result<std::uint64_t>(queue_id);
+    auto object_id = pm_.objects().register_object(std::move(queue));
+    if (!object_id.ok()) return Result<std::uint64_t>(object_id.errc(), object_id.context());
+    auto object = pm_.objects().lookup_id(object_id.value());
+    if (!object.ok()) {
+        (void)pm_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(object.errc(), object.context());
+    }
+    auto handle = owner->handle_table().create(*object.value().get());
+    if (!handle.ok()) {
+        object.value().release();
+        (void)pm_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(handle.errc(), handle.context());
+    }
+    bool rejected = false;
+    {
+        std::lock_guard lock(lock_);
+        const auto state = owner->state();
+        rejected = state == ProcessState::Terminating ||
+                   state == ProcessState::Terminated || state == ProcessState::Failed;
+        if (!rejected) process_queue_objects_[process_id].push_back(object_id.value());
+        else (void)owner->handle_table().close(handle.value());
+    }
+    if (rejected) {
+        object.value().release();
+        process.value().release();
+        (void)pm_.objects().destroy(object_id.value());
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
+                                     "task-queue owner process terminated during creation");
+    }
+    return Result<std::uint64_t>(handle.value().raw());
 }
 
 Result<std::uint64_t> TaskQueueService::duplicate_queue(
     std::uint64_t process_id, std::uint64_t queue_id) {
+    auto queue = lookup_queue(process_id, queue_id);
+    if (!queue.ok()) return Result<std::uint64_t>(queue.errc(), queue.context());
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<std::uint64_t>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr) return Result<std::uint64_t>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
     std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end()) {
-        return Result<std::uint64_t>(RuntimeErrc::NotFound, "unknown queue handle");
-    }
-    if (it->second->owner_process_id != process_id) {
-        return Result<std::uint64_t>(RuntimeErrc::InvalidHandle,
-                                     "task queue handle belongs to another process");
-    }
-    if (next_id_ == 0 || next_id_ == UINT64_MAX) {
-        return Result<std::uint64_t>(RuntimeErrc::OutOfResources,
-                                     "task queue handle space exhausted");
-    }
-    const std::uint64_t duplicate_id = next_id_++;
-    queues_.emplace(duplicate_id, it->second);
-    return Result<std::uint64_t>(duplicate_id);
+    auto* value = queue.value().get()->as<Queue>();
+    if (value == nullptr || value->terminated)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated, "task queue is terminated");
+    auto duplicate = owner->handle_table().duplicate(Handle::from_raw(queue_id));
+    if (!duplicate.ok()) return Result<std::uint64_t>(duplicate.errc(), duplicate.context());
+    return Result<std::uint64_t>(duplicate.value().raw());
 }
 
 Result<void> TaskQueueService::submit_callback(
     std::uint64_t process_id, std::uint64_t queue_id, XTaskQueuePort port,
     std::uint64_t callback_context, std::uint64_t callback_va) {
     if (process_id == 0 || callback_va == 0 ||
-        (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion)) {
+        (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion))
         return Result<void>(RuntimeErrc::InvalidArgument,
-                            "callback submission requires a process, valid port, and non-null guest callback");
-    }
+            "callback submission requires a process, valid port, and non-null guest callback");
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    auto* queue = queue_ref.value().get()->as<Queue>();
+    if (queue == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue");
     std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end())
-        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
-    const auto& queue = it->second;
-    if (queue->owner_process_id != process_id)
-        return Result<void>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
     if (queue->terminated)
-        return Result<void>(RuntimeErrc::ProcessTerminated,
-                            "cannot submit callbacks to a terminated queue");
-    auto& callbacks = port == XTaskQueuePort::Work
-        ? queue->work_callbacks : queue->completion_callbacks;
+        return Result<void>(RuntimeErrc::ProcessTerminated, "cannot submit callbacks to a terminated queue");
+    auto& callbacks = port == XTaskQueuePort::Work ? queue->work_callbacks : queue->completion_callbacks;
     constexpr std::size_t kMaxPendingCallbacksPerPort = 4096;
     if (callbacks.size() >= kMaxPendingCallbacksPerPort)
-        return Result<void>(RuntimeErrc::OutOfResources,
-                            "manual task queue callback limit reached");
+        return Result<void>(RuntimeErrc::OutOfResources, "manual task queue callback limit reached");
     callbacks.push_back(Queue::Callback{callback_context, callback_va, false});
     queue_cv_.notify_all();
     return Result<void>::ok_result();
@@ -1867,55 +2486,60 @@ Result<void> TaskQueueService::submit_callback(
 
 Result<bool> TaskQueueService::dispatch(
     std::uint64_t process_id, std::uint64_t queue_id, XTaskQueuePort port,
-    std::uint32_t timeout_ms, const GuestCallbackInvoker& invoke_callback) {
+    std::uint32_t timeout_ms, const GuestCallbackInvoker& invoke_callback,
+    const std::function<bool()>& cancellation_requested) {
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<bool>(queue_ref.errc(), queue_ref.context());
+    auto* queue = queue_ref.value().get()->as<Queue>();
+    if (queue == nullptr) return Result<bool>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue");
     std::unique_lock lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end())
-        return Result<bool>(RuntimeErrc::NotFound, "unknown queue handle");
-    const auto queue = it->second;
-    if (queue->owner_process_id != process_id)
-        return Result<bool>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
     if (port != XTaskQueuePort::Work && port != XTaskQueuePort::Completion)
         return Result<bool>(RuntimeErrc::InvalidArgument, "unknown XTaskQueuePort value");
-    auto& callbacks = port == XTaskQueuePort::Work
-        ? queue->work_callbacks : queue->completion_callbacks;
+    auto& callbacks = port == XTaskQueuePort::Work ? queue->work_callbacks : queue->completion_callbacks;
     ++queue->active_dispatches;
     const auto finish_dispatch = [&] {
         if (queue->active_dispatches != 0) --queue->active_dispatches;
-        const bool still_referenced = std::any_of(
-            queues_.begin(), queues_.end(),
-            [&](const auto& entry) { return entry.second == queue; });
-        if (!still_referenced && queue->active_dispatches == 0) {
-            // No handle or in-flight dispatch can consume the remaining work.
+        if (queue->terminated && queue->active_dispatches == 0) {
             queue->work_callbacks.clear();
             queue->completion_callbacks.clear();
-            retired_queues_.erase(
-                std::remove(retired_queues_.begin(), retired_queues_.end(), queue),
-                retired_queues_.end());
         }
     };
-    const auto ready = [&] {
-        const bool still_referenced = std::any_of(
-            queues_.begin(), queues_.end(),
-            [&](const auto& entry) { return entry.second == queue; });
-        return !callbacks.empty() || queue->terminated || !still_referenced;
-    };
-    if (callbacks.empty() && !queue->terminated) {
-        if (timeout_ms == 0xFFFFFFFFu)
-            queue_cv_.wait(lock, ready);
-        else if (timeout_ms != 0)
-            (void)queue_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), ready);
+    const auto ready = [&] { return !callbacks.empty() || queue->terminated; };
+    const bool infinite = timeout_ms == 0xFFFFFFFFu;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(infinite ? 0u : timeout_ms);
+    while (!ready()) {
+        if (cancellation_requested && cancellation_requested()) {
+            finish_dispatch();
+            return Result<bool>(RuntimeErrc::ThreadTerminated,
+                                "task-queue dispatch canceled by guest-thread termination");
+        }
+        if (timeout_ms == 0) break;
+        // Bounded park intervals let the managed thread's cooperative
+        // cancellation become visible even when no queue event is signaled.
+        constexpr auto kCancellationPoll = std::chrono::milliseconds(2);
+        if (infinite) {
+            queue_cv_.wait_for(lock, kCancellationPoll);
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) break;
+            const auto remaining = deadline - now;
+            queue_cv_.wait_for(lock, std::min(remaining,
+                std::chrono::steady_clock::duration(kCancellationPoll)));
+        }
+    }
+    if (cancellation_requested && cancellation_requested()) {
+        finish_dispatch();
+        return Result<bool>(RuntimeErrc::ThreadTerminated,
+                            "task-queue dispatch canceled by guest-thread termination");
     }
     if (callbacks.empty()) {
         finish_dispatch();
         return Result<bool>(false);
     }
-
     if (!invoke_callback) {
         finish_dispatch();
-        return Result<bool>(RuntimeErrc::InvalidState,
-                            "manual guest callback dispatch requires an execution backend");
+        return Result<bool>(RuntimeErrc::InvalidState, "manual guest callback dispatch requires an execution backend");
     }
     auto callback = callbacks.front();
     callbacks.pop_front();
@@ -1925,14 +2549,12 @@ Result<bool> TaskQueueService::dispatch(
 
     Result<void> invoked = Result<void>::ok_result();
     try {
-        invoked = invoke_callback(callback.callback_va,
-                                  callback.context, callback.canceled);
+        invoked = invoke_callback(callback.callback_va, callback.context, callback.canceled);
     } catch (const std::exception& error) {
         invoked = Result<void>(RuntimeErrc::PlatformError,
                                std::string("guest callback invoker threw: ") + error.what());
     } catch (...) {
-        invoked = Result<void>(RuntimeErrc::PlatformError,
-                               "guest callback invoker threw an unknown exception");
+        invoked = Result<void>(RuntimeErrc::PlatformError, "guest callback invoker threw an unknown exception");
     }
     lock.lock();
     if (queue->active_callbacks != 0) --queue->active_callbacks;
@@ -1940,93 +2562,120 @@ Result<bool> TaskQueueService::dispatch(
     queue_cv_.notify_all();
     lock.unlock();
     if (!invoked.ok())
-        return Result<bool>(invoked.errc(),
-                            "guest task-queue callback failed: " + invoked.error_string());
+        return Result<bool>(invoked.errc(), "guest task-queue callback failed: " + invoked.error_string());
     return Result<bool>(true);
+}
+
+Result<void> TaskQueueService::Queue::close_guest_handle(
+    std::uint64_t process_id, std::uint64_t raw_handle, RefGuard&& object_pin) {
+    if (service == nullptr)
+        return Result<void>(RuntimeErrc::InvalidState, "task queue service is unavailable");
+    return service->close_queue_with_guard(process_id, raw_handle, std::move(object_pin));
 }
 
 Result<void> TaskQueueService::close_queue(
     std::uint64_t process_id, std::uint64_t queue_id) {
-    std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end())
-        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
-    const auto queue = it->second;
-    if (queue->owner_process_id != process_id)
-        return Result<void>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
-    queues_.erase(it);
-    const bool has_alias = std::any_of(
-        queues_.begin(), queues_.end(),
-        [&](const auto& entry) { return entry.second == queue; });
-    if (!has_alias) {
-        if (queue->active_dispatches != 0) {
-            if (std::find(retired_queues_.begin(), retired_queues_.end(), queue) ==
-                retired_queues_.end())
-                retired_queues_.push_back(queue);
-        } else {
-            // Pending callbacks cannot be reached after the final handle closes.
-            queue->work_callbacks.clear();
-            queue->completion_callbacks.clear();
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    return close_queue_with_guard(process_id, queue_id, std::move(queue_ref.value()));
+}
+
+Result<void> TaskQueueService::close_queue_with_guard(
+    std::uint64_t process_id, std::uint64_t queue_id, RefGuard&& queue_ref) {
+    if (!queue_ref || queue_ref.get()->as<Queue>() == nullptr)
+        return Result<void>(RuntimeErrc::InvalidHandle, "task-queue object pin is invalid");
+    auto process = pm_.find_process_by_pid(process_id);
+    if (!process.ok()) return Result<void>(process.errc(), process.context());
+    auto* owner = process.value().get()->as<ManagedProcess>();
+    if (owner == nullptr)
+        return Result<void>(RuntimeErrc::ObjectTypeMismatch, "owner is not a managed process");
+    const auto object_id = queue_ref.get()->id();
+    bool last_handle = false;
+    {
+        std::lock_guard lock(lock_);
+        auto closed = owner->handle_table().close(Handle::from_raw(queue_id));
+        if (!closed.ok()) return closed;
+        const auto remaining = owner->handle_table().list_handles();
+        last_handle = std::none_of(remaining.begin(), remaining.end(),
+            [&](const auto& info) { return info.object_id == object_id; });
+        if (last_handle) {
+            auto* queue = queue_ref.get()->as<Queue>();
+            if (queue != nullptr) {
+                queue->terminated = true;
+                for (auto& callback : queue->work_callbacks) callback.canceled = true;
+                for (auto& callback : queue->completion_callbacks) callback.canceled = true;
+                if (queue->active_dispatches == 0) {
+                    queue->work_callbacks.clear();
+                    queue->completion_callbacks.clear();
+                }
+            }
+            auto it = process_queue_objects_.find(process_id);
+            if (it != process_queue_objects_.end()) {
+                auto& ids = it->second;
+                ids.erase(std::remove(ids.begin(), ids.end(), object_id), ids.end());
+                if (ids.empty()) process_queue_objects_.erase(it);
+            }
         }
     }
     queue_cv_.notify_all();
+    if (last_handle) {
+        queue_ref.release();
+        process.value().release();
+        return pm_.objects().destroy(object_id);
+    }
     return Result<void>::ok_result();
 }
 
 Result<void> TaskQueueService::terminate_queue(
     std::uint64_t process_id, std::uint64_t queue_id, bool wait) {
-    std::lock_guard lock(lock_);
-    const auto it = queues_.find(queue_id);
-    if (it == queues_.end()) {
-        return Result<void>(RuntimeErrc::NotFound, "unknown queue handle");
+    auto queue_ref = lookup_queue(process_id, queue_id);
+    if (!queue_ref.ok()) return Result<void>(queue_ref.errc(), queue_ref.context());
+    auto* queue = queue_ref.value().get()->as<Queue>();
+    if (queue == nullptr) return Result<void>(RuntimeErrc::ObjectTypeMismatch, "handle is not a task queue");
+    {
+        std::lock_guard lock(lock_);
+        queue->terminated = true;
+        for (auto& callback : queue->work_callbacks) callback.canceled = true;
+        for (auto& callback : queue->completion_callbacks) callback.canceled = true;
+        (void)wait;
     }
-    if (it->second->owner_process_id != process_id) {
-        return Result<void>(RuntimeErrc::InvalidHandle,
-                            "task queue handle belongs to another process");
-    }
-    it->second->terminated = true;
-    for (auto& callback : it->second->work_callbacks) callback.canceled = true;
-    for (auto& callback : it->second->completion_callbacks) callback.canceled = true;
-    (void)wait; // waiting for completion is not supported by the manual guest-thread model
     queue_cv_.notify_all();
     return Result<void>::ok_result();
 }
 
 void TaskQueueService::release_process(std::uint64_t process_id) {
-    std::lock_guard lock(lock_);
-    for (auto& queue : retired_queues_) {
-        if (queue->owner_process_id == process_id) {
-            queue->terminated = true;
-            queue->work_callbacks.clear();
-            queue->completion_callbacks.clear();
+    std::vector<std::uint64_t> object_ids;
+    {
+        std::lock_guard lock(lock_);
+        const auto it = process_queue_objects_.find(process_id);
+        if (it == process_queue_objects_.end()) return;
+        object_ids = std::move(it->second);
+        process_queue_objects_.erase(it);
+    }
+    for (const auto object_id : object_ids) {
+        auto object = pm_.objects().lookup_id(object_id);
+        if (object.ok()) {
+            if (auto* queue = object.value().get()->as<Queue>()) {
+                std::lock_guard lock(lock_);
+                queue->terminated = true;
+                queue->work_callbacks.clear();
+                queue->completion_callbacks.clear();
+            }
+            object.value().release();
         }
+        queue_cv_.notify_all();
+        (void)pm_.objects().destroy(object_id);
     }
-    for (auto& entry : queues_) {
-        if (entry.second->owner_process_id == process_id) {
-            entry.second->terminated = true;
-            entry.second->work_callbacks.clear();
-            entry.second->completion_callbacks.clear();
-        }
-    }
-    for (auto it = queues_.begin(); it != queues_.end();) {
-        if (it->second->owner_process_id == process_id) it = queues_.erase(it);
-        else ++it;
-    }
-    retired_queues_.erase(
-        std::remove_if(retired_queues_.begin(), retired_queues_.end(),
-            [&](const auto& queue) { return queue->owner_process_id == process_id; }),
-        retired_queues_.end());
-    queue_cv_.notify_all();
 }
 
 std::size_t TaskQueueService::live_queues() const {
     std::lock_guard lock(lock_);
-    std::unordered_set<const Queue*> unique;
-    unique.reserve(queues_.size() + retired_queues_.size());
-    for (const auto& entry : queues_) unique.insert(entry.second.get());
-    for (const auto& queue : retired_queues_) unique.insert(queue.get());
-    return unique.size();
+    std::size_t count = 0;
+    for (const auto& [pid, ids] : process_queue_objects_) {
+        (void)pid;
+        count += ids.size();
+    }
+    return count;
 }
 
 // ── TimingService ────────────────────────────────────────────────────────

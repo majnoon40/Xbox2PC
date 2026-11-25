@@ -1,5 +1,6 @@
 // process_management.cpp — M4 ManagedProcess + ProcessManager.
 
+#include "xbox2pc/execution_context.hpp"
 #include "xbox2pc/process_management.hpp"
 
 #include <algorithm>
@@ -19,7 +20,71 @@ ManagedProcess::ManagedProcess(std::uint64_t pid, std::string image_name,
       space_(std::make_unique<AddressSpace>(space_capacity, xbox_base,
                                              "proc-" + std::to_string(pid))) {}
 
+// Out-of-line (not = default in the header): destroying the
+// unique_ptr<TlsLifecycle> member requires the complete type, which the
+// header only forward-declares.
 ManagedProcess::~ManagedProcess() = default;
+
+Result<std::uint64_t> ManagedProcess::allocate_xmem(
+    std::uint64_t size, std::uint64_t alignment, std::string tag,
+    bool zero_initialize, std::uint64_t arena_size, std::uint64_t max_bytes) {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<std::uint64_t>(RuntimeErrc::ProcessTerminated,
+                                     "cannot allocate XMem for a terminating process");
+    if (xmem_allocator_ == nullptr) {
+        auto created = GuestXMemAllocator::create(
+            *space_, arena_size, "proc-" + std::to_string(pid_) + "-xmem",
+            max_bytes);
+        if (!created.ok())
+            return Result<std::uint64_t>(created.errc(), created.context());
+        xmem_allocator_ = std::move(created.value());
+    }
+    return xmem_allocator_->allocate(size, alignment, std::move(tag), zero_initialize);
+}
+
+Result<void> ManagedProcess::free_xmem(std::uint64_t guest_address, bool scrub) {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<void>(RuntimeErrc::ProcessTerminated,
+                            "cannot free XMem for a terminating process");
+    if (xmem_allocator_ == nullptr)
+        return Result<void>(RuntimeErrc::NotInitialized, "process XMem allocator is not initialized");
+    return xmem_allocator_->free(guest_address, scrub);
+}
+
+Result<XMemAllocation> ManagedProcess::query_xmem(std::uint64_t guest_address) const {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<XMemAllocation>(RuntimeErrc::ProcessTerminated,
+                                      "cannot query XMem for a terminating process");
+    if (xmem_allocator_ == nullptr)
+        return Result<XMemAllocation>(RuntimeErrc::NotInitialized, "process XMem allocator is not initialized");
+    return xmem_allocator_->query(guest_address);
+}
+
+Result<MemoryAllocator::Stats> ManagedProcess::xmem_stats() const {
+    std::lock_guard lock(detail_lock_);
+    const auto current = state();
+    if (current == ProcessState::Terminating ||
+        current == ProcessState::Terminated || current == ProcessState::Failed)
+        return Result<MemoryAllocator::Stats>(RuntimeErrc::ProcessTerminated,
+                                              "process XMem allocator is terminating");
+    if (xmem_allocator_ == nullptr)
+        return Result<MemoryAllocator::Stats>(RuntimeErrc::NotInitialized, "process XMem allocator is not initialized");
+    return Result<MemoryAllocator::Stats>(xmem_allocator_->stats());
+}
+
+void ManagedProcess::release_process_allocators() {
+    std::lock_guard lock(detail_lock_);
+    xmem_allocator_.reset();
+}
 
 Result<void> ManagedProcess::add_module_descriptor(const ModuleDescriptor& mod) {
     std::lock_guard lock(detail_lock_);
@@ -76,6 +141,45 @@ Result<void> ManagedProcess::detach_thread(std::uint64_t thread_obj_id) {
 std::vector<std::uint64_t> ManagedProcess::thread_ids() const {
     std::lock_guard lock(detail_lock_);
     return threads_;
+}
+
+exec::TlsLifecycle& ManagedProcess::tls_lifecycle() {
+    std::lock_guard lock(detail_lock_);
+    if (tls_lifecycle_ == nullptr) {
+        tls_lifecycle_ = std::make_unique<exec::TlsLifecycle>();
+    }
+    return *tls_lifecycle_;
+}
+
+const exec::TlsLifecycle& ManagedProcess::tls_lifecycle() const {
+    std::lock_guard lock(detail_lock_);
+    // Lazy creation is const-safe: an empty lifecycle and no lifecycle
+    // behave identically (module_count 0 -> every hook is a no-op).
+    if (tls_lifecycle_ == nullptr) {
+        tls_lifecycle_ = std::make_unique<exec::TlsLifecycle>();
+    }
+    return *tls_lifecycle_;
+}
+
+bool ManagedProcess::tls_thread_attached(std::uint64_t thread_obj_id) const {
+    std::lock_guard lock(detail_lock_);
+    return std::find(tls_attached_threads_.begin(), tls_attached_threads_.end(),
+                     thread_obj_id) != tls_attached_threads_.end();
+}
+
+void ManagedProcess::set_tls_thread_attached(std::uint64_t thread_obj_id,
+                                             bool attached) {
+    std::lock_guard lock(detail_lock_);
+    if (attached) {
+        if (std::find(tls_attached_threads_.begin(), tls_attached_threads_.end(),
+                      thread_obj_id) == tls_attached_threads_.end()) {
+            tls_attached_threads_.push_back(thread_obj_id);
+        }
+        return;
+    }
+    const auto it = std::remove(tls_attached_threads_.begin(),
+                                tls_attached_threads_.end(), thread_obj_id);
+    tls_attached_threads_.erase(it, tls_attached_threads_.end());
 }
 
 ResourceStats ManagedProcess::stats() const {
@@ -145,6 +249,9 @@ ProcessManager::~ProcessManager() {
             }
         }
         (void)proc->handle_table().close_all();
+        // Guest threads have all exited: destroy process-owned allocators
+        // while their AddressSpace is intact, then release all regions.
+        proc->release_process_allocators();
         (void)proc->address_space().release_all();
         for (const auto tid : tids) (void)proc->detach_thread(tid);
         (void)proc->terminate(0);
@@ -337,6 +444,21 @@ Result<void> ProcessManager::terminate_process(Handle process,
             }
         }
     }
+    // TLS ProcessDetach (LIFO over registered modules) runs after all
+    // guest threads exited and joined but while handles and guest memory
+    // are still intact — the last point callbacks can touch their data.
+    // The manager cannot invent an engine, so the embedder must have
+    // registered a detach runner; without one termination proceeds
+    // callback-free (documented). Best-effort by design: the runner's
+    // failures do not abort the remaining cleanup ordering.
+    std::function<Result<exec::TlsCallbackResult>(Handle)> detach_runner;
+    {
+        std::lock_guard lock(lock_);
+        detach_runner = tls_detach_runner_;
+    }
+    if (detach_runner && proc->tls_lifecycle().module_count() != 0) {
+        (void)detach_runner(process);
+    }
     auto closed = proc->handle_table().close_all();
     if (!closed.ok()) return closed;
     auto released = proc->address_space().release_all();
@@ -351,16 +473,30 @@ Result<void> ProcessManager::terminate_process(Handle process,
     auto finished = proc->finish_termination(exit_code);
     if (!finished.ok()) return finished;
 
+    // Pin a snapshot of observers while holding the manager lock, then run
+    // callbacks without it. This permits observers to query/re-enter unrelated
+    // manager operations without deadlocking termination.
+    std::vector<std::shared_ptr<ExitObserverEntry>> observers;
     {
-        // Serialize callback execution with observer removal. This ensures
-        // service shutdown cannot destroy a target while its callback is active.
-        // Observers must not re-enter ProcessManager (see the public contract).
         std::lock_guard lock(lock_);
+        observers.reserve(exit_observers_.size());
         for (const auto& [observer_id, observer] : exit_observers_) {
             (void)observer_id;
-            try { observer(pid); } catch (...) {
-                // A notification cannot undo or escape successful teardown.
-            }
+            if (observer == nullptr) continue;
+            ++observer->active_calls;
+            observers.push_back(observer);
+        }
+    }
+    for (const auto& observer : observers) {
+        try {
+            observer->callback(pid);
+        } catch (...) {
+            // A notification cannot undo or escape successful teardown.
+        }
+        {
+            std::lock_guard lock(lock_);
+            if (observer->active_calls != 0) --observer->active_calls;
+            if (observer->active_calls == 0) observer_changed_.notify_all();
         }
     }
     return Result<void>::ok_result();
@@ -376,17 +512,23 @@ Result<std::uint64_t> ProcessManager::add_process_exit_observer(
                                      "process-exit observer ID space exhausted");
     }
     const std::uint64_t id = next_exit_observer_++;
-    exit_observers_.emplace(id, std::move(observer));
+    auto entry = std::make_shared<ExitObserverEntry>();
+    entry->callback = std::move(observer);
+    exit_observers_.emplace(id, std::move(entry));
     return Result<std::uint64_t>(id);
 }
 
 Result<void> ProcessManager::remove_process_exit_observer(std::uint64_t observer_id) {
     if (observer_id == 0) return Result<void>(RuntimeErrc::InvalidArgument,
                                                "zero process-exit observer ID");
-    std::lock_guard lock(lock_);
-    if (exit_observers_.erase(observer_id) == 0) {
+    std::unique_lock lock(lock_);
+    const auto it = exit_observers_.find(observer_id);
+    if (it == exit_observers_.end()) {
         return Result<void>(RuntimeErrc::NotFound, "process-exit observer not registered");
     }
+    auto entry = it->second;
+    exit_observers_.erase(it);  // no later termination snapshot can acquire it
+    observer_changed_.wait(lock, [&] { return entry->active_calls == 0; });
     return Result<void>::ok_result();
 }
 

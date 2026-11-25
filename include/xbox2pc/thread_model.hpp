@@ -43,6 +43,7 @@ public:
     void resume();
     void cancel();
     bool is_suspend_requested() const;
+    bool is_cancelled() const;
     bool is_parked() const;
     bool checkpoint(const std::atomic<bool>& interrupted);
 private:

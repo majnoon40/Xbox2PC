@@ -401,6 +401,7 @@ PeImage parse(const std::uint8_t* data, std::size_t size, std::string source_nam
     parse_imports(img, data, size, diags);
     parse_exports(img, data, size, diags);
     parse_delay_imports(img, data, size, diags);
+    parse_exception_table(img, data, size, diags);
 
     return img;
 }

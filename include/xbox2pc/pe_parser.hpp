@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -161,6 +162,77 @@ struct ExportTable {
     std::vector<ExportedFunction> functions;    // resolved view
 };
 
+// x64 .pdata entry (RUNTIME_FUNCTION): 12 bytes, RVAs relative to the
+// image base. begin is inclusive, end exclusive; unwind points at the
+// .xdata UNWIND_INFO blob.
+struct RuntimeFunction {
+    std::uint32_t begin_rva = 0;
+    std::uint32_t end_rva = 0;
+    std::uint32_t unwind_info_rva = 0;
+};
+
+// One decoded x64 unwind code (UNWIND_CODE). slot_offset is the prolog
+// offset the code applies to (bytes from function start); opcode and
+// opinfo are the raw 4-bit code fields; operand carries the decoded
+// operand (register number, allocation size, or frame/slot offset —
+// 32-bit because far saves use 32-bit offsets).
+struct UnwindCode {
+    std::uint8_t slot_offset = 0;   // code offset within the prolog
+    std::uint8_t opcode = 0;        // UWOP_*
+    std::uint8_t opinfo = 0;        // opcode-specific info bits
+    std::uint32_t operand = 0;      // decoded operand
+};
+
+// Decoded UNWIND_INFO (.xdata) for one function. codes keep their stored
+// order (reverse application order); count_of_codes is the header's slot
+// count (a full byte — arrays over 15 slots are legal). language_handler_rva
+// is the language-handler RVA from the trailer: non-chained entries store
+// it after the (slot-padded) code array; CHAININFO entries store a
+// per-function handler RVA followed by the 12-byte chained RUNTIME_FUNCTION
+// trailer (whose BeginAddress is the chained function). handler_present()
+// reports only the EHANDLER flag — the unwind procedure never invokes
+// handlers of chained entries.
+struct UnwindInfo {
+    std::uint8_t version = 0;
+    std::uint8_t flags = 0;
+    std::uint8_t size_of_prolog = 0;
+    std::uint8_t count_of_codes = 0;   // full byte-2 slot count
+    std::uint8_t frame_register = 0;   // 0 when no frame pointer
+    std::uint8_t frame_offset = 0;     // scaled: (byte3 >> 4) * 16
+    std::vector<UnwindCode> codes;
+    std::uint32_t language_handler_rva = 0;  // 0 when no handler
+    std::uint32_t chained_unwind_rva = 0;    // begin RVA of chained function
+
+    bool is_chained() const { return (flags & 0x4) != 0; }
+    bool handler_present() const { return (flags & 0x1) != 0; }
+};
+
+// Directory 3 (.pdata) contents, sorted by begin_rva for lookup.
+struct ExceptionTable {
+    bool present = false;
+    std::vector<RuntimeFunction> functions;  // sorted by begin_rva
+
+    // Find the function covering rva (begin inclusive, end exclusive).
+    // Returns nullptr when no entry covers the address. Binary search:
+    // .pdata is sorted by begin_rva in valid images; entries with equal
+    // begin_rva (from malformed inputs) resolve to the LAST entry, which
+    // is the largest-end entry after the parser's (begin, end) sort.
+    const RuntimeFunction* find_function(std::uint32_t rva) const {
+        std::size_t lo = 0;
+        std::size_t hi = functions.size();
+        while (lo < hi) {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            if (functions[mid].begin_rva <= rva) lo = mid + 1;
+            else hi = mid;
+        }
+        if (lo == 0) return nullptr;
+        const RuntimeFunction* candidate = &functions[lo - 1];
+        if (rva < candidate->begin_rva || rva >= candidate->end_rva)
+            return nullptr;
+        return candidate;
+    }
+};
+
 struct ImportTable {
     bool present = false;
     std::vector<ImportEntry> entries;
@@ -235,6 +307,7 @@ struct PeImage {
     ImportTable imports;
     ExportTable exports;
     DelayImportTable delay_imports;  // M2: directory 13 (delayimp)
+    ExceptionTable exceptions;       // M11 Phase 6: directory 3 (.pdata)
 
     // classification helpers
     bool is_x86_64() const { return coff.machine == kMachineAmd64; }
@@ -247,6 +320,82 @@ struct PeImage {
         return va;
     }
 };
+
+// Decode the .xdata UNWIND_INFO blob for one RUNTIME_FUNCTION. base/size
+// are the raw file bytes (the parser keeps no copy). Returns nullopt and
+// reports through diags for unmappable RVAs, truncated arrays, unknown
+// opcodes, or unsupported versions.
+std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
+                                             const RuntimeFunction& fn,
+                                             const std::uint8_t* base,
+                                             std::uint64_t size,
+                                             diag::Diagnostics& diags);
+
+// Where a saved non-volatile register lives once the frame is undone.
+// reg uses the x64 unwind-code register encoding (0=RAX..9=R9,
+// 10=R10..15=R15); is_xmm marks 128-bit XMM saves (16 bytes at
+// location, value not read by this API — only the location is
+// reported; the caller reads it with its own memory access).
+struct SavedRegister {
+    std::uint8_t reg = 0;
+    bool is_xmm = false;
+    std::uint64_t location = 0;     // guest VA of the saved value
+};
+
+// Result of virtually unwinding one frame.
+struct UnwindFrame {
+    std::uint64_t return_rip = 0;   // guest VA of the return address
+    std::uint64_t rsp_after = 0;    // guest RSP after the RET pops it
+    // Saved non-volatile locations in walk (reverse-execution) order:
+    // the FIRST entry per register is the most recently executed save,
+    // i.e. the live value. Duplicates appear only in malformed data.
+    std::vector<SavedRegister> saved;
+};
+
+// Virtually unwind one frame. current_rsp is the guest RSP at the
+// query point; target_offset is the faulting instruction's offset
+// within fn (codes with slot_offset > target_offset have not executed
+// and are skipped, per the documented unwind algorithm). read_stack
+// reads one guest-stack u64 (the caller plugs GuestMemory in; the pe
+// layer stays free of runtime types). Chained UNWIND_INFO entries
+// continue the walk with their full code arrays. PUSH_MACHFRAME and
+// stack-read failures return nullopt with diagnostics. Restoring saved
+// non-volatile registers is out of scope for this slice: only the
+// control-flow frame (return address + RSP) is reconstructed.
+std::optional<UnwindFrame> unwind_one_frame(
+    const PeImage& img, const RuntimeFunction& fn, const std::uint8_t* base,
+    std::uint64_t size, std::uint32_t target_offset, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags);
+
+// ── exception handler search (M11 Phase 6 slice B) ────────────────────────
+
+// One step of the documented unwind procedure.
+struct UnwindStep {
+    std::uint64_t rip = 0;           // guest RIP at this step
+    std::uint64_t rsp = 0;           // guest RSP at this step
+    std::vector<SavedRegister> saved; // registers this step restores
+};
+
+// Result of searching for an exception handler.
+struct ExceptionHandlerSearchResult {
+    bool found = false;              // a handler accepted the exception
+    std::uint32_t handler_rva = 0;   // image-relative language handler
+    std::uint64_t establisher_frame = 0; // guest RSP of the handler frame
+    std::vector<UnwindStep> frames;  // walk steps, innermost first
+};
+
+// Walk the documented x64 unwind procedure from fault_rip/current_rsp
+// looking for a function whose (primary, non-chained) UNWIND_INFO has
+// UNW_FLAG_EHANDLER set. Leaf functions (no .pdata entry) advance by
+// popping the return address. Returns nullopt only on decode/walk
+// failure; a completed walk with no handler returns found=false with
+// the walked chain.
+std::optional<ExceptionHandlerSearchResult> find_exception_handler(
+    const PeImage& img, const std::uint8_t* base, std::uint64_t size,
+    std::uint64_t image_base, std::uint64_t fault_rip, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags);
 
 // ── Parser ──────────────────────────────────────────────────────────────
 

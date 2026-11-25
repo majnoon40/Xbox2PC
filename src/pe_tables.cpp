@@ -82,21 +82,32 @@ void parse_imports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
     img.imports.present = true;
     TableReader rd{base, size};
 
+    if (dir.rva == 0 || dir.size == 0) {
+        diags.warning("import directory has a zero RVA or size; imports unavailable");
+        return;
+    }
+
     const auto desc_off = rva_to_offset(img, dir.rva);
     if (!desc_off.has_value()) {
         diags.warning("import directory RVA " + std::to_string(dir.rva) +
                       " does not map to any section; imports unavailable", 0);
         return;
     }
+    if (!in_range(*desc_off, dir.size, size)) {
+        diags.warning("import directory raw range exceeds file bounds", *desc_off);
+        return;
+    }
+    const std::uint64_t desc_end = *desc_off + dir.size;
 
-    // The descriptor array runs until a zero descriptor; cap iteration to
-    // avoid hostile runaway loops (each real descriptor is 20 bytes).
+    // The descriptor array is null-terminated. DataDirectory.Size is a byte
+    // bound for the import data, not a descriptor count; linkers may include
+    // padding or other .idata data after the descriptor terminator.
     constexpr std::uint32_t kMaxDescriptors = 4096;
     std::uint32_t n_desc = 0;
     std::uint64_t off = *desc_off;
     for (; n_desc < kMaxDescriptors; ++n_desc) {
-        if (!in_range(off, 20, size)) {
-            diags.warning("import descriptor array truncated; read " +
+        if (!in_range(off, 20, desc_end)) {
+            diags.warning("import descriptor array truncated by declared directory size; read " +
                           std::to_string(n_desc) + " entries", off);
             break;
         }
@@ -321,8 +332,400 @@ void parse_exports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
 //   [28] dwTimeStamp (bound timestamp).
 // Thunk arrays use the exact same encoding as the regular import INT
 // (8-byte PE32+ thunks, ordinal flag bit 63), so resolution is shared.
+// ── directory 3: exception directory (.pdata RUNTIME_FUNCTION array) ──────
+// Layout: array of 12-byte entries {u32 begin, u32 end, u32 unwind}. The
+// loader sorts by begin (pairs of begin+end for function fragments) so the
+// RIP lookup is a binary search. Malformed entries are warned and skipped;
+// the table stays sorted by (begin, end).
+// ── .xdata UNWIND_INFO decoding (M11 Phase 6 slice 2) ─────────────────────
+// Header layout (MS Learn, "x64 exception handling"): byte 0 packs
+// version (bits 0-2) and flags (bits 3-7); byte 1 is SizeOfProlog;
+// byte 2 is the FULL CountOfCodes byte; byte 3 packs FrameOffset (high
+// nibble) and FrameRegister (low nibble). The unwind-code array follows
+// as CountOfCodes 16-bit slots; some opcodes consume extra slots for
+// operands. When a language handler or CHAININFO trailer follows, the
+// array is padded to an even slot count first. The header's count is
+// never trusted beyond per-fetch bounds checks against the file size.
+std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
+                                             const RuntimeFunction& fn,
+                                             const std::uint8_t* base,
+                                             std::uint64_t size,
+                                             diag::Diagnostics& diags) {
+    if (base == nullptr || fn.unwind_info_rva == 0) {
+        diags.warning("decode_unwind_info: null buffer or unwind RVA");
+        return std::nullopt;
+    }
+    const auto off = rva_to_offset(img, fn.unwind_info_rva);
+    if (!off.has_value()) {
+        diags.warning("unwind info RVA " + std::to_string(fn.unwind_info_rva) +
+                      " does not map to any section", fn.unwind_info_rva);
+        return std::nullopt;
+    }
+    if (!in_range(*off, 4, size)) {
+        diags.warning("unwind info header truncated", *off);
+        return std::nullopt;
+    }
+    TableReader rd{base, size};
+    UnwindInfo info;
+    const std::uint8_t b0 = rd.u8(*off);
+    info.version = static_cast<std::uint8_t>(b0 & 0x7);
+    info.flags = static_cast<std::uint8_t>(b0 >> 3);
+    info.size_of_prolog = rd.u8(*off + 1);
+    info.count_of_codes = rd.u8(*off + 2);
+    const std::uint8_t b3 = rd.u8(*off + 3);
+    info.frame_register = static_cast<std::uint8_t>(b3 & 0xF);
+    info.frame_offset = static_cast<std::uint8_t>(b3 >> 4);
+    if (info.version != 1) {
+        diags.warning("unsupported UNWIND_INFO version " +
+                      std::to_string(info.version), *off);
+        return std::nullopt;
+    }
+    const unsigned slot_count = info.count_of_codes;
+    std::uint64_t cursor = *off + 4;
+    // count_of_codes is a SLOT budget: a code plus its operand slots
+    // consumes 1 + extra_slots of it. Loop over codes while slots remain;
+    // a code straddling the budget end fails closed (the entry would be
+    // unreadable by the OS unwinder too).
+    unsigned consumed = 0;
+    while (consumed < slot_count) {
+        if (!in_range(cursor, 2, size)) {
+            diags.warning("unwind code array truncated at slot " +
+                          std::to_string(consumed), cursor);
+            return std::nullopt;
+        }
+        const std::uint8_t lo = rd.u8(cursor);
+        const std::uint8_t hi = rd.u8(cursor + 1);
+        UnwindCode code;
+        code.slot_offset = lo;
+        code.opcode = static_cast<std::uint8_t>(hi & 0xF);
+        code.opinfo = static_cast<std::uint8_t>(hi >> 4);
+        unsigned extra_slots = 0;
+        switch (code.opcode) {
+        case 0:  // UWOP_PUSH_NONVOL — reg in opinfo
+        case 3:  // UWOP_SET_FPREG
+        case 10: // UWOP_PUSH_MACHFRAME
+            extra_slots = 0;
+            code.operand = code.opinfo;
+            break;
+        case 2:  // UWOP_ALLOC_SMALL — size = opinfo*8+8
+            extra_slots = 0;
+            code.operand = static_cast<std::uint32_t>(code.opinfo) * 8 + 8;
+            break;
+        case 1:  // UWOP_ALLOC_LARGE
+            extra_slots = (code.opinfo == 0) ? 1 : 2;
+            break;
+        case 4:  // UWOP_SAVE_NONVOL — offset in next slot*8
+        case 6:  // UWOP_EPILOG
+        case 7:  // UWOP_SPARE_CODE
+        case 8:  // UWOP_SAVE_XMM128 — offset in next slot*16
+            extra_slots = 1;
+            break;
+        case 5:  // UWOP_SAVE_NONVOL_FAR — 32-bit offset
+        case 9:  // UWOP_SAVE_XMM128_FAR — 32-bit offset
+            extra_slots = 2;
+            break;
+        default:
+            diags.warning("unknown unwind opcode " + std::to_string(code.opcode) +
+                          " at slot " + std::to_string(consumed), cursor);
+            return std::nullopt;
+        }
+        if (extra_slots != 0) {
+            if (consumed + extra_slots >= slot_count) {
+                diags.warning("unwind code operand exceeds the declared slot "
+                              "budget at slot " + std::to_string(consumed), cursor);
+                return std::nullopt;
+            }
+            if (!in_range(cursor + 2, static_cast<std::uint64_t>(extra_slots) * 2, size)) {
+                diags.warning("unwind code operand truncated at slot " +
+                              std::to_string(consumed), cursor + 2);
+                return std::nullopt;
+            }
+            if (code.opcode == 1) {  // ALLOC_LARGE
+                if (code.opinfo == 0) {
+                    // 16-bit slot count, scaled by 8
+                    code.operand = static_cast<std::uint32_t>(rd.u16(cursor + 2)) * 8;
+                } else {
+                    // opinfo==1: raw 32-bit byte size in two operand slots
+                    code.operand = rd.u16(cursor + 2) |
+                                   (static_cast<std::uint32_t>(rd.u16(cursor + 4)) << 16);
+                }
+            } else if (extra_slots == 1) {
+                code.operand = rd.u16(cursor + 2);
+            } else {
+                code.operand = rd.u16(cursor + 2) |
+                               (static_cast<std::uint32_t>(rd.u16(cursor + 4)) << 16);
+            }
+        }
+        info.codes.push_back(code);
+        cursor += 2 + static_cast<std::uint64_t>(extra_slots) * 2;
+        consumed += 1 + extra_slots;
+    }
+    // Trailer: a language handler (when any handler flag is set) and/or a
+    // CHAININFO RUNTIME_FUNCTION. The code array is padded to an even slot
+    // count before the trailer; an odd count leaves one unused 16-bit slot.
+    const unsigned padded = (slot_count + 1) & ~1u;
+    cursor = *off + 4 + static_cast<std::uint64_t>(padded) * 2;
+    if (info.handler_present() || (info.flags & 0x2) /* UHANDLER */) {
+        if (!in_range(cursor, 4, size)) {
+            diags.warning("language handler RVA truncated", cursor);
+            return std::nullopt;
+        }
+        info.language_handler_rva = rd.u32(cursor);
+        cursor += 4;
+    }
+    if (info.is_chained()) {
+        // 12-byte RUNTIME_FUNCTION; only BeginAddress is needed for
+        // continuing the walk (find_function resolves the entry), but the
+        // full trailer is bounds-checked so malformed inputs fail closed.
+        if (!in_range(cursor, 12, size)) {
+            diags.warning("chained RUNTIME_FUNCTION trailer truncated", cursor);
+            return std::nullopt;
+        }
+        info.chained_unwind_rva = rd.u32(cursor);
+    }
+    return info;
+}
+
+// ── virtual unwinding (M11 Phase 6 slice 3) ────────────────────────────────
+// The documented x64 unwind walk: codes are stored in reverse execution
+// order. Walking them in stored order and adding each effect undoes the
+// prolog step by step, so the accumulated delta is the distance from
+// current_rsp back to the entry RSP. SET_FPREG is a no-op for the walk:
+// once every post-establishment effect is undone, the walked RSP equals
+// the frame pointer by construction. Chained entries contribute their
+// full code array (the chained prolog has fully executed when control
+// is inside the outer range).
+std::optional<UnwindFrame> unwind_one_frame(
+    const PeImage& img, const RuntimeFunction& fn, const std::uint8_t* base,
+    std::uint64_t size, std::uint32_t target_offset, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags) {
+    std::uint64_t delta = 0;  // current_rsp + delta == entry_rsp
+    const RuntimeFunction* current = &fn;
+    const std::optional<UnwindFrame> none;
+    std::vector<SavedRegister> saved;
+    for (int depth = 0; depth < 8; ++depth) {  // chain-loop guard
+        auto info = decode_unwind_info(img, *current, base, size, diags);
+        if (!info.has_value()) return none;
+        // SAVE offsets are relative to this fragment's end-of-prolog RSP.
+        // Entering the fragment, the walked RSP (current_rsp + delta, with
+        // all outer fragments' effects undone) equals exactly that value.
+        const std::uint64_t fragment_save_base = current_rsp + delta;
+        const bool outer = (current == &fn);
+        for (const auto& code : info->codes) {
+            // Outer codes are target-filtered: a prolog op at offset X has
+            // executed when the control point is at or past X, so codes with
+            // slot_offset > target_offset are skipped. Chained codes all
+            // executed (control inside the outer range implies the chained
+            // prolog completed).
+            if (outer && code.slot_offset > target_offset) continue;
+            switch (code.opcode) {
+            case 0:  // PUSH_NONVOL: the value sits at the walked position
+                saved.push_back(
+                    {code.opinfo, false, current_rsp + delta});
+                delta += 8;
+                break;
+            case 1:  // ALLOC_LARGE (operand pre-scaled by 8)
+            case 2:  // ALLOC_SMALL (operand = opinfo*8+8)
+                delta += code.operand;
+                break;
+            case 3:  // SET_FPREG: walked RSP already equals FP here
+                break;
+            case 4:  // SAVE_NONVOL: near, offset scaled by 8
+                saved.push_back({code.opinfo, false,
+                                 fragment_save_base +
+                                     static_cast<std::uint64_t>(code.operand) * 8});
+                break;
+            case 5:  // SAVE_NONVOL_FAR: raw 32-bit offset
+                saved.push_back({code.opinfo, false,
+                                 fragment_save_base + code.operand});
+                break;
+            case 8:  // SAVE_XMM128: near, offset scaled by 16
+                saved.push_back({code.opinfo, true,
+                                 fragment_save_base +
+                                     static_cast<std::uint64_t>(code.operand) * 16});
+                break;
+            case 9:  // SAVE_XMM128_FAR: raw 32-bit offset
+                saved.push_back({code.opinfo, true,
+                                 fragment_save_base + code.operand});
+                break;
+            case 6:  // EPILOG
+            case 7:  // SPARE_CODE (padding)
+                break;
+            case 10: // PUSH_MACHFRAME: interrupt frames — not modeled
+                diags.warning("unwind: PUSH_MACHFRAME is not supported");
+                return none;
+            default:
+                diags.warning("unwind: unknown opcode " +
+                              std::to_string(code.opcode));
+                return none;
+            }
+        }
+        if (info->is_chained() && info->chained_unwind_rva != 0) {
+            const RuntimeFunction* chained =
+                img.exceptions.find_function(info->chained_unwind_rva);
+            if (chained == nullptr) {
+                diags.warning("unwind: chained RVA " +
+                              std::to_string(info->chained_unwind_rva) +
+                              " has no covering RUNTIME_FUNCTION");
+                return none;
+            }
+            current = chained;
+            continue;
+        }
+        break;
+    }
+    const std::uint64_t entry_rsp = current_rsp + delta;
+    auto return_rip = read_stack(entry_rsp);
+    if (!return_rip.has_value()) {
+        diags.warning("unwind: return-address read failed at guest " +
+                      std::to_string(entry_rsp));
+        return none;
+    }
+    UnwindFrame frame;
+    frame.return_rip = return_rip.value();
+    frame.rsp_after = entry_rsp + 8;
+    frame.saved = std::move(saved);
+    return frame;
+}
+
+// ── exception handler search (M11 Phase 6 slice B) ────────────────────────
+// The documented unwind procedure: repeatedly (1) find the RUNTIME_FUNCTION
+// covering RIP, (2a) if none, the function is a leaf — pop the return
+// address, (2b) if one exists and its primary UNWIND_INFO has
+// UNW_FLAG_EHANDLER, the search succeeds; otherwise unwind one frame and
+// repeat. Handler flags on CHAININFO-linked entries never count (the OS
+// ignores them too). The walk is bounded to 64 frames and refuses to leave
+// the image extent, so malformed unwind chains terminate.
+std::optional<ExceptionHandlerSearchResult> find_exception_handler(
+    const PeImage& img, const std::uint8_t* base, std::uint64_t size,
+    std::uint64_t image_base, std::uint64_t fault_rip, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags) {
+    ExceptionHandlerSearchResult result;
+    std::uint64_t rip = fault_rip;
+    std::uint64_t rsp = current_rsp;
+    const std::uint64_t image_end = image_base + img.opt.size_of_image;
+    for (int depth = 0; depth < 64; ++depth) {
+        UnwindStep step;
+        step.rip = rip;
+        step.rsp = rsp;
+        if (rip < image_base || rip >= image_end) {
+            diags.warning("handler search: RIP " + std::to_string(rip) +
+                          " left the image extent");
+            return result;  // found=false with the walked chain
+        }
+        const std::uint32_t rva = static_cast<std::uint32_t>(rip - image_base);
+        const RuntimeFunction* fn = img.exceptions.find_function(rva);
+        if (fn == nullptr) {
+            // Leaf: the return address is the u64 at RSP.
+            const auto ret = read_stack(rsp);
+            if (!ret.has_value()) {
+                diags.warning("handler search: leaf return-address read failed "
+                              "at guest " + std::to_string(rsp));
+                return std::nullopt;
+            }
+            rip = ret.value();
+            rsp += 8;
+            result.frames.push_back(std::move(step));
+            continue;
+        }
+        auto info = decode_unwind_info(img, *fn, base, size, diags);
+        if (!info.has_value()) return std::nullopt;
+        if (info->handler_present() && info->language_handler_rva != 0) {
+            // Establisher frame: RSP after this frame's prolog is undone
+            // is unwound by unwind_one_frame below; record the handler now.
+            result.found = true;
+            result.handler_rva = info->language_handler_rva;
+            const auto frame = unwind_one_frame(img, *fn, base, size, rva - fn->begin_rva,
+                                                rsp, read_stack, diags);
+            if (!frame.has_value()) return std::nullopt;
+            // UNWIND_INFO define: establisher frame = RSP - (FrameOffset+1)*16
+            // when a frame pointer exists, else RSP at function entry —
+            // approximated by rsp_after (post-RET) minus 8 when the prolog
+            // does not establish one. unwind_one_frame reconstructs the
+            // exact entry RSP; use it.
+            step.saved = frame->saved;
+            result.establisher_frame = frame->rsp_after - 8;
+            result.frames.push_back(std::move(step));
+            return result;
+        }
+        const auto frame = unwind_one_frame(img, *fn, base, size, rva - fn->begin_rva,
+                                            rsp, read_stack, diags);
+        if (!frame.has_value()) return std::nullopt;
+        step.saved = frame->saved;
+        rip = frame->return_rip;
+        rsp = frame->rsp_after;
+        result.frames.push_back(std::move(step));
+    }
+    diags.warning("handler search exceeded 64 frames; walk stopped");
+    return result;
+}
+
+void parse_exception_table(PeImage& img, const std::uint8_t* base, std::uint64_t size,
+                           diag::Diagnostics& diags) {
+    if (img.directories.size() <= kDirException) return;
+    const auto& dir = img.directories[kDirException];
+    if (dir.rva == 0 && dir.size == 0) return;
+    img.exceptions.present = true;
+    if (dir.size == 0) {
+        diags.warning("exception directory has zero size; no unwind data");
+        return;
+    }
+    if (dir.size % 12 != 0) {
+        diags.warning("exception directory size " + std::to_string(dir.size) +
+                      " is not a multiple of 12; trailing bytes ignored");
+    }
+    const auto off = rva_to_offset(img, dir.rva);
+    if (!off.has_value()) {
+        diags.warning("exception directory RVA " + std::to_string(dir.rva) +
+                      " does not map to any section; unwind data unavailable");
+        return;
+    }
+    if (!in_range(*off, dir.size, size)) {
+        diags.warning("exception directory truncated; unwind data unavailable", *off);
+        return;
+    }
+    const std::uint64_t count = dir.size / 12;
+    // Hostile-count guard: cap at 1M entries (12 MB of .pdata — far beyond
+    // any legitimate image) and warn when clamped.
+    constexpr std::uint64_t kCap = 1ull << 20;
+    const std::uint64_t n = count > kCap ? kCap : count;
+    if (n != count)
+        diags.warning("exception entry count clamped from " + std::to_string(count) +
+                      " to " + std::to_string(n));
+    TableReader rd{base, size};
+    auto& table = img.exceptions.functions;
+    table.reserve(n);
+    for (std::uint64_t i = 0; i < n; ++i) {
+        RuntimeFunction fn;
+        fn.begin_rva = rd.u32(*off + i * 12);
+        fn.end_rva = rd.u32(*off + i * 12 + 4);
+        fn.unwind_info_rva = rd.u32(*off + i * 12 + 8);
+        if (fn.end_rva < fn.begin_rva) {
+            diags.warning("RUNTIME_FUNCTION entry " + std::to_string(i) +
+                          " has end < begin; entry skipped");
+            continue;
+        }
+        if (fn.begin_rva == 0 && fn.end_rva == 0) {
+            diags.warning("RUNTIME_FUNCTION entry " + std::to_string(i) +
+                          " is empty; entry skipped");
+            continue;
+        }
+        table.push_back(fn);
+    }
+    // (begin, end) sort keeps equal-begin fragments ordered by end, so the
+    // lookup's "last entry with begin <= rva" resolves to the largest
+    // fragment — matching the PE loader's documented merge behavior.
+    std::sort(table.begin(), table.end(), [](const RuntimeFunction& a,
+                                             const RuntimeFunction& b) {
+        return a.begin_rva != b.begin_rva ? a.begin_rva < b.begin_rva
+                                          : a.end_rva < b.end_rva;
+    });
+}
+
 void parse_delay_imports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
-                         diag::Diagnostics& diags) {
+                          diag::Diagnostics& diags) {
     if (img.directories.size() <= kDirDelayImport) return;
     const auto& dir = img.directories[kDirDelayImport];
     if (dir.rva == 0 && dir.size == 0) {

@@ -53,10 +53,18 @@ enum class TypeId : std::uint16_t {
     File = 6,
     MemoryRegion = 7,
     RuntimeService = 8,
+    TaskQueue = 9,
+    GraphicsDevice = 10,  // M11 Phase 8 null graphics provider (opaque device)
     // built-in range ends at 999
 };
 
 inline constexpr std::uint16_t kUserTypeBase = 1000;
+// M11.5 32-bit handle layout: the handle's type field is 6 bits, so type
+// ids above 63 cannot be encoded in a handle. User types that need
+// handles must be registered in [kUserTypeBase32, 63]; ids above 63 are
+// valid for object-manager registry purposes only (lookup by object id)
+// and can never receive a HandleTable slot.
+inline constexpr std::uint16_t kUserTypeBase32 = 32;
 
 // ── lifecycle states ────────────────────────────────────────────────────────
 enum class ObjectState {

@@ -56,7 +56,7 @@ struct RelocBlockSpec {
 };
 
 // TLS directory content to embed (M6): template bytes (planted in .rdata),
-// zero-fill size, and callback VAs (planted as an array; NEVER executed).
+// zero-fill size, and callback VAs (planted as an array for synthetic callback tests).
 struct TlsSpec {
     std::vector<std::uint8_t> template_data;   // copied to .rdata
     std::uint32_t zero_fill = 0;               // SizeOfZeroFill
@@ -79,6 +79,10 @@ struct PeBuildSpec {
     // programs for the execution tests). Empty rva/bytes = no payload (the
     // existing marker-only behavior is unchanged).
     std::vector<std::pair<std::uint32_t, std::vector<std::uint8_t>>> text_payloads;
+    // M11 Phase 6: raw .pdata payload (RUNTIME_FUNCTION array). RVAs in the
+    // payload are taken verbatim; the builder places the payload in .text
+    // virtual space and points directory 3 at it.
+    std::vector<std::uint8_t> exception_directory_payload;
     std::uint16_t number_of_sections_override = 0;   // 0 = actual count
     std::uint32_t size_of_optional_override = 0;     // 0 = real size
     std::uint32_t number_of_rva_override = 0;        // 0 = 16

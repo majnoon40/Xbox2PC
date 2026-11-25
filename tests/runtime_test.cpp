@@ -417,6 +417,139 @@ TEST(HandleTest, NullAndOutOfRangeRejected) {
     EXPECT_EQ(r2.errc(), RuntimeErrc::InvalidHandle);
 }
 
+// M11: every nonzero handle the runtime issues is a multiple of four
+// (reserved low tag bits), for every built-in type — odd/misaligned raw
+// values reject as invalid and carry no rights.
+TEST(HandleTest, M11FourAlignedIssuedAndTagRejected) {
+    ObjectManager mgr;
+    {
+        auto reg = mgr.register_object(std::make_unique<TrivialObject>("t"));
+        auto g = mgr.lookup_id(reg.value());
+        ASSERT_TRUE(g.ok());
+        auto h = mgr.create_handle(*g.value().get());
+        ASSERT_TRUE(h.ok());
+        EXPECT_NE(h.value().raw(), 0ull);
+        EXPECT_EQ(h.value().raw() % 4, 0ull) << "handle not four-aligned";
+        EXPECT_EQ(h.value().tag(), 0u);
+        // Forging the tag bits must invalidate the handle: same logical
+        // parts, corrupted low bits.
+        const Handle forged = Handle::from_parts(
+            h.value().index(), h.value().generation(), h.value().type(),
+            h.value().table_id());
+        ASSERT_EQ(forged, h.value());
+        const Handle misaligned = Handle::from_raw(h.value().raw() | 1ull);
+        auto bad = mgr.lookup_handle(misaligned);
+        ASSERT_FALSE(bad.ok());
+        EXPECT_EQ(bad.errc(), RuntimeErrc::InvalidHandle);
+    }
+}
+
+TEST(HandleTest, M11GenerationAdvanceStaysAlignedAndNonzero) {
+    ObjectManager mgr2;
+    auto reg2 = mgr2.register_object(std::make_unique<TrivialObject>("g2"));
+    ASSERT_TRUE(reg2.ok());
+    auto guard = mgr2.lookup_id(reg2.value());
+    ASSERT_TRUE(guard.ok());
+    auto h1 = mgr2.create_handle(*guard.value().get());
+    ASSERT_TRUE(h1.ok());
+    EXPECT_EQ(h1.value().raw() % 4, 0ull);
+    // Close and re-open a handle to the same object: the slot's
+    // generation advances; the old handle must go stale but the new one
+    // stays four-aligned and nonzero.
+    auto closed = mgr2.close_handle(h1.value());
+    ASSERT_TRUE(closed.ok());
+    auto stale = mgr2.lookup_handle(h1.value());
+    EXPECT_FALSE(stale.ok());
+    auto h2 = mgr2.create_handle(*guard.value().get());
+    ASSERT_TRUE(h2.ok());
+    EXPECT_NE(h2.value().raw(), 0ull);
+    EXPECT_EQ(h2.value().raw() % 4, 0ull);
+    if (h2.value().index() == h1.value().index()) {
+        EXPECT_NE(h2.value().generation(), h1.value().generation());
+    }
+}
+
+// M11.5: every issued handle fits in 32 bits — truncating to uint32 is
+// lossless, and the reserved pseudo-handles (current process / current
+// thread) never resolve through a table.
+TEST(HandleTest, M115IssuedHandlesFitIn32Bits) {
+    ObjectManager mgr;
+    // A couple of live handles across types.
+    for (int i = 0; i < 8; ++i) {
+        auto reg = mgr.register_object(std::make_unique<TrivialObject>("t" + std::to_string(i)));
+        ASSERT_TRUE(reg.ok());
+        auto g = mgr.lookup_id(reg.value());
+        ASSERT_TRUE(g.ok());
+        auto h = mgr.create_handle(*g.value().get());
+        ASSERT_TRUE(h.ok());
+        // The 32-bit constraint: issued handles are always <= 0xFFFFFFFD
+        // (pseudo-handles 0xFFFFFFFF/0xFFFFFFFE are never issued).
+        EXPECT_LE(h.value().raw(), 0xFFFFFFFDull)
+            << "handle exceeds the 32-bit handle space";
+        EXPECT_EQ(h.value().raw(), static_cast<std::uint64_t>(
+            static_cast<std::uint32_t>(h.value().raw())))
+            << "truncating to 32 bits loses bits";
+        // Round trip through a 32-bit slot and back.
+        const Handle truncated = Handle::from_raw(
+            static_cast<std::uint32_t>(h.value().raw()));
+        EXPECT_EQ(truncated, h.value());
+        // The truncated handle still resolves.
+        auto looked = mgr.lookup_handle(truncated);
+        ASSERT_TRUE(looked.ok());
+    }
+}
+
+TEST(HandleTest, M115PseudoHandlesReserved) {
+    ObjectManager mgr;
+    // The two reserved Win32-style pseudo-handles.
+    const Handle current_process = Handle::from_raw(Handle::kCurrentProcessPseudo);
+    const Handle current_thread = Handle::from_raw(Handle::kCurrentThreadPseudo);
+    EXPECT_TRUE(current_process.is_pseudo());
+    EXPECT_TRUE(current_thread.is_pseudo());
+
+    // They never resolve through any table operation.
+    auto lp = mgr.lookup_handle(current_process);
+    ASSERT_FALSE(lp.ok());
+    EXPECT_EQ(lp.errc(), RuntimeErrc::InvalidHandle);
+    auto lt = mgr.lookup_handle(current_thread);
+    ASSERT_FALSE(lt.ok());
+    EXPECT_EQ(lt.errc(), RuntimeErrc::InvalidHandle);
+    EXPECT_FALSE(mgr.table().close(current_process).ok());
+    EXPECT_FALSE(mgr.table().duplicate(current_process).ok());
+    EXPECT_EQ(mgr.table().rights_of(current_thread), rt::AccessRights::None);
+    EXPECT_FALSE(mgr.table().inheritable(current_thread));
+
+    // The runtime can never ISSUE a pseudo-handle value: 0xFFFFFFFF has
+    // tag bits 11 (nonzero), so the alignment invariant already rejects
+    // it; the is_pseudo() check is the belt-and-braces second gate.
+    EXPECT_NE(current_process.tag(), 0u);
+
+    // A value above the 32-bit space (e.g. a stale M4-layout handle with
+    // bits above 31) rejects with InvalidHandle.
+    const Handle legacy_wide = Handle::from_raw(0x0000000200000004ull);
+    auto lw = mgr.lookup_handle(legacy_wide);
+    ASSERT_FALSE(lw.ok());
+    EXPECT_EQ(lw.errc(), RuntimeErrc::InvalidHandle);
+}
+
+// M11.5: the layout bounds are enforced — type ids above 63 fail closed
+// at handle creation (never silently truncate).
+TEST(HandleTest, M115TypeFieldBoundFailsClosed) {
+    ObjectManager mgr;
+    // A user type above the 6-bit field.
+    class WideTypeObject : public RuntimeObject {
+    public:
+        WideTypeObject() : RuntimeObject(static_cast<TypeId>(0x1234)) {}
+    };
+    auto reg = mgr.register_object(std::make_unique<WideTypeObject>());
+    ASSERT_TRUE(reg.ok());
+    auto g = mgr.lookup_id(reg.value());
+    ASSERT_TRUE(g.ok());
+    auto h = mgr.create_handle(*g.value().get());
+    ASSERT_FALSE(h.ok());
+    EXPECT_EQ(h.errc(), RuntimeErrc::InvalidArgument);
+}
+
 TEST(HandleTest, TypeFieldValidated) {
     ObjectManager mgr;
     Handle h;

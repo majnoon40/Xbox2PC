@@ -154,10 +154,39 @@ const char* kCreateMutexWUrl = "https://learn.microsoft.com/en-us/windows/win32/
 const char* kReleaseMutexUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasemutex";
 const char* kCreateSemaphoreWUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createsemaphorew";
 const char* kReleaseSemaphoreUrl = "https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-releasesemaphore";
+const char* kGetProcessHeapUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-getprocessheap";
+const char* kHeapCreateUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapcreate";
+const char* kHeapAllocUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapalloc";
+const char* kHeapFreeUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapfree";
+const char* kHeapDestroyUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapdestroy";
+const char* kHeapReAllocUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heaprealloc";
+const char* kHeapSizeUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsize";
+const char* kXMemAllocUrl = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xmem/functions/xmemalloc";
+const char* kXMemFreeUrl = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xmem/functions/xmemfree";
+const char* kD3D12CreateDeviceUrl = "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-d3d12createdevice";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
     auto add = [&](ApiDescriptor x) { d.push_back(std::move(x)); };
+
+    // — d3d12.h (graphics; null-provider dispatch) —
+    {
+        ApiDescriptor a;
+        a.library = "d3d12";
+        a.export_name = "D3D12CreateDevice";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT D3D12CreateDevice(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**)";
+        a.category = registry::ApiCategory::Direct3D;
+        a.compat = ApiStatus::Stubbed;
+        a.impl = ApiStatus::Stubbed;
+        a.evidence = "[D3D12-CREATE-DEVICE]";
+        a.evidence_url = kD3D12CreateDeviceUrl;
+        a.notes = "null graphics provider: runtime-owned device object with a "
+                  "process-scoped handle; no GPU work; traced";
+        add(a);
+    }
 
     // — XGameRuntimeInit.h (lifecycle) —
     {
@@ -550,6 +579,198 @@ std::vector<ApiDescriptor> builtin_descriptors() {
 
     {
         ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetProcessHeap";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "HANDLE GetProcessHeap()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-GET-PROCESS-HEAP]";
+        a.evidence_url = kGetProcessHeapUrl;
+        a.notes = "returns the per-process default heap handle backed by the process xmem arena; the handle is process-scoped and closes with process teardown";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapCreate";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-CREATE]";
+        a.evidence_url = kHeapCreateUrl;
+        a.notes = "grows-nowhere private heaps within the per-process xmem arena; options are recorded but heap serialization and generate-exceptions are not emulated; zero maximum size means unbounded up to the arena cap";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapAlloc";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-ALLOC]";
+        a.evidence_url = kHeapAllocUrl;
+        a.notes = "8-byte aligned sub-allocation from the owning process arena; HEAP_ZERO_MEMORY zeroes; HEAP_GENERATE_EXCEPTIONS is rejected (fail-closed, no exception emulation)";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapFree";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Bool;
+        a.signature = "BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-FREE]";
+        a.evidence_url = kHeapFreeUrl;
+        a.notes = "frees an allocation from the same process arena; the heap handle is validated but allocations are tracked per allocation, not per heap object";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapDestroy";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 1;
+        a.ret = ReturnKind::Bool;
+        a.signature = "BOOL HeapDestroy(HANDLE hHeap)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-DESTROY]";
+        a.evidence_url = kHeapDestroyUrl;
+        a.notes = "closes the heap handle; physical arena pages are reclaimed at process teardown (per-allocation free is HeapFree); destroying the process default heap fails closed";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapReAlloc";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-REALLOC]";
+        a.evidence_url = kHeapReAllocUrl;
+        a.notes = "moving realloc over the process xmem arena: allocate the new size, copy the preserved prefix, free the old allocation; HEAP_ZERO_MEMORY zeroes the grown tail; in-place resize is not attempted and reallocation in place is not reported";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "HeapSize";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 3;
+        a.ret = ReturnKind::Uint64;
+        a.signature = "SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-HEAP-SIZE]";
+        a.evidence_url = kHeapSizeUrl;
+        a.notes = "returns the tracked allocation size for a live arena allocation base; SIZE_MAX (-1) on any error, matching the documented error return";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "xmem";
+        a.export_name = "XMemAlloc";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 2;
+        a.ret = ReturnKind::Pointer;
+        a.signature = "LPVOID XMemAlloc(SIZE_T dwSize, DWORD dwAttributes)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[GDK-XMEM-ALLOC]";
+        a.evidence_url = kXMemAllocUrl;
+        a.notes = "aligned sub-allocation from the per-process xmem arena; a nonzero low byte in dwAttributes is used as the alignment power (2^byte) when within 8..4096, otherwise 8; MEMORY_TAG bits are ignored";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "xmem";
+        a.export_name = "XMemFree";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 2;
+        a.ret = ReturnKind::Bool;
+        a.signature = "BOOL XMemFree(LPVOID lpAddress, DWORD dwAttributes)";
+        a.category = registry::ApiCategory::XboxGdk;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[GDK-XMEM-FREE]";
+        a.evidence_url = kXMemFreeUrl;
+        a.notes = "frees a previous XMemAlloc/HeapAlloc-style arena allocation; dwAttributes is accepted and ignored";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "SetLastError";
+        a.convention = Convention::None;
+        a.param_count = 1;
+        a.ret = ReturnKind::Void;
+        a.signature = "VOID SetLastError(DWORD dwErrCode)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
+        a.evidence = "[MS-LAST-ERROR]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setlasterror";
+        a.notes = "stores the error value in the calling guest thread's TEB; requires an initialized execution context";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "GetLastError";
+        a.convention = Convention::None;
+        a.param_count = 0;
+        a.ret = ReturnKind::Uint32;
+        a.signature = "DWORD GetLastError()";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
+        a.evidence = "[MS-LAST-ERROR]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror";
+        a.notes = "reads the error value from the calling guest thread's TEB; requires an initialized execution context";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "RaiseException";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::Void;
+        a.signature = "VOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags, DWORD nNumberOfArguments, const ULONG_PTR* lpArguments)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-RAISE-EXCEPTION]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-raiseexception";
+        a.notes = "raises a guest exception through the M11 phase-1 unwind dispatch (handler search over .pdata/.xdata); nNumberOfArguments/lpArguments are validated but their payload is not copied into a guest EXCEPTION_RECORD yet";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
         a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
         a.convention = Convention::X64Microsoft; a.param_count = 4;
         a.ret = ReturnKind::Uint32;
@@ -673,7 +894,7 @@ std::vector<ApiDescriptor> builtin_descriptors() {
         a.signature="BOOL CloseHandle(HANDLE)"; a.category=registry::ApiCategory::WindowsWin32;
         a.compat=ApiStatus::PartiallyImplemented; a.impl=ApiStatus::PartiallyImplemented;
         a.evidence="[MS-SYNC-EVENT]"; a.evidence_url=kCloseHandleUrl;
-        a.notes="closes event, guest mutex, and guest semaphore handles created by this service only"; add(a);
+        a.notes="typed close dispatch over the process handle table: event, guest mutex, guest semaphore, task-queue, and private heap handles; the process default heap and closable-unknown types fail closed"; add(a);
     }
 
     return d;

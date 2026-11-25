@@ -126,7 +126,7 @@ target_compile_features(xbox2pc_rt_services PUBLIC cxx_std_20)
 # sits above rt_memory/rt_process/rt_thread. The facade keeps its M3
 # surface and additionally exposes the manager.
 
-add_library(xbox2pc_rt_memory STATIC memory_management.cpp)
+add_library(xbox2pc_rt_memory STATIC memory_management.cpp xmem_allocator.cpp)
 target_include_directories(xbox2pc_rt_memory PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_memory PUBLIC xbox2pc_rt_pal xbox2pc_rt_error)
 target_compile_features(xbox2pc_rt_memory PUBLIC cxx_std_20)
@@ -249,12 +249,12 @@ target_include_directories(xbox2pc_rt_exceptions PUBLIC ${PROJECT_SOURCE_DIR}/in
 target_link_libraries(xbox2pc_rt_exceptions PUBLIC xbox2pc_rt_error)
 target_compile_features(xbox2pc_rt_exceptions PUBLIC cxx_std_20)
 
-add_library(xbox2pc_rt_execution STATIC execution_engine.cpp execution_context.cpp)
+add_library(xbox2pc_rt_execution STATIC execution_engine.cpp execution_context.cpp guest_environment.cpp native_execution.cpp process_tls_wiring.cpp)
 target_include_directories(xbox2pc_rt_execution PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_execution PUBLIC
     xbox2pc_rt_cpu xbox2pc_rt_abi xbox2pc_rt_guestmem
     xbox2pc_rt_exceptions xbox2pc_rt_api xbox2pc_rt_loader
-    xbox2pc_rt_x86_interpreter)
+    xbox2pc_rt_x86_interpreter xbox2pc_rt_procman)
 target_compile_features(xbox2pc_rt_execution PUBLIC cxx_std_20)
 
 # ── M7: API compatibility layer ─────────────────────────────────────────────
@@ -272,7 +272,15 @@ target_link_libraries(xbox2pc_rt_api PUBLIC
     xbox2pc_rt_loader xbox2pc_rt_services xbox2pc_api_registry xbox2pc_compat_db)
 target_compile_features(xbox2pc_rt_api PUBLIC cxx_std_20)
 
-add_library(xbox2pc_rt_gdk STATIC gdk_services.cpp)
+# M11 Phase 9: shared `xbox2pc run` entry (CLI tool + integration tests).
+add_library(xbox2pc_rt_run_cli STATIC run_cli.cpp)
+target_include_directories(xbox2pc_rt_run_cli PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_run_cli PUBLIC
+    xbox2pc_core xbox2pc_rt_execution xbox2pc_rt_abi xbox2pc_rt_loader
+    xbox2pc_rt_gdk xbox2pc_rt_procman xbox2pc_json xbox2pc_pe_parser)
+target_compile_features(xbox2pc_rt_run_cli PUBLIC cxx_std_20)
+
+add_library(xbox2pc_rt_gdk STATIC gdk_services.cpp graphics_service.cpp)
 target_include_directories(xbox2pc_rt_gdk PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_gdk PUBLIC
     xbox2pc_rt_api xbox2pc_rt_procman xbox2pc_rt_thread xbox2pc_rt_pal)

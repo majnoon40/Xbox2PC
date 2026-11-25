@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/m11-teb-stack-bounds]
   pull_request:
-    branches: [main]
+    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls]
   workflow_dispatch:
 
 jobs:
@@ -103,3 +103,107 @@ jobs:
         run: ctest --test-dir build-tsan --output-on-failure
         env:
           TSAN_OPTIONS: halt_on_error=1
+
+  m11-pe-fixtures:
+    name: M11 PE fixtures + static goldens
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchains and inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld g++-mingw-w64-x86-64 ninja-build
+
+      - name: Configure Xbox2PC CLI
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Xbox2PC
+        run: cmake --build build --parallel 2
+
+      - name: Build both synthetic Windows PE fixtures
+        run: scripts/build-m11-samples.sh
+
+      - name: Verify imports, TLS directory, and C++ unwind metadata
+        run: |
+          python3 - <<'PY'
+          import subprocess
+
+          basic = "build/m11-samples/m11_freestanding.exe"
+          cpp = "build/m11-samples/m11_cpp_exceptions.exe"
+
+          def dump(path):
+              return subprocess.check_output(
+                  ["objdump", "-p", path], text=True)
+
+          basic_text = dump(basic)
+          imports = [
+              line.split("DLL Name:", 1)[1].strip()
+              for line in basic_text.splitlines()
+              if "DLL Name:" in line
+          ]
+          assert imports == ["kernel32.dll"], imports
+          required_imports = {
+              "GetCurrentProcessId", "GetCurrentThreadId",
+              "VirtualAlloc", "VirtualQuery", "VirtualProtect", "VirtualFree",
+              "CreateEventW", "SetEvent", "WaitForSingleObject", "CloseHandle",
+              "SetLastError", "GetLastError", "ExitProcess",
+          }
+          assert required_imports.issubset(set(basic_text.split())), required_imports
+
+          disassembly = subprocess.check_output(
+              ["objdump", "-d", basic], text=True)
+          assert "%gs:0x58" in disassembly, "compiler-generated TLS read missing"
+
+          def directory(text, label):
+              line = next(
+                  item for item in text.splitlines()
+                  if label in item
+              )
+              fields = line.split()
+              return int(fields[2], 16), int(fields[3], 16)
+
+          tls_rva, tls_size = directory(
+              basic_text, "Thread Storage Directory [.tls]")
+          assert tls_rva and tls_size, (tls_rva, tls_size)
+
+          cpp_text = dump(cpp)
+          pdata_rva, pdata_size = directory(
+              cpp_text, "Exception Directory [.pdata]")
+          assert pdata_rva and pdata_size, (pdata_rva, pdata_size)
+          print(f"freestanding imports={imports}, TLS RVA=0x{tls_rva:x}, size=0x{tls_size:x}")
+          print(f"C++ .pdata RVA=0x{pdata_rva:x}, size=0x{pdata_size:x}")
+          PY
+
+      - name: Capture inspect, validate-pe, and compat-report goldens
+        run: scripts/capture-m11-goldens.sh
+
+      - name: Verify committed static golden hashes
+        run: sha256sum --check samples/m11/golden/SHA256SUMS.txt
+
+      - name: Require both fixture validation reports to be valid
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for name in ("m11_freestanding", "m11_cpp_exceptions"):
+              path = Path("samples/m11/golden") / f"{name}.validate-pe.json"
+              report = json.loads(path.read_text())
+              assert report["valid"], f"{name} rejected: {report.get('issues')}"
+              inspect = (Path("samples/m11/golden") / f"{name}.inspect.txt").read_text()
+              assert "image_type:    executable" in inspect, f"{name} misclassified by inspect"
+              print(f"{name}: PE validation and executable classification passed")
+          PY
+
+      - name: Upload PE fixtures, hashes, and golden outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m11-phase1-pe-fixtures
+          path: |
+            build/m11-samples/m11_freestanding.exe
+            build/m11-samples/m11_cpp_exceptions.exe
+            build/m11-samples/SHA256SUMS.txt
+            samples/m11/golden/
+          if-no-files-found: error

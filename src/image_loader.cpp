@@ -351,12 +351,17 @@ ValidationReport validate_image(const pe::PeImage& img, const std::uint8_t* file
         }
     }
 
-    // Import directory specifics (descriptor-size multiple).
+    // Import descriptors are a null-terminated array of 20-byte records,
+    // but the data-directory size is a byte extent and need not itself be
+    // divisible by 20 (some linkers include the rest of .idata in that range).
     if (img.directories.size() > pe::kDirImport) {
         const auto& id = img.directories[pe::kDirImport];
-        if (id.size != 0 && (id.size % 20) != 0) {
+        if ((id.rva == 0) != (id.size == 0)) {
             issue(vcode::kImportDirectory,
-                  "import directory size not a multiple of 20 (descriptor size)");
+                  "import directory must have both a nonzero RVA and size, or both zero");
+        } else if (id.size != 0 && id.size < 20) {
+            issue(vcode::kImportDirectory,
+                  "import directory is smaller than one descriptor");
         }
     }
 
@@ -1314,19 +1319,21 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
     }
     info.callbacks_va = cb_va;
     info.zero_fill_size = zero_fill;
-    // The raw template is file-backed and decoded here. Zero-fill is
-    // metadata only; enforce the combined allocation limit when a thread's
-    // TLS block is actually created, not while decoding the image.
+    // Keep SizeOfZeroFill as validated metadata here. The per-thread
+    // allocator enforces its allocation cap and returns OutOfResources;
+    // rejecting it during directory decoding would prevent callers from
+    // reporting the correct resource failure.
     if (info.template_size != 0) {
-        bool start_ok = false, end_ok = false;
-        (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(start_rva),
-                                    start_ok);
-        (void)checked_rva_to_offset(img, static_cast<std::uint32_t>(end_rva - 1),
-                                    end_ok);
-        if (!start_ok || !end_ok) {
+        bool template_ok = false;
+        const std::uint64_t template_off = checked_rva_to_offset(
+            img, static_cast<std::uint32_t>(info.template_rva), template_ok);
+        if (!template_ok || template_off > file_size ||
+            info.template_size > file_size - template_off) {
             return Ret(RuntimeErrc::InvalidArgument,
                        "TLS template is not fully file-backed");
         }
+        info.template_bytes.assign(file + template_off,
+                                   file + template_off + info.template_size);
     }
     // Callback count (bounded walk; callbacks are NEVER executed).
     std::uint32_t cbs = 0;
@@ -1378,6 +1385,9 @@ Result<std::optional<TlsInfo>> decode_tls(const pe::PeImage& img,
     diag.tls_callbacks = cbs;
     diag.has_tls = true;
     diag.tls_template_size = info.template_size;
+    diag.tls_index_slot_rva = info.index_slot_rva;
+    diag.tls_zero_fill_size = info.zero_fill_size;
+    diag.tls_template_bytes = info.template_bytes;
     return Ret(info);
 }
 
@@ -1572,12 +1582,9 @@ Result<Handle> ImageLoader::load_image(ProcessManager& pm, ObjectManager& mgr,
         // Synthetic TLS index (deterministic per process; documented as a
         // runtime bookkeeping id, NOT an Xbox TLS-slot reproduction).
         diag.tls_index_assigned = true;
-        diag.tls_index = static_cast<std::uint32_t>(space.space_id() & 0xFFFF);
+        diag.tls_index = static_cast<std::uint32_t>(space.space_id() % 64);
         out.exec.tls_present = true;
-        diag.unsupported.push_back(
-            {"per-thread TLS initialization",
-             "thread model has per-thread slots but no image-template copy "
-             "path; reported unsupported (callbacks counted, never run)"});
+        // Validated template bytes are retained for per-thread materialization.
     }
 
     // 6. Prepare.

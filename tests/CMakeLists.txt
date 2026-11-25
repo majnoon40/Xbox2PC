@@ -271,3 +271,31 @@ target_link_libraries(security_regression_test PRIVATE
     gtest)
 target_compile_features(security_regression_test PRIVATE cxx_std_20)
 add_test(NAME security_regression_test COMMAND security_regression_test)
+
+# M11 Phase 7: adversarial lock-order + exit-code propagation suite.
+add_executable(m11_lock_order_test m11_lock_order_test.cpp)
+target_link_libraries(m11_lock_order_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    gtest)
+target_compile_features(m11_lock_order_test PRIVATE cxx_std_20)
+add_test(NAME m11_lock_order_test COMMAND m11_lock_order_test)
+
+# M11 Phase 8: graphics null-provider suite (project-authored test DLL).
+add_executable(m11_graphics_test m11_graphics_test.cpp)
+target_link_libraries(m11_graphics_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(m11_graphics_test PRIVATE cxx_std_20)
+add_test(NAME m11_graphics_test COMMAND m11_graphics_test)
+
+# M11 Phase 9: `xbox2pc run` integration + 100-run determinism suite.
+add_executable(m11_run_test m11_run_test.cpp)
+target_link_libraries(m11_run_test PRIVATE
+    xbox2pc_rt_run_cli
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(m11_run_test PRIVATE cxx_std_20)
+add_test(NAME m11_run_test COMMAND m11_run_test)

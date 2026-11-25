@@ -51,7 +51,8 @@ ExecutionContext::ExecutionContext(std::uint64_t process_id,
                                    std::uint64_t thread_id,
                                    AddressSpace& space,
                                    api::ApiRegistry& api_reg,
-                                   ExecutionConfig cfg, std::string name)
+                                   ExecutionConfig cfg, std::string name,
+                                   std::shared_ptr<GuestProcessEnvironment> process_environment)
     : RuntimeObject(static_type_id()),
       process_id_(process_id),
       thread_id_(thread_id),
@@ -59,13 +60,15 @@ ExecutionContext::ExecutionContext(std::uint64_t process_id,
       api_reg_(api_reg),
       cfg_(cfg),
       mem_(space),
+      process_environment_(std::move(process_environment)),
       ctx_name_(std::move(name)) {}
 
 ExecutionContext::ExecutionContext(RtThread& thread, AddressSpace& space,
                                    api::ApiRegistry& api_reg,
-                                   ExecutionConfig cfg, std::string name)
+                                   ExecutionConfig cfg, std::string name,
+                                   std::shared_ptr<GuestProcessEnvironment> process_environment)
     : ExecutionContext(thread.owner_process_id(), thread.thread_id(), space,
-                       api_reg, cfg, std::move(name)) {
+                       api_reg, cfg, std::move(name), std::move(process_environment)) {
     execution_control_ = thread.execution_control();
 }
 
@@ -128,10 +131,48 @@ Result<void> ExecutionContext::initialize() {
     // Committed regions default RW (M4 discipline) — exactly the stack's
     // required protection; no W^X exception needed.
     stack_region_va_ = stack_va;
+    // M11.3: materialize documented user-mode TEB/PEB fields and the
+    // per-thread TLS vector in guest memory. This records a guest GS base;
+    // host GS is configured only by the later native execution thunk.
+    if (process_environment_ == nullptr) {
+        process_environment_ = std::make_shared<GuestProcessEnvironment>(space_);
+    }
+    if (process_environment_->space_id() != space_.space_id()) {
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "shared PEB belongs to a different address space");
+    }
+    auto process_result = process_environment_->initialize(process_id_);
+    if (!process_result.ok()) {
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return process_result;
+    }
+    auto environment = std::make_unique<GuestThreadEnvironment>(space_, *process_environment_);
+    auto environment_result = environment->initialize(thread_id_);
+    if (!environment_result.ok()) {
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return environment_result;
+    }
+    guest_environment_ = std::move(environment);
     info_.stack_top = stack_va + cfg_.max_stack_bytes - 64;   // usable top
     info_.stack_size = cfg_.max_stack_bytes;
     // Align the top 16 [MS-X64STACK].
     info_.stack_top &= ~0xFull;
+    auto stack_bounds = guest_environment_->set_stack_bounds(
+        stack_va + cfg_.max_stack_bytes, stack_va);
+    if (!stack_bounds.ok()) {
+        guest_environment_.reset();
+        (void)space_.release_region(stack_region_va_);
+        stack_region_va_ = 0;
+        ContextLimiter::release();
+        return stack_bounds;
+    }
     cpu_.reset();
     cpu_.set_reg(Gpr::Sp, info_.stack_top);
     state_ = ContextState::Initialized;
@@ -157,10 +198,89 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
                    "image is not Prepared (M6 requires Prepared state)");
     }
     const auto& exec = image.exec();
+    if (process_environment_ != nullptr) {
+        auto peb_image = process_environment_->set_image_base(exec.image_base);
+        if (!peb_image.ok()) return Ret(peb_image.errc(), peb_image.context());
+    }
     // Entry validation: inside the image extent + executable region.
     {
         auto v = validate_entry_point(exec, space_);
         if (!v.ok()) return Ret(v.errc(), v.context());
+    }
+    // Materialize the PE TLS block for this thread. Resolve the module index
+    // through the process-shared registry so every thread uses the same slot.
+    const auto& image_diag = image.diagnostics();
+    std::uint32_t module_tls_index = tls_index;
+    if (image_diag.has_tls) {
+        if (!process_environment_ || !process_environment_->initialized()) {
+            return Ret(RuntimeErrc::InvalidState,
+                       "process TLS registry is not initialized");
+        }
+        auto assigned_index = process_environment_->tls_index_for_image(
+            exec.image_base, tls_index);
+        if (!assigned_index.ok()) {
+            return Ret(assigned_index.errc(), assigned_index.context());
+        }
+        module_tls_index = assigned_index.value();
+        if (module_tls_index >= GuestThreadEnvironment::kTlsSlotCount ||
+            image_diag.tls_template_bytes.size() != image_diag.tls_template_size ||
+            image_diag.tls_template_size > loader::kMaxTlsTemplate ||
+            image_diag.tls_zero_fill_size > loader::kMaxTlsTemplate ||
+            image_diag.tls_template_size >
+                loader::kMaxTlsTemplate - image_diag.tls_zero_fill_size) {
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "invalid PE TLS index or template metadata");
+        }
+        if (!guest_environment_ || !guest_environment_->initialized()) {
+            return Ret(RuntimeErrc::InvalidState,
+                       "guest TEB/TLS environment is not initialized");
+        }
+        const std::uint64_t slot_va = guest_environment_->tls_vector_base() +
+            static_cast<std::uint64_t>(module_tls_index) * sizeof(std::uint64_t);
+        auto current = mem_.read_u64(slot_va);
+        if (!current.ok()) return Ret(current.errc(), current.context());
+        if (current.value() == 0) {
+            auto installed = guest_environment_->install_tls_module(
+                module_tls_index, image_diag.tls_template_bytes.data(),
+                image_diag.tls_template_bytes.size(),
+                image_diag.tls_zero_fill_size);
+            if (!installed.ok()) return Ret(installed.errc(), installed.context());
+        }
+        if (image_diag.tls_index_slot_rva != 0) {
+            if (image_diag.tls_index_slot_rva > exec.image_size ||
+                exec.image_size - image_diag.tls_index_slot_rva < sizeof(std::uint32_t)) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS AddressOfIndex RVA is outside the image");
+            }
+            const std::uint64_t index_va = exec.image_base + image_diag.tls_index_slot_rva;
+            const loader::SectionLayout* owner = nullptr;
+            for (const auto& section : image.layout().sections) {
+                if (index_va >= section.mapped_base) {
+                    const auto offset = index_va - section.mapped_base;
+                    if (offset <= section.mapped_size &&
+                        sizeof(std::uint32_t) <= section.mapped_size - offset) {
+                        owner = &section;
+                        break;
+                    }
+                }
+            }
+            if (owner == nullptr) {
+                return Ret(RuntimeErrc::InvalidArgument,
+                           "TLS AddressOfIndex is not in a mapped section");
+            }
+            const bool was_writable = owner->protection == MemProtect::ReadWrite ||
+                                      owner->protection == MemProtect::Full;
+            if (!was_writable) {
+                auto changed = space_.protect_region(owner->mapped_base, MemProtect::ReadWrite);
+                if (!changed.ok()) return Ret(changed.errc(), changed.context());
+            }
+            auto written = mem_.write_u32(index_va, module_tls_index);
+            if (!was_writable) {
+                auto restored = space_.protect_region(owner->mapped_base, owner->protection);
+                if (!restored.ok()) return Ret(restored.errc(), restored.context());
+            }
+            if (!written.ok()) return Ret(written.errc(), written.context());
+        }
     }
     // Reset CPU per preparation; stack discipline [MS-X64STACK].
     // The ENTRY call's return address is the COMPLETION SENTINEL: the
@@ -183,8 +303,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
     auto prep = abi::prepare_call(cpu_, exec.entry_va, spec, args, writer);
     if (!prep.ok()) return Ret(prep.errc(), prep.context());
     cpu_.rip = exec.entry_va;   // execution starts at the entry point
-    // (tls_index association is recorded; the M7 TLS state rides the
-    // process's threads, not this context.)
+    // TLS storage is materialized per thread when the image declares TLS.
     ExecutionRequest req;
     req.entry_va = exec.entry_va;
     req.stack_top_va = info_.stack_top;
@@ -226,7 +345,7 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         req.api_binding_values.push_back(binding.value);
         req.api_bindings.push_back(std::move(binding));
     }
-    info_.tls_index = tls_index;
+    info_.tls_index = module_tls_index;
     return Ret(req);
 }
 
@@ -274,7 +393,7 @@ Result<ExecutionResult> ExecutionContext::invoke(
                         "request stack not usable in this context's space");
         }
     }
-    auto bound = engine.bind_execution_context(process_id_, thread_id_, space_);
+    auto bound = engine.bind_execution_context(process_id_, thread_id_, space_, guest_environment_.get());
     if (!bound.ok()) {
         return Ret(bound.errc(), "bind guest execution context: " + bound.error_string());
     }
@@ -317,6 +436,11 @@ Result<void> ExecutionContext::destroy() {
         return Result<void>(RuntimeErrc::InvalidState,
                             "cannot destroy while executing");
     }
+    // Per-thread TEB/TLS are released first. Dropping this context's shared
+    // process-environment reference releases the PEB only after the last
+    // context for that process is destroyed.
+    guest_environment_.reset();
+    process_environment_.reset();
     if (stack_region_va_ != 0) {
         auto r = space_.release_region(stack_region_va_);
         if (!r.ok()) {
@@ -389,14 +513,24 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
         return Ret(RuntimeErrc::InvalidArgument,
                    "callback count nonzero with no array VA");
     }
-    // Read the callback VA array from guest memory (each 8 bytes).
+    // Validate the complete array range before reading any element. A
+    // wrapped VA must never redirect a malformed callback array into an
+    // unrelated low guest address.
+    const auto array_bytes =
+        static_cast<std::uint64_t>(tls.callback_count) * sizeof(std::uint64_t);
+    if (tls.callbacks_va > UINT64_MAX - array_bytes) {
+        return Ret(RuntimeErrc::InvalidArgument,
+                   "TLS callback array address range overflows");
+    }
+    // An unreadable callback-array element makes the whole plan unreliable:
+    // do not silently skip it and execute a partial callback sequence.
     for (std::uint32_t i = 0; i < tls.callback_count; ++i) {
-        const std::uint64_t slot = tls.callbacks_va + static_cast<std::uint64_t>(i) * 8;
+        const std::uint64_t slot = tls.callbacks_va +
+            static_cast<std::uint64_t>(i) * sizeof(std::uint64_t);
         auto va = mem.read_u64(slot);
         if (!va.ok()) {
-            // Unreadable array slot: reject the ENTRY (not the plan).
-            ++plan.rejected_count;
-            continue;
+            return Ret(RuntimeErrc::NotFound,
+                       "TLS callback array contains an unreadable element");
         }
         if (va.value() == 0) {
             // Terminating NULL or padding: stop at the documented
@@ -410,27 +544,113 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
         // RX region (mapped image .text).
         auto x = mem.validate_exec(cb.va);
         if (!x.ok()) {
-            ++plan.rejected_count;
-            continue;
+            return Ret(RuntimeErrc::NotFound,
+                       "TLS callback target at VA " + std::to_string(cb.va) +
+                           " is not executable mapped guest memory");
         }
         plan.callbacks.push_back(cb);
     }
+    // A TLS callback array is an ordered initialization contract. Skipping
+    // one malformed target would silently execute a partial lifecycle, so
+    // reject the complete plan instead.
     plan.note = "validated " + std::to_string(plan.callbacks.size()) +
-                " callbacks (" + std::to_string(plan.rejected_count) +
-                " rejected)";
+                " callbacks";
     return Ret(plan);
+}
+
+Result<void> TlsLifecycle::on_image_loaded(std::uint64_t image_base,
+                                             TlsCallbackPlan plan) {
+    if (image_base == 0)
+        return Result<void>(RuntimeErrc::InvalidArgument,
+                            "image base must be nonzero");
+    for (auto& [base, existing] : modules_) {
+        if (base == image_base) {
+            existing = std::move(plan);
+            return Result<void>::ok_result();
+        }
+    }
+    try {
+        modules_.emplace_back(image_base, std::move(plan));
+    } catch (const std::bad_alloc&) {
+        return Result<void>(RuntimeErrc::OutOfResources,
+                            "unable to record TLS callback plan");
+    }
+    return Result<void>::ok_result();
+}
+
+Result<std::uint32_t> TlsLifecycle::register_image(
+    const pe::PeImage& img, const std::uint8_t* file, std::size_t file_size,
+    std::uint64_t image_base, guest::GuestMemory& mem,
+    const ExecutionConfig& cfg) {
+    using Ret = Result<std::uint32_t>;
+    if (image_base == 0)
+        return Ret(RuntimeErrc::InvalidArgument, "image base must be nonzero");
+    if (file == nullptr && file_size != 0)
+        return Ret(RuntimeErrc::InvalidArgument, "null file buffer");
+    loader::LoadDiagnostics diag;
+    auto tls = loader::decode_tls(img, file, file_size, diag);
+    if (!tls.ok()) return Ret(tls.errc(), tls.context());
+    if (!tls.value().has_value()) return Ret(0u);  // no TLS directory
+    // decode_tls reports the pre-relocation callback-array VA from the
+    // file. The mapped image lives at image_base, so translate the VA by
+    // the load delta before planning (the loader applies the same delta
+    // when relocating; images loaded at their preferred base — delta 0 —
+    // are unaffected).
+    if (image_base != img.opt.image_base && tls.value()->callbacks_va != 0) {
+        tls.value()->callbacks_va =
+            tls.value()->callbacks_va - img.opt.image_base + image_base;
+    }
+    auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
+    if (!plan.ok()) return Ret(plan.errc(), plan.context());
+    const std::uint32_t count = static_cast<std::uint32_t>(
+        plan.value().callbacks.size());
+    auto registered = on_image_loaded(image_base, std::move(plan.value()));
+    if (!registered.ok()) return Ret(registered.errc(), registered.context());
+    return Ret(count);
+}
+
+Result<TlsCallbackResult> TlsLifecycle::run(
+    ExecutionContext& ctx, IExecutionEngine& engine,
+    TlsCallbackReason reason) const {
+    TlsCallbackResult total;
+    if (modules_.empty()) return Result<TlsCallbackResult>(total);
+    const bool reverse = reason == TlsCallbackReason::ProcessDetach ||
+                         reason == TlsCallbackReason::ThreadDetach;
+    for (std::size_t step = 0; step < modules_.size(); ++step) {
+        const auto index = reverse ? modules_.size() - 1 - step : step;
+        const auto& [image_base, plan] = modules_[index];
+        if (plan.callbacks.empty()) continue;
+        auto one = execute_tls_callbacks(ctx, plan, engine, image_base, reason);
+        if (!one.ok()) return one;  // orchestration failure (bad reason etc.)
+        total.executed += one.value().executed;
+        total.failed += one.value().failed;
+        if (!total.first_failure.has_value() && one.value().first_failure.has_value())
+            total.first_failure = one.value().first_failure;
+    }
+    return Result<TlsCallbackResult>(total);
 }
 
 Result<TlsCallbackResult> execute_tls_callbacks(
     ExecutionContext& ctx, const TlsCallbackPlan& plan,
-    IExecutionEngine& engine, std::uint64_t image_handle_va) {
+    IExecutionEngine& engine, std::uint64_t image_handle_va,
+    TlsCallbackReason reason) {
     using Ret = Result<TlsCallbackResult>;
     TlsCallbackResult out;
-    // Documented callback ABI: RCX=DllHandle, RDX=Reason
-    // (DLL_PROCESS_ATTACH=1), R8=Reserved.
+    switch (reason) {
+        case TlsCallbackReason::ProcessDetach:
+        case TlsCallbackReason::ProcessAttach:
+        case TlsCallbackReason::ThreadAttach:
+        case TlsCallbackReason::ThreadDetach:
+            break;
+        default:
+            return Ret(RuntimeErrc::InvalidArgument,
+                       "unknown TLS callback notification reason");
+    }
+    // Documented callback ABI: RCX=DllHandle, RDX=Reason, R8=Reserved.
     auto bound = engine.bind_execution_context(ctx.info().process_id,
                                                ctx.info().thread_id,
-                                               ctx.memory().space());
+                                               ctx.memory().space(),
+                                               ctx.guest_environment_mut());
     if (!bound.ok()) {
         return Ret(bound.errc(), "bind TLS callback execution context: " +
                                      bound.error_string());
@@ -439,6 +659,9 @@ Result<TlsCallbackResult> execute_tls_callbacks(
         // Prepare the callback frame on the context's CPU state.
         CpuState call = ctx.cpu();
         call.set_reg(Gpr::Sp, ctx.info().stack_top);
+        // The callback is a normal guest call: RET must resume at the
+        // engine's completion sentinel, not the reset context RIP (zero).
+        call.rip = kCompletionSentinel;
         abi::CallSpec spec;
         spec.args.resize(3);
         spec.args[0].kind = abi::ArgKind::Int;
@@ -447,7 +670,7 @@ Result<TlsCallbackResult> execute_tls_callbacks(
         spec.ret = abi::CallSpec::ReturnKind::Void;
         std::vector<abi::ArgValue> vals(3);
         vals[0].int_v = image_handle_va;
-        vals[1].int_v = 1;   // DLL_PROCESS_ATTACH
+        vals[1].int_v = static_cast<std::uint32_t>(reason);
         vals[2].int_v = 0;
         // Write the frame via the context's guest memory.
         struct W { guest::GuestMemory* m; };

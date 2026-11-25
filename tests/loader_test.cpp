@@ -100,6 +100,51 @@ TEST(LoaderValidationTest, ValidImagePassesEveryCheck) {
     EXPECT_TRUE(rep.has_tls_directory);
 }
 
+TEST(LoaderValidationTest, ImportDirectorySizeMayIncludeTrailingData) {
+    PeBuildSpec spec;
+    spec.imports = {{"KERNEL32.dll", {{"CreateFileW", 1}}}};
+    auto image = PeBuilder(spec).build();
+
+    // PE32+ data directories start at optional-header offset 0x98 + 112.
+    // The import descriptor table itself is 40 bytes here (one descriptor
+    // plus its null terminator). The declared import-data extent may include
+    // an extra byte of section padding and therefore need not be 20-byte aligned.
+    constexpr std::uint64_t import_size_offset =
+        0x98 + 112 + xbox2pc::pe::kDirImport * 8 + 4;
+    const std::uint32_t import_data_size = 41;
+    for (unsigned i = 0; i < 4; ++i) {
+        image[import_size_offset + i] =
+            static_cast<std::uint8_t>(import_data_size >> (i * 8));
+    }
+
+    Diagnostics diags;
+    const auto img = parse_image(image, "import-size-41.exe", diags);
+    ASSERT_EQ(img.imports.entries.size(), 1u);
+    EXPECT_FALSE(diags.has_warnings());
+    const auto report = validate_image(img, image.data(), image.size());
+    EXPECT_TRUE(report.valid) << report.issues.front().message;
+}
+
+TEST(LoaderValidationTest, ImportDirectoryMustFitAtLeastOneDescriptor) {
+    PeBuildSpec spec;
+    spec.imports = {{"KERNEL32.dll", {{"CreateFileW", 1}}}};
+    auto image = PeBuilder(spec).build();
+
+    constexpr std::uint64_t import_size_offset =
+        0x98 + 112 + xbox2pc::pe::kDirImport * 8 + 4;
+    const std::uint32_t import_data_size = 19;
+    for (unsigned i = 0; i < 4; ++i) {
+        image[import_size_offset + i] =
+            static_cast<std::uint8_t>(import_data_size >> (i * 8));
+    }
+
+    Diagnostics diags;
+    const auto img = parse_image(image, "import-size-19.exe", diags);
+    const auto report = validate_image(img, image.data(), image.size());
+    EXPECT_FALSE(report.valid);
+    EXPECT_TRUE(has_issue(report, vcode::kImportDirectory));
+}
+
 TEST(LoaderValidationTest, ZeroSectionAlignmentIsRejectedWithoutDivisionByZero) {
     PeBuildSpec spec;
     const auto image = PeBuilder(spec).build();
@@ -742,10 +787,15 @@ TEST(LoaderTlsTest, DecodeDirectoryAndCountCallbacksNeverRun) {
     ASSERT_TRUE(tls.value().has_value());
     const auto& t = *tls.value();
     EXPECT_EQ(t.template_size, 5u);
+    EXPECT_EQ(t.template_bytes,
+              (std::vector<std::uint8_t>{0x11, 0x22, 0x33, 0x44, 0x55}));
     EXPECT_EQ(t.zero_fill_size, 64u);
     EXPECT_EQ(t.callback_count, 3u);  // counted, NEVER executed
     EXPECT_TRUE(ld.has_tls);
     EXPECT_EQ(ld.tls_callbacks, 3u);
+    EXPECT_EQ(ld.tls_template_bytes, t.template_bytes);
+    EXPECT_EQ(ld.tls_zero_fill_size, 64u);
+    EXPECT_EQ(ld.tls_index_slot_rva, t.index_slot_rva);
 }
 
 TEST(LoaderTlsTest, AcceptsExactPe32PlusDirectorySize) {
@@ -934,7 +984,7 @@ TEST(LoaderIntegrationTest, FullFifteenStepPath) {
     // The TLS metadata was reported (callbacks counted; NEVER executed).
     EXPECT_TRUE(diag.has_tls);
     EXPECT_EQ(diag.tls_callbacks, 1u);
-    EXPECT_EQ(diag.unsupported.size(), 1u);  // per-thread TLS init deferred
+    EXPECT_TRUE(diag.unsupported.empty());  // template materialization is supported
 
     // Entry-point accessibility under final protections.
     auto acc = proc->address_space().validate_access(out.exec.entry_va,

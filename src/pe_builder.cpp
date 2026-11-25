@@ -306,6 +306,20 @@ std::vector<std::uint8_t> PeBuilder::build() const {
         export_dir_size = static_cast<std::uint32_t>(text.size() - ed);
     }
 
+    // ── M11 Phase 6: exception directory (.pdata RUNTIME_FUNCTION array) ──
+    // The payload is a raw 12-byte-entry array taken verbatim from the spec;
+    // RVAs inside entries are the caller's responsibility. Appended at the
+    // end of .text like the other directories.
+    std::uint32_t exception_dir_rva = 0;
+    std::uint32_t exception_dir_size = 0;
+    if (!spec.exception_directory_payload.empty()) {
+        exception_dir_rva = text_rva + static_cast<std::uint32_t>(text.size());
+        const std::uint64_t start = text.size();
+        text.resize(start + spec.exception_directory_payload.size());
+        text.put_bytes(start, spec.exception_directory_payload);
+        exception_dir_size = static_cast<std::uint32_t>(spec.exception_directory_payload.size());
+    }
+
     // ── M2: delay-load import machinery (ImgDelayDescr array) ──
     std::uint32_t delay_dir_rva = 0;
     std::uint32_t delay_dir_size = 0;
@@ -526,6 +540,10 @@ std::vector<std::uint8_t> PeBuilder::build() const {
     if (tls_dir_rva != 0) {
         out.u32(dirs + 8 * 9, tls_dir_rva);      // TLS (M6)
         out.u32(dirs + 8 * 9 + 4, tls_dir_size);
+    }
+    if (exception_dir_rva != 0) {
+        out.u32(dirs + 8 * 3, exception_dir_rva);   // Exception (.pdata)
+        out.u32(dirs + 8 * 3 + 4, exception_dir_size);
     }
 
     // Section table at pe + 24 + opt_size.

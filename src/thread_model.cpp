@@ -73,6 +73,10 @@ void CooperativeExecutionGate::cancel() {
     changed_.notify_all();
 }
 
+bool CooperativeExecutionGate::is_cancelled() const {
+    return cancelled_.load(std::memory_order_acquire);
+}
+
 bool CooperativeExecutionGate::is_suspend_requested() const {
     std::lock_guard guard(mutex_);
     return suspend_requested_;

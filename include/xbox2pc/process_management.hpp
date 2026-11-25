@@ -24,6 +24,7 @@
 //      state and wires metadata only.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -38,6 +39,19 @@
 #include "xbox2pc/thread_model.hpp"
 
 namespace xbox2pc::rt {
+
+// M11 Phase 2: TLS lifecycle wiring. The full types live in
+// execution_context.hpp; including it here would create a cycle
+// (execution_engine -> api_compat -> image_loader -> vfs_process needs
+// ProcessManager), so the hooks use forward declarations and
+// ManagedProcess holds its TlsLifecycle behind a unique_ptr.
+namespace exec {
+class ExecutionContext;
+class IExecutionEngine;
+class TlsLifecycle;
+enum class TlsCallbackReason : std::uint32_t;
+struct TlsCallbackResult;
+}  // namespace exec
 
 // ── resource accounting ───────────────────────────────────────────────────
 
@@ -82,6 +96,21 @@ public:
     AddressSpace& address_space() { return *space_; }
     const AddressSpace& address_space() const { return *space_; }
 
+    // Process-serialized XMem operations. The first successful allocation
+    // creates the process-owned arena; later arena-size/budget arguments are
+    // ignored because the process has one allocator for its lifetime.
+    Result<std::uint64_t> allocate_xmem(
+        std::uint64_t size, std::uint64_t alignment, std::string tag,
+        bool zero_initialize, std::uint64_t arena_size = 4ull << 20,
+        std::uint64_t max_bytes = 0);
+    Result<void> free_xmem(std::uint64_t guest_address, bool scrub = false);
+    Result<XMemAllocation> query_xmem(std::uint64_t guest_address) const;
+    Result<MemoryAllocator::Stats> xmem_stats() const;
+
+    // ProcessManager calls this only after all guest threads have exited and
+    // before releasing the process AddressSpace.
+    void release_process_allocators();
+
     // Modules (M1/M2 descriptors).
     Result<void> add_module_descriptor(const ModuleDescriptor& mod);
     std::vector<ModuleDescriptor> module_descriptors() const;
@@ -92,6 +121,16 @@ public:
     Result<void> attach_thread(std::uint64_t thread_obj_id);
     Result<void> detach_thread(std::uint64_t thread_obj_id);
     std::vector<std::uint64_t> thread_ids() const;
+
+    // ── TLS lifecycle state (M11 Phase 2) ─────────────────────────────
+    // Process-wide module plans in load order + the thread ids that
+    // already received THREAD_ATTACH. All access under detail_lock_.
+    // Held behind a unique_ptr: the type is forward-declared here
+    // (including execution_context.hpp would create an include cycle).
+    exec::TlsLifecycle& tls_lifecycle();
+    const exec::TlsLifecycle& tls_lifecycle() const;
+    bool tls_thread_attached(std::uint64_t thread_obj_id) const;
+    void set_tls_thread_attached(std::uint64_t thread_obj_id, bool attached);
 
     // Per-process stats (consistent snapshot under one lock).
     ResourceStats stats() const;
@@ -107,9 +146,16 @@ private:
     const std::uint64_t pid_;
     const std::string image_name_;
     std::unique_ptr<AddressSpace> space_;
+    // Destroyed before space_: GuestXMemAllocator borrows the AddressSpace.
+    std::unique_ptr<IXMemAllocator> xmem_allocator_;
     mutable std::mutex detail_lock_;
     std::vector<ModuleDescriptor> modules_;
     std::vector<std::uint64_t> threads_;
+    // TLS lifecycle plans + thread-attach bookkeeping (M11 Phase 2).
+    // tls_lifecycle_ is mutable: const readers lazily materialize an
+    // empty one (identical observable behavior).
+    mutable std::unique_ptr<exec::TlsLifecycle> tls_lifecycle_;
+    std::vector<std::uint64_t> tls_attached_threads_;
     // Threads paused by ProcessManager (not manually suspended beforehand).
     std::vector<std::uint64_t> process_suspended_threads_;
 };
@@ -144,11 +190,55 @@ public:
     Result<void> resume_process(Handle process);
     // terminate_process: drives the EXACT cleanup ordering (header top).
     // Observers run only after cleanup succeeds and state becomes Terminated.
+    // When a TLS detach runner is registered (set_tls_detach_runner) and
+    // the process has TLS modules, ProcessDetach runs after guest threads
+    // exit and before handles/memory are released.
     Result<void> terminate_process(Handle process, std::uint64_t exit_code);
 
-    // Observers receive the stable process ID and execute under the manager
-    // lock. They must be short, non-throwing, and MUST NOT re-enter
-    // ProcessManager. Unregistration waits for any active callback to finish.
+    // ── TLS lifecycle hooks (M11 Phase 2) ─────────────────────────────
+    // The manager owns the per-process callback plans but no engine:
+    // callbacks run on the caller-supplied context+engine (bound to this
+    // process's address space). run_tls_process_attach is called between
+    // initialize_process() and start_process(): ProcessAttach for every
+    // registered module in load order; failure is returned typed (the
+    // process is still Initializing, so the caller can fail it). The
+    // context's process id must match.
+    Result<exec::TlsCallbackResult> run_tls_process_attach(
+        Handle process, exec::ExecutionContext& ctx,
+        exec::IExecutionEngine& engine);
+    // THREAD_ATTACH for every module in load order, tracked per thread
+    // object id: double attach rejects (AlreadyExists), matching
+    // ManagedProcess::attach_thread. Run before the thread body starts.
+    Result<exec::TlsCallbackResult> run_tls_thread_attach(
+        Handle process, std::uint64_t thread_obj_id,
+        exec::ExecutionContext& ctx, exec::IExecutionEngine& engine);
+    // THREAD_DETACH in reverse (LIFO) module order. Run after the thread
+    // body returned; detach without attach rejects (NotFound).
+    Result<exec::TlsCallbackResult> run_tls_thread_detach(
+        Handle process, std::uint64_t thread_obj_id,
+        exec::ExecutionContext& ctx, exec::IExecutionEngine& engine);
+    // ProcessDetach (LIFO) for every registered module; also callable
+    // directly for unload-style flows. Best-effort: failures aggregate
+    // in the result and never abort termination cleanup.
+    Result<exec::TlsCallbackResult> run_tls_process_detach(
+        Handle process, exec::ExecutionContext& ctx,
+        exec::IExecutionEngine& engine);
+    // Register the runner terminate_process uses for TLS ProcessDetach
+    // (the manager cannot invent an engine). The runner receives the
+    // process handle; it must create/bind a context+engine itself and
+    // call run_tls_process_detach. Runs without the manager lock, after
+    // guest threads exited, before handle/memory release. Failure of the
+    // runner itself does not abort termination (reported to stderr-style
+    // diags is NOT available here; it is swallowed by design — the
+    // cleanup ordering contract dominates). Registering nullptr clears.
+    void set_tls_detach_runner(
+        std::function<Result<exec::TlsCallbackResult>(
+            Handle process)> runner);
+
+    // Observers receive the stable process ID and execute WITHOUT the manager
+    // lock. They may call other ProcessManager methods. Unregistration removes
+    // the observer from future snapshots and waits for in-flight calls to end;
+    // an observer must not synchronously unregister itself.
     using ProcessExitObserver = std::function<void(std::uint64_t)>;
     Result<std::uint64_t> add_process_exit_observer(ProcessExitObserver observer);
     Result<void> remove_process_exit_observer(std::uint64_t observer_id);
@@ -204,16 +294,26 @@ public:
 
 private:
     ManagedProcess* find_locked(Handle process, RefGuard& guard_out) const;
+    // Shared TLS-hook validation (process exists; context belongs to it).
+    Result<ManagedProcess*> tls_hook_prelude(Handle process,
+                                             exec::ExecutionContext& ctx);
 
     ObjectManager& objects_;
     mutable std::mutex lock_;
     std::map<std::uint64_t, std::uint64_t> pid_to_object_id_;  // pid -> obj id
+    // TLS ProcessDetach runner for terminate_process (M11 Phase 2).
+    std::function<Result<exec::TlsCallbackResult>(Handle)> tls_detach_runner_;
     std::atomic<std::uint64_t> next_pid_{1};
     ResourceLimits limits_;
     // Spawn reservations counted while a thread is being registered/attached.
     // Protected by lock_ so concurrent spawns cannot bypass the global limit.
     std::uint64_t pending_threads_ = 0;
-    std::map<std::uint64_t, ProcessExitObserver> exit_observers_;
+    struct ExitObserverEntry {
+        ProcessExitObserver callback;
+        std::uint64_t active_calls = 0;  // protected by lock_
+    };
+    std::condition_variable observer_changed_;  // paired with lock_
+    std::map<std::uint64_t, std::shared_ptr<ExitObserverEntry>> exit_observers_;
     std::uint64_t next_exit_observer_ = 1;  // protected by lock_
     // Global totals maintained incrementally for fast limit checks.
     mutable std::atomic<std::uint64_t> committed_total_{0};

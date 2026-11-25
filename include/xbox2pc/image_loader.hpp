@@ -29,11 +29,10 @@
 //      invents Xbox APIs or binds host functions; a controlled test
 //      resolver (StaticResolver) serves synthetic modules for tests/CLI.
 //      Resolved/Unresolved/Unsupported/Invalid import states stay distinct.
-//   6. TLS: the PE TLS directory is validated and its template/index/
-//      callbacks are REPORTED (LoadDiagnostics); callbacks are never called
-//      by the loader (M6 exclusion). Per-thread TLS initialization is
-//      deferred: the M4 thread model has per-thread slots but no image-
-//      template copy path yet — reported as UnsupportedCapability.
+//   6. TLS: the PE TLS directory and initialized template are validated;
+//      template bytes, zero-fill, and AddressOfIndex RVA are retained in
+//      LoadDiagnostics. ExecutionContext materializes a per-thread block.
+//      TLS callbacks are counted but never called by the loader.
 //   7. Lifecycle: LoadState machine (Created/Validating/Allocating/
 //      Mapping/Relocating/ResolvingImports/Preparing/Prepared/Failed/
 //      Unloaded); every failure rolls back ALL reserved regions (exact
@@ -260,6 +259,9 @@ struct LoadDiagnostics {
     bool tls_index_assigned = false;       // synthetic index allocation
     std::uint32_t tls_index = 0;
     std::uint64_t tls_template_size = 0;
+    std::uint32_t tls_index_slot_rva = 0;
+    std::uint32_t tls_zero_fill_size = 0;
+    std::vector<std::uint8_t> tls_template_bytes;
     bool has_tls = false;
 
     // Capabilities the image requested but this runtime cannot express
@@ -501,11 +503,11 @@ struct TlsInfo {
     std::uint64_t raw_data_end_rva = 0;
     std::uint64_t template_size = 0;   // end - start (file-backed template)
     std::uint64_t template_rva = 0;
-    std::uint32_t index_slot_rva = 0;  // StartAddressOfRawData in PE32+ is
-                                       // a VA; see decode notes (docs).
+    std::uint32_t index_slot_rva = 0;  // AddressOfIndex RVA
     std::uint64_t callbacks_va = 0;
     std::uint32_t callback_count = 0;
     std::uint32_t zero_fill_size = 0;  // SizeOfZeroFill
+    std::vector<std::uint8_t> template_bytes; // validated initialized-data bytes
 };
 
 // Decode + validate the TLS directory (PE32+ layout). Reports callbacks

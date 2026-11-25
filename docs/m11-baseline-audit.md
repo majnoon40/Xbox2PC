@@ -144,7 +144,9 @@ There is no TEB-backed last-error slot and no registered `SetLastError`/`GetLast
 
 Generation checks reject stale slot reuse; table IDs prevent a token from one table resolving in another table. Each `HandleTable` has a 32K-slot maximum. There is a runtime root table and process-owned tables.
 
-This representation is not the M11 format requirement: the object type occupies the low bits, so the raw value is not guaranteed to be a nonzero multiple of four. For example, built-in Event, Mutex, and Semaphore type IDs are 3, 4, and 5 (`include/xbox2pc/runtime_object.hpp:24-34`).
+This representation was not the M11 format requirement: the object type occupied the low bits, so the raw value was not guaranteed to be a nonzero multiple of four. For example, built-in Event, Mutex, and Semaphore type IDs are 3, 4, and 5 (`include/xbox2pc/runtime_object.hpp:24-34`).
+
+**M11 fix (landed):** the layout is now `[table:9][index:15][generation:29][type:9][tag:2=0]`. The low two bits are a reserved alignment tag, always zero — every nonzero handle the runtime issues is a multiple of four, mirroring Windows kernel HANDLE tag bits. Lookups (and rights/inheritability queries) reject a nonzero tag as `InvalidHandle` before any slot resolution, so misaligned forged values never resolve. Generation wrapped from 31 to 29 bits (still ~536M reuses per slot; the wrap skips zero so an in-use slot never presents generation 0).
 
 ### Current service ownership is split
 
@@ -159,6 +161,30 @@ Consequently, numerically equal values can exist in the task-queue token space a
 ### M11 implication
 
 The unified table is not a small wrapper around the current maps. It must become the authoritative per-process registration/lookup/close path for synchronization objects, task queues, and later object types. The current raw encoding also needs to be reconciled with the M11 alignment requirement while preserving stale-generation and cross-process rejection.
+
+## M11 implementation update (2026-11-24)
+
+The baseline observations below describe the audited pre-M11 implementation.
+The consolidated M11 branch now changes one Phase 7 item:
+
+- Process-exit observers are snapshotted and pinned under
+  `ProcessManager::lock_`, then invoked after releasing that lock.
+- Removing an observer prevents future snapshots and waits for any already
+  active callback to finish.
+- A regression test verifies an observer can call `process_count()` without
+  deadlocking and that unregistration drains an active callback.
+- An observer must not synchronously unregister itself; that would wait for
+  its own active invocation.
+
+This does **not** complete Phase 7. The task-queue infinite-wait termination
+problem described below was addressed in a later M11 implementation update:
+the execution bridge now propagates the cooperative cancellation state into
+API dispatch, and manual task-queue dispatch checks it on bounded 2 ms wait
+intervals. A regression test covers cancellation of an otherwise idle
+infinite dispatch. The global lock-order policy still needs a broader audit
+and tests.
+
+---
 
 ## 5. Lock ownership and observed lock order
 
@@ -209,6 +235,20 @@ The process-exit observer that calls `TaskQueueService::release_process` is invo
 
 **Conclusion:** the M11 termination test must cover every blocking guest-facing service, not only `WaitForSingleObject`. Task-queue dispatch needs a pre-teardown cancellation/wake path or another lifecycle arrangement that breaks the cycle without freeing guest state early.
 
+**Update (2026-11-24, M11 branch):** the task-queue dispatch cancellation gap
+described above has been addressed. The execution bridge propagates the
+managed execution gate's cancellation predicate into API dispatch through
+`ApiContext`, and manual task-queue dispatch checks it during bounded 2 ms
+wait intervals. Cancellation returns a typed `ThreadTerminated` result so the
+guest execution path unwinds and ProcessManager can complete its join. This
+is polling rather than a registered task-queue waker; wake latency is bounded
+by the polling interval.
+
+**Remaining validation:** the dedicated idle/infinite-dispatch cancellation
+regression exists. It still needs confirmation on the current CI run and
+end-to-end stress coverage under TSAN.
+
+
 ## 7. Loader performance and memory at ~600k relocations and ~180 MB images
 
 ### Current bounds and data flow
@@ -258,3 +298,22 @@ The audit supports the following constraints for later M11 design work; it does 
 6. Keep unsupported APIs and platform imports explicitly unsupported/partial until their behavior and tests exist.
 
 **No feature code was changed during Phase 0.** The “what broke in M1–M10” deliverable remains a separate final-audit artifact and should be based on confirmed defects and their fixing commits, not reconstructed from memory.
+
+---
+
+### TLS callback validation hardening (2026-11-24)
+
+The M11 follow-up now rejects the complete TLS callback plan if any non-null callback VA is not executable mapped guest memory. The previous behavior counted and skipped invalid entries, which could silently run a partial callback sequence and leave module initialization inconsistent. A regression test covers a readable callback array containing a non-executable target. This does not complete automatic process/thread attach-detach lifecycle wiring; callback execution is still an explicit helper and must be integrated by the process/thread lifecycle owner.
+
+
+### TEB-backed last-error APIs (2026-11-24)
+
+The M11 branch now registers `kernel32!SetLastError` and
+`kernel32!GetLastError` implementations. They use the per-call
+`ApiContext` accessors wired by the execution engine to the calling
+`GuestThreadEnvironment`; calls without an initialized guest TEB are
+rejected instead of silently using process-global or host-thread state.
+The descriptors are marked fully implemented for this modeled per-thread
+contract, and dispatch tests verify independent values for two guest threads
+plus rejection when no TEB-backed accessors are supplied. This does not imply
+that native GS-relative guest execution is implemented.

@@ -164,6 +164,21 @@ struct ExecutionRequest {
     abi::CallSpec entry_spec;
     // Optional cooperative suspend/resume control shared with the owning thread.
     std::shared_ptr<ExecutionControl> control;
+
+    // ── M11 Phase 6: exception dispatch context ─────────────────────────
+    // When an imported API raises a guest exception (RaiseException), the
+    // engine searches this image's unwind data for a language handler.
+    // All fields are guest VAs / copies; no host pointers. An empty
+    // unwind_image (size 0) disables the search (the run faults).
+    struct UnwindContext {
+        // A COPY of the mapped image bytes the .pdata/.xdata RVAs resolve
+        // against (loader-owned file bytes; rva_to_offset maps through the
+        // PE section table, so the copy needs no address-space rebasing).
+        std::vector<std::uint8_t> unwind_image;
+        std::uint64_t image_base = 0;      // guest VA base of the mapping
+        std::uint64_t image_size = 0;      // mapped size (extent check)
+    };
+    UnwindContext unwind;
 };
 
 class IExecutionEngine {
@@ -188,6 +203,13 @@ public:
         (void)thread_id;
         (void)space;
         return Result<void>::ok_result();
+    }
+    virtual Result<void> bind_execution_context(std::uint64_t process_id,
+                                                std::uint64_t thread_id,
+                                                AddressSpace& space,
+                                                GuestThreadEnvironment* thread_environment) {
+        (void)thread_environment;
+        return bind_execution_context(process_id, thread_id, space);
     }
 
     virtual ExecutionResult run(const ExecutionRequest& req,
@@ -228,12 +250,19 @@ public:
     Result<void> bind_execution_context(std::uint64_t process_id,
                                         std::uint64_t thread_id,
                                         AddressSpace& space) override {
+        return bind_execution_context(process_id, thread_id, space, nullptr);
+    }
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space,
+                                        GuestThreadEnvironment* thread_environment) override {
         if (process_id == 0 || thread_id == 0) {
             return Result<void>(RuntimeErrc::InvalidArgument,
                                 "guest process and thread identities must be nonzero");
         }
         bind_space(space);
         bind_process(process_id, thread_id);
+        thread_environment_ = thread_environment;
         return Result<void>::ok_result();
     }
 
@@ -255,6 +284,40 @@ private:
     std::unique_ptr<guest::GuestMemory> mem_;
     std::uint64_t pid_ = 0;
     std::uint64_t tid_ = 0;
+    GuestThreadEnvironment* thread_environment_ = nullptr;
+};
+
+// First native-host execution slice. This backend is intentionally narrow:
+// x86-64 Linux, up to four integer-like register arguments (RCX/RDX/R8/R9),
+// no pointer/FP/stack arguments, imports, GS, or SEH, and a bounded child
+// process lifetime. The child contains host faults; it is NOT a security
+// sandbox and must only be used with trusted, unencumbered test code.
+class NativeExecutionBackend final : public IExecutionEngine {
+public:
+    explicit NativeExecutionBackend(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
+    const char* engine_kind() const override { return "native-host"; }
+    const char* engine_description() const override {
+        return "x86-64 Linux native entry execution in a fault-contained child process "
+               "(no imports, GS/TLS, SEH, or persistent guest writes)";
+    }
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space) override;
+    Result<void> bind_execution_context(std::uint64_t process_id,
+                                        std::uint64_t thread_id,
+                                        AddressSpace& space,
+                                        GuestThreadEnvironment* thread_environment) override;
+    ExecutionResult run(const ExecutionRequest& req, cpu::CpuState& io_cpu,
+                        const std::atomic<bool>& interrupted) override;
+    bool supports_single_step() const override { return false; }
+    Result<std::uint64_t> single_step(cpu::CpuState& io_cpu,
+                                      const ExecutionRequest& req) override;
+private:
+    AddressSpace* space_ = nullptr;
+    std::uint64_t pid_ = 0;
+    std::uint64_t tid_ = 0;
+    std::chrono::milliseconds timeout_;
 };
 
 // ── the marshalling bridge ────────────────────────────────────────────────
@@ -299,7 +362,9 @@ Result<MarshalResult> marshal_and_dispatch(cpu::CpuState& io_cpu,
                                            std::uint32_t depth,
                                            std::uint32_t max_depth,
                                            std::uint64_t tid = 0,
-                                           const api::GuestCallbackInvoker& invoke_callback = {});
+                                           const api::GuestCallbackInvoker& invoke_callback = {},
+                                           GuestThreadEnvironment* thread_environment = nullptr,
+                                           const std::function<bool()>& cancellation_requested = {});
 
 // ── completion sentinel + binding range ──────────────────────────────────
 

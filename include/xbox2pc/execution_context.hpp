@@ -48,10 +48,12 @@
 #include <string>
 #include <vector>
 
+#include "xbox2pc/pe_parser.hpp"
 #include "xbox2pc/execution_engine.hpp"
 #include "xbox2pc/guest_cpu_state.hpp"
 #include "xbox2pc/guest_memory.hpp"
 #include "xbox2pc/guest_exceptions.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/memory_management.hpp"
 #include "xbox2pc/runtime_object.hpp"
@@ -92,12 +94,14 @@ public:
 
     ExecutionContext(std::uint64_t process_id, std::uint64_t thread_id,
                      AddressSpace& space, api::ApiRegistry& api_reg,
-                     ExecutionConfig cfg, std::string name);
+                     ExecutionConfig cfg, std::string name,
+                     std::shared_ptr<GuestProcessEnvironment> process_environment = nullptr);
     // Managed-thread constructor: derives both guest identities and binds
     // the thread's cooperative gate, preventing caller-supplied TID drift.
     ExecutionContext(RtThread& thread, AddressSpace& space,
                      api::ApiRegistry& api_reg, ExecutionConfig cfg,
-                     std::string name);
+                     std::string name,
+                     std::shared_ptr<GuestProcessEnvironment> process_environment = nullptr);
     ~ExecutionContext() override;
 
     // ── lifecycle ──
@@ -142,6 +146,10 @@ public:
     guest::GuestMemory& memory() { return mem_; }
     std::shared_ptr<ExecutionControl> execution_control() const;
     std::uint32_t run_count() const { return runs_; }
+    const GuestThreadEnvironment* guest_environment() const { return guest_environment_.get(); }
+    GuestThreadEnvironment* guest_environment_mut() { return guest_environment_.get(); }
+    // Guest GS base for the future native-entry thunk; the interpreter does not consume it.
+    std::uint64_t guest_gs_base() const { return guest_environment_ ? guest_environment_->teb_base() : 0; }
 
 private:
     std::uint64_t process_id_;
@@ -150,6 +158,8 @@ private:
     api::ApiRegistry& api_reg_;
     ExecutionConfig cfg_;
     guest::GuestMemory mem_;
+    std::shared_ptr<GuestProcessEnvironment> process_environment_;
+    std::unique_ptr<GuestThreadEnvironment> guest_environment_;
     cpu::CpuState cpu_;
     Info info_;
     ContextState state_ = ContextState::Created;
@@ -184,7 +194,9 @@ struct TlsCallback {
 // mapped regions, preserves order, and reports problems typed.
 struct TlsCallbackPlan {
     std::vector<TlsCallback> callbacks;
-    std::uint32_t rejected_count = 0;   // invalid entries dropped
+    // Retained for source compatibility; malformed entries reject the whole plan,
+    // so a successful plan always has rejected_count == 0.
+    std::uint32_t rejected_count = 0;
     std::string note;                    // validation summary
 };
 Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
@@ -196,6 +208,13 @@ Result<TlsCallbackPlan> plan_tls_callbacks(guest::GuestMemory& mem,
 // per-callback results; a callback failure is reported, NOT silently
 // ignored; recursion is impossible (one pass, plan-level guard), and
 // partial failure still completes the remaining cleanup.
+enum class TlsCallbackReason : std::uint32_t {
+    ProcessDetach = 0,
+    ProcessAttach = 1,
+    ThreadAttach = 2,
+    ThreadDetach = 3,
+};
+
 struct TlsCallbackResult {
     std::uint32_t executed = 0;
     std::uint32_t failed = 0;
@@ -203,7 +222,52 @@ struct TlsCallbackResult {
 };
 Result<TlsCallbackResult> execute_tls_callbacks(
     ExecutionContext& ctx, const TlsCallbackPlan& plan,
-    IExecutionEngine& engine, std::uint64_t image_handle_va);
+    IExecutionEngine& engine, std::uint64_t image_handle_va,
+    TlsCallbackReason reason = TlsCallbackReason::ProcessAttach);
+
+// ── TLS lifecycle orchestration (M11 Phase 2) ─────────────────────────────
+// Drives per-module TLS callback plans from process/thread lifecycle
+// points instead of the manual helper. Modules register plans in load
+// order; attach reasons run in load order, detach reasons in reverse
+// (LIFO), matching the documented loader semantics.
+
+class TlsLifecycle {
+public:
+    // Register a module's callback plan. Image bases uniquely identify
+    // modules; registering the same base twice replaces the plan (the
+    // loader re-loads the same image only after unload, whose detach
+    // already ran).
+    Result<void> on_image_loaded(std::uint64_t image_base,
+                                 TlsCallbackPlan plan);
+
+    // End-to-end registration for a loaded image: decode the TLS
+    // directory from the file bytes, plan its callbacks against the
+    // mapped guest memory, and register the plan under image_base.
+    // Returns the planned callback count (0 when the image has no TLS
+    // directory). Plan validation failures (non-executable callback
+    // targets, count over the config limit, unmapped arrays) reject
+    // atomically WITHOUT registering a partial plan.
+    Result<std::uint32_t> register_image(const pe::PeImage& img,
+                                         const std::uint8_t* file,
+                                         std::size_t file_size,
+                                         std::uint64_t image_base,
+                                         guest::GuestMemory& mem,
+                                         const ExecutionConfig& cfg);
+
+    // Run every registered module's callbacks for the given reason.
+    // Attach reasons iterate in load order; detach reasons in reverse.
+    // A failing callback does not abort the walk: results aggregate
+    // executed/failed counts and retain the first failure.
+    Result<TlsCallbackResult> run(ExecutionContext& ctx,
+                                  IExecutionEngine& engine,
+                                  TlsCallbackReason reason) const;
+
+    std::size_t module_count() const { return modules_.size(); }
+
+private:
+    // Ordered by registration (load order).
+    std::vector<std::pair<std::uint64_t, TlsCallbackPlan>> modules_;
+};
 
 // ── limits registry (runtime-wide, thread-safe) ─────────────────────────
 

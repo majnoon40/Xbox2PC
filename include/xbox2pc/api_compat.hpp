@@ -66,6 +66,8 @@
 #include "xbox2pc/runtime_error.hpp"
 #include "xbox2pc/service_registry.hpp"
 
+namespace xbox2pc::rt::exec { class GuestThreadEnvironment; }
+
 namespace xbox2pc::rt::api {
 
 // ── calling conventions (metadata layer) ──────────────────────────────────
@@ -136,6 +138,8 @@ using GuestCallbackInvoker = std::function<Result<void>(std::uint64_t callback_v
     std::uint64_t callback_context, bool canceled)>;
 
 struct ApiContext {
+    std::function<Result<void>(std::uint32_t)> set_last_error;
+    std::function<Result<std::uint32_t>()> get_last_error;
     // The calling process (0 = runtime-global / no process).
     std::uint64_t process_id = 0;
     // Calling guest thread (0 = unavailable/runtime-global). Distinct from
@@ -155,6 +159,8 @@ struct ApiContext {
     // Lets manual task-queue dispatch re-enter the same bounded guest backend
     // without exposing a host function pointer to guest memory.
     GuestCallbackInvoker invoke_guest_callback;
+    // True when the managed guest thread's cooperative execution has been canceled.
+    std::function<bool()> cancellation_requested;
 };
 
 struct ApiCallResult {
@@ -175,6 +181,13 @@ struct ApiCallResult {
     static constexpr std::size_t kMaxOutBytes = 256;
     std::array<std::uint8_t, kMaxOutBytes> out_bytes = {};
     std::size_t out_bytes_size = 0;
+    // M11 Phase 6: the implementation raised a guest exception instead of
+    // returning (RaiseException semantics). The bridge converts this into
+    // the engine's exception-dispatch path; code/flags mirror the
+    // documented EXCEPTION_RECORD fields the runtime can carry.
+    bool raise_guest_exception = false;
+    std::uint32_t exception_code = 0;
+    std::uint32_t exception_flags = 0;
 };
 
 // One implementation: a controlled runtime function.

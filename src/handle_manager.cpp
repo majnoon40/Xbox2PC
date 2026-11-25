@@ -48,11 +48,12 @@ ObjectManager* global_manager() { return g_table_manager; }
 
 std::uint16_t allocate_table_id() {
     const std::uint16_t id = g_next_table_id.fetch_add(1, std::memory_order_acq_rel);
-    // 9-bit space: 0 is the runtime root table; process tables take 1..511.
-    // Exhaustion wraps and is REJECTED (returns the reserved 0), which the
-    // HandleTable(owner, id) ctor maps to a fresh allocation; documented
-    // limit: at most 511 process tables live concurrently.
-    if (id == 0 || id > 511) return 0;
+    // 5-bit space (M11.5 32-bit handle layout): 0 is the runtime root
+    // table; process tables take 1..31. Exhaustion wraps and is REJECTED
+    // (returns the reserved 0), which the HandleTable(owner, id) ctor
+    // maps to a fresh allocation; documented limit: at most 31 process
+    // tables live concurrently.
+    if (id == 0 || id > HandleTable::kMaxTableId) return 0;
     return id;
 }
 
@@ -77,6 +78,21 @@ Result<Handle> HandleTable::create_with_rights(RuntimeObject& obj,
         return Result<Handle>(RuntimeErrc::HandleTableFull,
                               "handle table exhausted (" +
                                   std::to_string(kMaxSlots) + " slots)");
+    }
+    // M11.5 32-bit layout: the type field is 6 bits. A type id above 63
+    // cannot be encoded; fail closed (the object can still be used via
+    // object-manager id lookups, it just can never receive a handle).
+    if (static_cast<std::uint16_t>(obj.type_id()) > 0x3F) {
+        return Result<Handle>(
+            RuntimeErrc::InvalidArgument,
+            "object type " + std::to_string(static_cast<unsigned>(obj.type_id())) +
+                " exceeds the 6-bit handle type field (63)");
+    }
+    // M11.5 table id bound: ids above 31 cannot be encoded either.
+    if (table_id_ > kMaxTableId) {
+        return Result<Handle>(RuntimeErrc::InvalidArgument,
+                              "table id " + std::to_string(table_id_) +
+                                  " exceeds the 5-bit handle table field (31)");
     }
     std::uint32_t index;
     std::uint32_t generation;
@@ -115,6 +131,18 @@ Result<RefGuard> HandleTable::lookup(Handle h) const {
     if (h.is_null()) {
         return Result<RefGuard>(RuntimeErrc::InvalidHandle, "null handle");
     }
+    // M11.5 pseudo-handles: reserved Win32-style values never resolve
+    // through a table (API layers interpret them per-Call instead).
+    if (h.is_pseudo()) {
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle,
+                                "pseudo-handle has no table slot");
+    }
+    // M11.5 32-bit constraint: any bit above 32 means the value was not
+    // issued by this runtime (issued handles always fit in 32 bits).
+    if (h.raw() > 0xFFFFFFFFull) {
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle,
+                                "handle exceeds the 32-bit handle space");
+    }
     // M4: cross-table isolation — a foreign table's handle NEVER resolves
     // here even if index/generation/type happen to match.
     if (h.table_id() != table_id_) {
@@ -122,6 +150,13 @@ Result<RefGuard> HandleTable::lookup(Handle h) const {
             RuntimeErrc::InvalidHandle,
             "handle belongs to table " + std::to_string(h.table_id()) +
                 ", this is table " + std::to_string(table_id_));
+    }
+    // M11 alignment invariant: the low two tag bits must be zero. A raw
+    // value with a nonzero tag is forged or corrupted, not a handle this
+    // runtime ever issued.
+    if (h.tag() != 0) {
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle,
+                                "handle is not four-aligned (bad tag bits)");
     }
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) {
@@ -150,7 +185,8 @@ Result<RefGuard> HandleTable::lookup(Handle h) const {
 }
 
 AccessRights HandleTable::rights_of(Handle h) const {
-    if (h.is_null() || h.table_id() != table_id_) return AccessRights::None;
+    if (h.is_null() || h.is_pseudo() || h.raw() > 0xFFFFFFFFull ||
+        h.tag() != 0 || h.table_id() != table_id_) return AccessRights::None;
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return AccessRights::None;
     const Slot& s = slots_[h.index()];
@@ -161,7 +197,8 @@ AccessRights HandleTable::rights_of(Handle h) const {
 }
 
 bool HandleTable::inheritable(Handle h) const {
-    if (h.is_null() || h.table_id() != table_id_) return false;
+    if (h.is_null() || h.is_pseudo() || h.raw() > 0xFFFFFFFFull ||
+        h.tag() != 0 || h.table_id() != table_id_) return false;
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return false;
     const Slot& s = slots_[h.index()];
@@ -172,6 +209,15 @@ bool HandleTable::inheritable(Handle h) const {
 Result<void> HandleTable::close(Handle h) {
     if (h.is_null()) {
         return Result<void>(RuntimeErrc::InvalidHandle, "null handle");
+    }
+    // M11.5: pseudo-handles and >32-bit values are never closeable slots.
+    if (h.is_pseudo()) {
+        return Result<void>(RuntimeErrc::InvalidHandle,
+                            "pseudo-handle has no table slot");
+    }
+    if (h.raw() > 0xFFFFFFFFull) {
+        return Result<void>(RuntimeErrc::InvalidHandle,
+                            "handle exceeds the 32-bit handle space");
     }
     if (h.table_id() != table_id_) {
         return Result<void>(RuntimeErrc::InvalidHandle,
@@ -213,6 +259,15 @@ Result<Handle> HandleTable::duplicate(Handle h, AccessRights reduced,
                                        bool inheritable_flag) {
     if (h.is_null()) {
         return Result<Handle>(RuntimeErrc::InvalidHandle, "null handle");
+    }
+    // M11.5: pseudo-handles and >32-bit values are never duplicable slots.
+    if (h.is_pseudo()) {
+        return Result<Handle>(RuntimeErrc::InvalidHandle,
+                              "pseudo-handle has no table slot");
+    }
+    if (h.raw() > 0xFFFFFFFFull) {
+        return Result<Handle>(RuntimeErrc::InvalidHandle,
+                              "handle exceeds the 32-bit handle space");
     }
     if (h.table_id() != table_id_) {
         return Result<Handle>(RuntimeErrc::InvalidHandle,
@@ -276,7 +331,8 @@ Result<Handle> HandleTable::duplicate(Handle h) {
 }
 
 bool HandleTable::validate_type(Handle h, TypeId expected) const {
-    if (h.is_null() || h.table_id() != table_id_) return false;
+    if (h.is_null() || h.is_pseudo() || h.raw() > 0xFFFFFFFFull ||
+        h.table_id() != table_id_) return false;
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return false;
     const Slot& s = slots_[h.index()];
