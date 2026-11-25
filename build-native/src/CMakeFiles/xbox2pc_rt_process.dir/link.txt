@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_rt_process.a CMakeFiles/xbox2pc_rt_process.dir/process_model.cpp.o
+/usr/bin/ranlib libxbox2pc_rt_process.a

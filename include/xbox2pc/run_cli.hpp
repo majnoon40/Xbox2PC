@@ -18,6 +18,7 @@ namespace xbox2pc::cli {
 // file). When json_out is provided, a structured result object is
 // written there (outcome, instructions, return_value, exit_code,
 // api_calls, regions_after_terminate).
-int run_file(const std::string& file, const std::optional<std::string>& json_out);
+int run_file(const std::string& file, const std::optional<std::string>& json_out,
+             const std::string& backend = "deterministic");
 
 }  // namespace xbox2pc::cli

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_dep_analyzer.a CMakeFiles/xbox2pc_dep_analyzer.dir/dep_analyzer.cpp.o
+/usr/bin/ranlib libxbox2pc_dep_analyzer.a

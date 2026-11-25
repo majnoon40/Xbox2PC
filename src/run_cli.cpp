@@ -67,7 +67,8 @@ struct RunWorld {
 
 }  // namespace
 
-int run_file(const std::string& file, const std::optional<std::string>& json_out) {
+int run_file(const std::string& file, const std::optional<std::string>& json_out,
+             const std::string& backend) {
     std::ifstream in(file, std::ios::binary);
     if (!in.good()) {
         std::fprintf(stderr, "error: cannot open %s\n", file.c_str());
@@ -127,16 +128,50 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
                      req.error_string().c_str());
         return 1;
     }
-    DeterministicBackend engine(w.reg, cfg);
-    engine.bind_space(proc->address_space());
-    engine.bind_process(1, 1);
     // M11 Phase 6: bind the raw image bytes so RaiseException dispatch can
     // search .pdata/.xdata (RVAs resolve through the file's section table).
     req.value().unwind.unwind_image = image;
     req.value().unwind.image_base = loaded->layout().actual_base;
     req.value().unwind.image_size = loaded->layout().mapped_size;
+    // M11 Phase 5: IAT VAs for the native import ring (same order as the
+    // loader-reported bindings).
+    for (const auto& imported : ld.imports) {
+        if (imported.status == rt::loader::ImportStatus::Resolved && imported.value != 0)
+            req.value().api_iat_vas.push_back(imported.iat_va);
+    }
+    if (ctx.guest_environment() != nullptr)
+        req.value().guest_teb_va = ctx.guest_gs_base();
     std::atomic<bool> stop{false};
-    auto res = ctx.invoke(req.value(), engine, stop);
+    rt::Result<rt::exec::ExecutionResult> res_holder =
+        rt::Result<rt::exec::ExecutionResult>(
+            rt::RuntimeErrc::InvalidState, "no backend ran");
+    const char* used_backend = "deterministic-run";
+    if (backend != "deterministic" && backend != "native") {
+        std::fprintf(stderr, "error: unknown backend '%s' (deterministic | native)\n",
+                     backend.c_str());
+        return 2;
+    }
+#if XBOX2PC_NATIVE_EXECUTION_ENABLED
+    if (backend == "native") {
+        rt::exec::NativeExecutionBackend engine(w.reg, std::chrono::milliseconds(5000));
+        engine.bind_execution_context(1, 1, proc->address_space());
+        res_holder = ctx.invoke(req.value(), engine, stop);
+        used_backend = "native-run";
+    } else {
+#else
+    if (backend == "native") {
+        std::fprintf(stderr, "error: --backend=native requires a build with -DXBOX2PC_NATIVE_EXECUTION=ON\n");
+        return 2;
+    }
+    {
+#endif
+        DeterministicBackend engine(w.reg, cfg);
+        engine.bind_space(proc->address_space());
+        engine.bind_process(1, 1);
+        res_holder = ctx.invoke(req.value(), engine, stop);
+        used_backend = "deterministic-run";
+    }
+    const auto& res = res_holder;
     const bool ok = res.ok() && res.value().outcome == Outcome::Returned;
     const auto rax = res.ok() ? res.value().return_value : 0;
     (void)ctx.destroy();
@@ -148,7 +183,7 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
     if (json_out.has_value()) {
         Json j = Json::object();
         j.set("file", file);
-        j.set("backend", "deterministic-run");
+        j.set("backend", used_backend);
         j.set("outcome", res.ok() ? rt::exec::outcome_to_name(res.value().outcome) : "error");
         j.set("instructions", res.ok() ? res.value().instructions_executed : 0);
         j.set("return_value", rax);

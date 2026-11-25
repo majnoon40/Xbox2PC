@@ -2817,16 +2817,24 @@ int main(int argc, char** argv) {
     if (m9_binary_result >= 0) return m9_binary_result;
     if (argc >= 2 && std::strcmp(argv[1], "run") == 0) {
         if (argc < 3) {
-            std::fprintf(stderr, "usage: xbox2pc run <file> [--json <out>]\n");
+            std::fprintf(stderr, "usage: xbox2pc run <file> [--backend deterministic|native] [--json <out>]\n");
             return 2;
         }
         std::optional<std::string> json_out;
-        if (argc == 5 && std::strcmp(argv[3], "--json") == 0) json_out = argv[4];
-        else if (argc != 3) {
-            std::fprintf(stderr, "error: invalid run arguments\n");
-            return 2;
+        std::string backend = "deterministic";
+        int file_arg = 2;
+        for (int i = 3; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+                backend = argv[++i];
+            } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
+                json_out = argv[++i];
+            } else {
+                std::fprintf(stderr, "error: invalid run arguments\n");
+                return 2;
+            }
         }
-        return xbox2pc::cli::run_file(argv[2], json_out);
+        (void)file_arg;
+        return xbox2pc::cli::run_file(argv[2], json_out, backend);
     }
     if (argc >= 2 && std::strcmp(argv[1], "interpreter-info") == 0) {
         std::optional<std::string> json_out;

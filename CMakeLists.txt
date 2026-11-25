@@ -23,6 +23,7 @@ find_package(Threads REQUIRED)
 
 add_subdirectory(src)
 
+option(XBOX2PC_NATIVE_EXECUTION "Enable the experimental native --backend=native run path (M11 Phase 5)" OFF)
 option(XBOX2PC_BUILD_TESTS "Build xbox2pc test suites" ON)
 if(XBOX2PC_BUILD_TESTS)
     enable_testing()

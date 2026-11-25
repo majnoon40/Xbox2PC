@@ -273,7 +273,13 @@ target_link_libraries(xbox2pc_rt_api PUBLIC
 target_compile_features(xbox2pc_rt_api PUBLIC cxx_std_20)
 
 # M11 Phase 9: shared `xbox2pc run` entry (CLI tool + integration tests).
-add_library(xbox2pc_rt_run_cli STATIC run_cli.cpp)
+if(XBOX2PC_NATIVE_EXECUTION)
+    add_library(xbox2pc_rt_run_cli STATIC run_cli.cpp)
+    target_compile_definitions(xbox2pc_rt_run_cli PUBLIC XBOX2PC_NATIVE_EXECUTION_ENABLED=1)
+else()
+    add_library(xbox2pc_rt_run_cli STATIC run_cli.cpp)
+    target_compile_definitions(xbox2pc_rt_run_cli PUBLIC XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
+endif()
 target_include_directories(xbox2pc_rt_run_cli PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_run_cli PUBLIC
     xbox2pc_core xbox2pc_rt_execution xbox2pc_rt_abi xbox2pc_rt_loader
