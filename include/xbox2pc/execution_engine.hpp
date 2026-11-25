@@ -165,6 +165,17 @@ struct ExecutionRequest {
     // Optional cooperative suspend/resume control shared with the owning thread.
     std::shared_ptr<ExecutionControl> control;
 
+    // ── M11 Phase 5: native import-call context ──────────────────────────
+    // Guest VAs of the IAT slots holding each api_bindings[i] value (same
+    // order). The native backend rewrites them to import thunks in the
+    // forked child. Entries may be 0 (binding not IAT-backed): those
+    // imports are dispatched only if the guest reaches them through the
+    // thunk page. Parent-side validated; never a host pointer.
+    std::vector<std::uint64_t> api_iat_vas;
+    // Guest VA of the mapped TEB for the executing thread (0 = none);
+    // the native child installs it as GS base.
+    std::uint64_t guest_teb_va = 0;
+
     // ── M11 Phase 6: exception dispatch context ─────────────────────────
     // When an imported API raises a guest exception (RaiseException), the
     // engine searches this image's unwind data for a language handler.
@@ -287,19 +298,27 @@ private:
     GuestThreadEnvironment* thread_environment_ = nullptr;
 };
 
-// First native-host execution slice. This backend is intentionally narrow:
-// x86-64 Linux, up to four integer-like register arguments (RCX/RDX/R8/R9),
-// no pointer/FP/stack arguments, imports, GS, or SEH, and a bounded child
-// process lifetime. The child contains host faults; it is NOT a security
-// sandbox and must only be used with trusted, unencumbered test code.
+// Native-host execution backend (M11.5 first slice + M11 Phase 5).
+//
+// Phase 5 supported boundary: x86-64 Linux forked child with a bounded
+// lifetime; guest imports dispatch through the M11.5 shared-memory ring
+// (ADR-0001) to the parent's ApiRegistry — the child never receives a
+// host function pointer; the mapped guest TEB is installed as the
+// child's GS base (arch_prctl); a thunk page at the synthetic binding
+// base plus child-side IAT rewrite route imported calls through the
+// ring; ExitProcess terminates the child with the guest exit code;
+// fatal child signals classify into structured guest faults. The child
+// contains host faults; it is NOT a security sandbox and must only be
+// used with trusted, unencumbered test code.
 class NativeExecutionBackend final : public IExecutionEngine {
 public:
     explicit NativeExecutionBackend(
+        api::ApiRegistry& registry,
         std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
     const char* engine_kind() const override { return "native-host"; }
     const char* engine_description() const override {
         return "x86-64 Linux native entry execution in a fault-contained child process "
-               "(no imports, GS/TLS, SEH, or persistent guest writes)";
+               "(import ring dispatch, guest TEB/GS, ExitProcess, structured faults)";
     }
     Result<void> bind_execution_context(std::uint64_t process_id,
                                         std::uint64_t thread_id,
@@ -314,9 +333,11 @@ public:
     Result<std::uint64_t> single_step(cpu::CpuState& io_cpu,
                                       const ExecutionRequest& req) override;
 private:
+    api::ApiRegistry& registry_;
     AddressSpace* space_ = nullptr;
     std::uint64_t pid_ = 0;
     std::uint64_t tid_ = 0;
+    GuestThreadEnvironment* thread_environment_ = nullptr;
     std::chrono::milliseconds timeout_;
 };
 

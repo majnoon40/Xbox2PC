@@ -2246,7 +2246,8 @@ TEST(NativeExecutionTest, RunsPositionIndependentReturnStubInFaultContainedChild
     std::memcpy(host.value(), code, sizeof(code)); // mov eax, 42; ret
     ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
 
-    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    api::ApiRegistry standalone_registry;
+    NativeExecutionBackend backend(standalone_registry, std::chrono::milliseconds(1000));
     ASSERT_TRUE(backend.bind_execution_context(0x71, 0x81, space).ok());
     ExecutionRequest req;
     req.entry_va = region.value();
@@ -2285,7 +2286,8 @@ TEST(NativeExecutionTest, PassesIntegerArgumentsInMicrosoftX64Registers) {
     std::memcpy(host.value(), code, sizeof(code));
     ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
 
-    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    api::ApiRegistry standalone_registry;
+    NativeExecutionBackend backend(standalone_registry, std::chrono::milliseconds(1000));
     ASSERT_TRUE(backend.bind_execution_context(0x74, 0x84, space).ok());
     ExecutionRequest req;
     req.entry_va = region.value();
@@ -2327,7 +2329,8 @@ TEST(NativeExecutionTest, CapturesInvalidInstructionWithoutCrashingParent) {
     const std::uint8_t code[] = {0x0F, 0x0B}; // UD2
     std::memcpy(host.value(), code, sizeof(code));
     ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
-    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    api::ApiRegistry standalone_registry;
+    NativeExecutionBackend backend(standalone_registry, std::chrono::milliseconds(1000));
     ASSERT_TRUE(backend.bind_execution_context(0x72, 0x82, space).ok());
     ExecutionRequest req;
     req.entry_va = region.value();
@@ -2362,7 +2365,8 @@ TEST(NativeExecutionTest, EnforcesChildExecutionDeadline) {
     const std::uint8_t code[] = {0xEB, 0xFE}; // jmp $
     std::memcpy(host.value(), code, sizeof(code));
     ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
-    NativeExecutionBackend backend(std::chrono::milliseconds(50));
+    api::ApiRegistry standalone_registry;
+    NativeExecutionBackend backend(standalone_registry, std::chrono::milliseconds(50));
     ASSERT_TRUE(backend.bind_execution_context(0x73, 0x83, space).ok());
     ExecutionRequest req;
     req.entry_va = region.value();
@@ -2409,7 +2413,7 @@ TEST(NativeExecutionTest, RunsNoImportPeEntryFromLoaderMappedImage) {
         image.size(), &resolver, load_diagnostics, loaded);
     ASSERT_TRUE(image_handle.ok()) << loaded.error;
 
-    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    NativeExecutionBackend backend(world.reg, std::chrono::milliseconds(1000));
     ASSERT_TRUE(backend.bind_execution_context(
         process->pid_value(), 0x84, process->address_space()).ok());
     ExecutionRequest req;
@@ -2451,7 +2455,8 @@ TEST(NativeExecutionTest, RejectsGuestStackRequests) {
     std::memcpy(host.value(), code, sizeof(code));
     ASSERT_TRUE(space.protect_region(region.value(), MemProtect::ReadExecute).ok());
 
-    NativeExecutionBackend backend(std::chrono::milliseconds(1000));
+    api::ApiRegistry standalone_registry;
+    NativeExecutionBackend backend(standalone_registry, std::chrono::milliseconds(1000));
     ASSERT_TRUE(backend.bind_execution_context(0x75, 0x85, space).ok());
     auto expect_rejected = [&](std::uint64_t stack_top, std::uint64_t stack_size) {
         ExecutionRequest req;
