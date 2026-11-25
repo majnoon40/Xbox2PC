@@ -48,6 +48,7 @@
 #include <string>
 #include <vector>
 
+#include "xbox2pc/pe_parser.hpp"
 #include "xbox2pc/execution_engine.hpp"
 #include "xbox2pc/guest_cpu_state.hpp"
 #include "xbox2pc/guest_memory.hpp"
@@ -238,6 +239,20 @@ public:
     // already ran).
     Result<void> on_image_loaded(std::uint64_t image_base,
                                  TlsCallbackPlan plan);
+
+    // End-to-end registration for a loaded image: decode the TLS
+    // directory from the file bytes, plan its callbacks against the
+    // mapped guest memory, and register the plan under image_base.
+    // Returns the planned callback count (0 when the image has no TLS
+    // directory). Plan validation failures (non-executable callback
+    // targets, count over the config limit, unmapped arrays) reject
+    // atomically WITHOUT registering a partial plan.
+    Result<std::uint32_t> register_image(const pe::PeImage& img,
+                                         const std::uint8_t* file,
+                                         std::size_t file_size,
+                                         std::uint64_t image_base,
+                                         guest::GuestMemory& mem,
+                                         const ExecutionConfig& cfg);
 
     // Run every registered module's callbacks for the given reason.
     // Attach reasons iterate in load order; detach reasons in reverse.

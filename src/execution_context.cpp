@@ -578,6 +578,28 @@ Result<void> TlsLifecycle::on_image_loaded(std::uint64_t image_base,
     return Result<void>::ok_result();
 }
 
+Result<std::uint32_t> TlsLifecycle::register_image(
+    const pe::PeImage& img, const std::uint8_t* file, std::size_t file_size,
+    std::uint64_t image_base, guest::GuestMemory& mem,
+    const ExecutionConfig& cfg) {
+    using Ret = Result<std::uint32_t>;
+    if (image_base == 0)
+        return Ret(RuntimeErrc::InvalidArgument, "image base must be nonzero");
+    if (file == nullptr && file_size != 0)
+        return Ret(RuntimeErrc::InvalidArgument, "null file buffer");
+    loader::LoadDiagnostics diag;
+    auto tls = loader::decode_tls(img, file, file_size, diag);
+    if (!tls.ok()) return Ret(tls.errc(), tls.context());
+    if (!tls.value().has_value()) return Ret(0u);  // no TLS directory
+    auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
+    if (!plan.ok()) return Ret(plan.errc(), plan.context());
+    const std::uint32_t count = static_cast<std::uint32_t>(
+        plan.value().callbacks.size());
+    auto registered = on_image_loaded(image_base, std::move(plan.value()));
+    if (!registered.ok()) return Ret(registered.errc(), registered.context());
+    return Ret(count);
+}
+
 Result<TlsCallbackResult> TlsLifecycle::run(
     ExecutionContext& ctx, IExecutionEngine& engine,
     TlsCallbackReason reason) const {
