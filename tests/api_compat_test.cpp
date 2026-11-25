@@ -1764,6 +1764,58 @@ TEST(GdkServiceTest, Win32VirtualMemoryLifecycle) {
     EXPECT_EQ(stats.reserved_bytes, 0u); EXPECT_EQ(stats.committed_bytes, 0u);
 }
 
+// PAGE_NOCACHE / PAGE_WRITECOMBINE are host performance hints: accepted
+// and stripped so the base protection applies. PAGE_GUARD changes
+// observable semantics (one-shot fault) and stays rejected fail-closed.
+TEST(GdkServiceTest, PageProtectionModifiersAcceptedAndGuardRejected) {
+    ApiWorld w;
+    (void)w.new_process("page-protection-modifiers.exe");
+    const auto pid = w.pm.resolve_pid(w.last_handle);
+    ASSERT_TRUE(pid.ok());
+    xbox2pc::rt::ModuleDescriptor module;
+    module.module_name = "page-protection-modifiers.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(w.last_handle, module,
+                                        xbox2pc::rt::RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(w.last_handle).ok());
+
+    ApiContext ctx;
+    ctx.process_id = pid.value();
+    ctx.arg_count = 4;
+    ctx.args[0] = 0;
+    ctx.args[1] = 0x2000;
+    ctx.args[2] = 0x3000;              // MEM_RESERVE | MEM_COMMIT
+    ctx.args[3] = 0x04 | 0x200u;       // PAGE_READWRITE | PAGE_NOCACHE
+    const auto nocache = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(nocache.ok);
+    EXPECT_NE(nocache.return_value, 0u);
+
+    ctx.args[3] = 0x04 | 0x1000u;      // PAGE_READWRITE | PAGE_WRITECOMBINE
+    const auto wc = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(wc.ok);
+    EXPECT_NE(wc.return_value, 0u);
+
+    ctx.args[3] = 0x04 | 0x100u;       // PAGE_READWRITE | PAGE_GUARD
+    const auto guard = w.reg.dispatch("kernel32", "VirtualAlloc", ctx);
+    ASSERT_TRUE(guard.ok);
+    EXPECT_EQ(guard.return_value, 0u);
+
+    // VirtualProtect must agree with the decoder: modifiers fine, guard not.
+    ctx.arg_count = 4;
+    ctx.args[0] = nocache.return_value;
+    ctx.args[1] = 0x1000;
+    ctx.args[2] = 0x02 | 0x1000u;      // PAGE_READONLY | PAGE_WRITECOMBINE
+    ctx.args[3] = 0x7000;              // non-null old-protection out pointer
+    const auto prot = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(prot.ok);
+    EXPECT_EQ(prot.return_value, 1u);
+
+    ctx.args[2] = 0x02 | 0x100u;       // PAGE_READONLY | PAGE_GUARD
+    const auto prot_guard = w.reg.dispatch("kernel32", "VirtualProtect", ctx);
+    ASSERT_TRUE(prot_guard.ok);
+    EXPECT_EQ(prot_guard.return_value, 0u);
+}
+
 TEST(GdkServiceTest, VirtualAllocEnforcesWxPolicyForEveryAllocationForm) {
     ApiWorld w;
     (void)w.new_process("virtual-memory-wx.exe");

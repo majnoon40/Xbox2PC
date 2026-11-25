@@ -13,4 +13,4 @@
 
 `ManagedProcess::allocate_xmem` lazily creates one allocator per process; `free_xmem`, `query_xmem`, and `xmem_stats` operate through the same process lock. The first successful allocation fixes the arena size and byte budget; later allocation requests reuse that allocator. After all guest threads have exited, process termination destroys it before releasing the address space.
 
-This is an allocator seam for later XMem adapters, not a claim about undocumented Xbox XMem flags, heap policies, quotas, or ABI behavior. It is not yet connected to `XMemAlloc`/`XMemFree` imports.
+This is an allocator seam, not a claim about undocumented Xbox XMem flags, heap policies, quotas, or ABI behavior. The `XMemAlloc`/`XMemFree` adapters route through this seam: the low attribute byte maps to an 8..4096 alignment (default 8), `XMemFree` requires the exact allocation base, and remaining attribute bits are ignored.

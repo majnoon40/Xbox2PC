@@ -85,8 +85,8 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | HeapSize | `SIZE_T ...(HANDLE, DWORD, LPCVOID)` | partially-implemented (tracked allocation size; SIZE_MAX on error) |
 | CloseHandle | `BOOL ...(HANDLE)` | partially-implemented (typed dispatch: event/mutex/semaphore, task queue, private heap; default heap refused) |
 
-| XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation) |
-| XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release) |
+| XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation; low attribute byte maps to 8..4096 alignment, other bits ignored) |
+| XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release; attributes ignored, exact base required) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 

@@ -25,8 +25,19 @@ namespace {
 
 using loader::ImportStatus;
 
+// Win32 page-protection decoder. Modifier bits PAGE_NOCACHE (0x200) and
+// PAGE_WRITECOMBINE (0x1000) are host performance hints with no observable
+// guest behavior behind this runtime's host-backed pages, so they are
+// accepted and stripped. PAGE_GUARD (0x100) changes observable behavior
+// (one-shot access fault) that this runtime cannot deliver, so it stays
+// rejected fail-closed rather than silently ignored.
 Result<MemProtect> decode_win32_page_protection(std::uint32_t value) {
-    switch (value) {
+    constexpr std::uint32_t kModifierMask = 0x200u | 0x1000u;  // NOCACHE|WC
+    constexpr std::uint32_t kGuard = 0x100u;
+    if ((value & kGuard) != 0)
+        return Result<MemProtect>(RuntimeErrc::InvalidArgument,
+            "PAGE_GUARD requires one-shot fault semantics this runtime does not model");
+    switch (value & ~kModifierMask) {
         case 0x01u: return Result<MemProtect>(MemProtect::NoAccess);
         case 0x02u: return Result<MemProtect>(MemProtect::ReadOnly);
         case 0x04u: return Result<MemProtect>(MemProtect::ReadWrite);
@@ -533,7 +544,7 @@ public:
         out.has_out = true;
         out.out_size = kSize;
         out.out_bytes_size = kSize;
-        out.note = "partial: free gaps are modeled inside the guest address-space reservation; mapped/image/shared memory types are unavailable";
+        out.note = "partial: free gaps are modeled inside the guest address-space reservation; shared/backing-file memory is not modeled";
         return true;
     }
     std::string describe() const override {
