@@ -56,10 +56,25 @@ vector slot. Index 0 is valid for this module-vector model.
 - A bounded TLS callback planner validates the callback array and executable
   targets. The explicit callback runner accepts the four documented notification
   reasons (`DLL_PROCESS_ATTACH`, `DLL_PROCESS_DETACH`, `DLL_THREAD_ATTACH`,
-  and `DLL_THREAD_DETACH`) and passes the selected reason in RDX. Automatic
-  process/thread lifecycle wiring and compiler-generated TLS reads remain
-  incomplete. Native GS
-  setup remains a later phase.
+  and `DLL_THREAD_DETACH`) and passes the selected reason in RDX.
+- `TlsLifecycle::register_image` decodes a loaded image's TLS directory and
+  translates the callback-array VA by the load delta (`image_base` minus the
+  preferred base) before planning, so it reads the relocated array. Array
+  ENTRIES are not rewritten by the runtime — a real loader fixes them via
+  DIR64 relocations — so mapped entries must already hold relocated targets.
+- Process/thread lifecycle wiring: `ManagedProcess` owns the per-process
+  `TlsLifecycle` (module plans in load order, LIFO detach). `ProcessManager`
+  exposes `run_tls_process_attach` (between `initialize_process` and
+  `start_process`; late attach rejects InvalidState), per-thread
+  `run_tls_thread_attach`/`run_tls_thread_detach` (double attach rejects
+  AlreadyExists, detach without attach rejects NotFound), and
+  `run_tls_process_detach`. `terminate_process` runs a registered detach
+  runner after guest threads exit and before handles/memory are released
+  (the manager cannot invent an engine; the embedder registers one via
+  `set_tls_detach_runner`, and without one termination is callback-free).
+  The hook definitions live in `rt_execution` (`process_tls_wiring.cpp`)
+  because they call into the execution layer. Compiler-generated TLS reads
+  remain incomplete. Native GS setup remains a later phase.
 - The 64-slot vector is a current runtime limit, not a claim about the full
   Windows TLS allocation model.
 

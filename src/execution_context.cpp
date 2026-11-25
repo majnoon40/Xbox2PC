@@ -591,6 +591,15 @@ Result<std::uint32_t> TlsLifecycle::register_image(
     auto tls = loader::decode_tls(img, file, file_size, diag);
     if (!tls.ok()) return Ret(tls.errc(), tls.context());
     if (!tls.value().has_value()) return Ret(0u);  // no TLS directory
+    // decode_tls reports the pre-relocation callback-array VA from the
+    // file. The mapped image lives at image_base, so translate the VA by
+    // the load delta before planning (the loader applies the same delta
+    // when relocating; images loaded at their preferred base — delta 0 —
+    // are unaffected).
+    if (image_base != img.opt.image_base && tls.value()->callbacks_va != 0) {
+        tls.value()->callbacks_va =
+            tls.value()->callbacks_va - img.opt.image_base + image_base;
+    }
     auto plan = plan_tls_callbacks(mem, *tls.value(), cfg);
     if (!plan.ok()) return Ret(plan.errc(), plan.context());
     const std::uint32_t count = static_cast<std::uint32_t>(

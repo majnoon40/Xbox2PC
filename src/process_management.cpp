@@ -1,5 +1,6 @@
 // process_management.cpp — M4 ManagedProcess + ProcessManager.
 
+#include "xbox2pc/execution_context.hpp"
 #include "xbox2pc/process_management.hpp"
 
 #include <algorithm>
@@ -19,6 +20,9 @@ ManagedProcess::ManagedProcess(std::uint64_t pid, std::string image_name,
       space_(std::make_unique<AddressSpace>(space_capacity, xbox_base,
                                              "proc-" + std::to_string(pid))) {}
 
+// Out-of-line (not = default in the header): destroying the
+// unique_ptr<TlsLifecycle> member requires the complete type, which the
+// header only forward-declares.
 ManagedProcess::~ManagedProcess() = default;
 
 Result<std::uint64_t> ManagedProcess::allocate_xmem(
@@ -137,6 +141,45 @@ Result<void> ManagedProcess::detach_thread(std::uint64_t thread_obj_id) {
 std::vector<std::uint64_t> ManagedProcess::thread_ids() const {
     std::lock_guard lock(detail_lock_);
     return threads_;
+}
+
+exec::TlsLifecycle& ManagedProcess::tls_lifecycle() {
+    std::lock_guard lock(detail_lock_);
+    if (tls_lifecycle_ == nullptr) {
+        tls_lifecycle_ = std::make_unique<exec::TlsLifecycle>();
+    }
+    return *tls_lifecycle_;
+}
+
+const exec::TlsLifecycle& ManagedProcess::tls_lifecycle() const {
+    std::lock_guard lock(detail_lock_);
+    // Lazy creation is const-safe: an empty lifecycle and no lifecycle
+    // behave identically (module_count 0 -> every hook is a no-op).
+    if (tls_lifecycle_ == nullptr) {
+        tls_lifecycle_ = std::make_unique<exec::TlsLifecycle>();
+    }
+    return *tls_lifecycle_;
+}
+
+bool ManagedProcess::tls_thread_attached(std::uint64_t thread_obj_id) const {
+    std::lock_guard lock(detail_lock_);
+    return std::find(tls_attached_threads_.begin(), tls_attached_threads_.end(),
+                     thread_obj_id) != tls_attached_threads_.end();
+}
+
+void ManagedProcess::set_tls_thread_attached(std::uint64_t thread_obj_id,
+                                             bool attached) {
+    std::lock_guard lock(detail_lock_);
+    if (attached) {
+        if (std::find(tls_attached_threads_.begin(), tls_attached_threads_.end(),
+                      thread_obj_id) == tls_attached_threads_.end()) {
+            tls_attached_threads_.push_back(thread_obj_id);
+        }
+        return;
+    }
+    const auto it = std::remove(tls_attached_threads_.begin(),
+                                tls_attached_threads_.end(), thread_obj_id);
+    tls_attached_threads_.erase(it, tls_attached_threads_.end());
 }
 
 ResourceStats ManagedProcess::stats() const {
@@ -400,6 +443,21 @@ Result<void> ProcessManager::terminate_process(Handle process,
                                         joined.context());
             }
         }
+    }
+    // TLS ProcessDetach (LIFO over registered modules) runs after all
+    // guest threads exited and joined but while handles and guest memory
+    // are still intact — the last point callbacks can touch their data.
+    // The manager cannot invent an engine, so the embedder must have
+    // registered a detach runner; without one termination proceeds
+    // callback-free (documented). Best-effort by design: the runner's
+    // failures do not abort the remaining cleanup ordering.
+    std::function<Result<exec::TlsCallbackResult>(Handle)> detach_runner;
+    {
+        std::lock_guard lock(lock_);
+        detach_runner = tls_detach_runner_;
+    }
+    if (detach_runner && proc->tls_lifecycle().module_count() != 0) {
+        (void)detach_runner(process);
     }
     auto closed = proc->handle_table().close_all();
     if (!closed.ok()) return closed;
