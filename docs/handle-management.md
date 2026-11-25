@@ -8,16 +8,29 @@ connects per-process tables to the runtime's object manager.
 
 ## Handle representation
 
-A handle is an opaque **uint64** — never a pointer, never an address:
+A handle is an opaque **uint64** — never a pointer, never an address —
+**constrained to the low 32 bits** (M11.5), so truncating any issued
+handle to a 32-bit ABI slot is lossless:
 
 ```
-bits 63..40 : slot index   (24 bits, ≤ 16 777 216 slots per table)
-bits 39..9  : generation   (31 bits, nonzero while the slot is in use)
-bits 8..0   : type id      (9 bits, mirrors TypeId for cheap validation)
+bits 31..27 : table id     (5 bits, owning table; 0 = runtime root)
+bits 26..14 : slot index   (13 bits, ≤ 8192 slots per table)
+bits 13..8  : generation   (6 bits, nonzero while the slot is in use)
+bits 7..2   : type id      (6 bits, built-in TypeId range; ≤ 63)
+bits 1..0   : tag          (reserved zero — every handle is 4-aligned)
 ```
+
+Two Win32-style **pseudo-handles are reserved** and never issued:
+`0xFFFFFFFF` (current process) and `0xFFFFFFFE` (current thread). Every
+table operation (lookup/close/duplicate/rights) rejects them with
+`InvalidHandle`; API layers interpret them per-Call instead. Values with
+any bit above 32 set (e.g. stale M4-layout handles) also reject.
 
 Layout is computed arithmetically (`Handle::from_parts` / `raw()`), so
-handles are values: copyable, comparable, serializable.
+handles are values: copyable, comparable, serializable. Type ids above 63
+cannot be encoded: `create_with_rights` fails closed with
+`InvalidArgument` (the object remains usable via object-manager ids; it
+just can never receive a handle).
 
 ## Operations and semantics
 
@@ -42,8 +55,9 @@ carries a **generation counter**:
 
 A stale handle therefore fails the generation equality check and gets
 `HandleStale` — it can never alias the slot's next occupant. Wraparound
-(2³¹ closes per slot) skips zero and is astronomically unlikely; still
-documented rather than hidden.
+(63 closes per slot) skips zero; a slot that cycles 63 times must eventually
+reuse a generation value — the window is 63 closes, far beyond test and
+CLI usage, and documented rather than hidden.
 
 Test `HandleTest.GenerationProtectsAgainstStale` proves exactly this
 scenario: same slot index, different generation, old handle rejected,
@@ -57,7 +71,7 @@ new handle resolves.
 | slot freed (handle of a closed cycle) | `HandleStale` |
 | slot live but generation differs (reused slot) | `HandleStale` |
 | target object destroyed (handle not yet closed) | `ObjectDestroyed` |
-| table exhausted (16M slots) | `HandleTableFull` |
+| table exhausted (8K slots) | `HandleTableFull` |
 | lookup before runtime init (per-process tables) | `NotInitialized` |
 
 Destroying an object does **not** auto-close its handles: the handles

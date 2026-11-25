@@ -2,13 +2,17 @@
 // xbox2pc/handle_manager.hpp — M3 handle management + object manager.
 //
 // Design (docs/handle-management.md, docs/runtime-object-model.md):
-//   1. Handles are opaque uint64 tokens. M11 layout (4-aligned):
-//      [table:9][index:15][generation:29][type:9][tag:2=0]. The low two
+//   1. Handles are opaque uint64 tokens, constrained to the low 32 bits
+//      (M11.5 layout, 4-aligned):
+//      [table:5][index:13][generation:6][type:6][tag:2=0]. The low two
 //      bits are a reserved alignment tag (always zero), so every nonzero
 //      handle is a multiple of four — the M11 guest-visible invariant.
-//      The index picks a slot; the generation invalidates handles whose
-//      slot was closed and reused (stale-handle protection). No raw pointer
-//      or address is ever encoded in a handle.
+//      Truncating any issued handle to 32 bits is lossless; 0xFFFFFFFF
+//      and 0xFFFFFFFE are reserved pseudo-handles (current process /
+//      current thread). The index picks a slot; the generation
+//      invalidates handles whose slot was closed and reused
+//      (stale-handle protection). No raw pointer or address is ever
+//      encoded in a handle.
 //   2. The ObjectManager is the single owner of every RuntimeObject
 //      (unique ownership). It registers, looks up (by id or handle), and
 //      destroys objects exactly once. Access goes through `lookup_*` which
@@ -51,34 +55,56 @@ std::uint16_t allocate_table_id();
 
 // ── handle representation ────────────────────────────────────────────────
 //
-// 64-bit layout (little-endian packing, value computed arithmetically):
+// M11.5 32-bit-constrained layout (little-endian packing, computed
+// arithmetically): every issued handle fits in the LOW 32 BITS, so a
+// guest passing handles through a 32-bit ABI slot (Win32-style) loses
+// nothing by truncation. The uint64_t storage is retained; the invariant
+// is raw() <= 0xFFFFFFFD for every handle the runtime issues.
+//
 //   bits 0..1   : reserved alignment tag, always zero (M11: every nonzero
 //                 handle is a multiple of four, like Windows kernel
 //                 HANDLE tag bits — misaligned values reject as invalid)
-//   bits 2..10  : type id (9 bits, mirrors TypeId for cheap validation)
-//   bits 11..39 : generation (29 bits, nonzero while slot in use)
-//   bits 40..54 : slot index (15 bits, max 32K entries per table)
-//   bits 55..63 : table id (9 bits, owning table — M4 hardening)
+//   bits 2..7   : type id (6 bits, built-in TypeId range 1..10; user
+//                 types below kUserTypeBase32=32 are registerable in
+//                 32..63, above 63 cannot receive handles)
+//   bits 8..13  : generation (6 bits, nonzero while slot in use)
+//   bits 14..26 : slot index (13 bits, max 8K entries per table)
+//   bits 27..31 : table id (5 bits, owning table — M4 hardening)
 //
-// M4 change (documented architectural fix): the owning TABLE ID is now
+// Pseudo-handles (Windows-compatible, reserved — never issued, never
+// valid table lookups):
+//   0xFFFFFFFF : "current process" (kernel32 GetCurrentProcess())
+//   0xFFFFFFFE : "current thread" (kernel32 GetCurrentThread())
+//
+// M4 (documented architectural fix, retained): the owning TABLE ID is
 // encoded in the handle. In M3, two handles from different tables with
 // the same slot index/generation/type produced the SAME raw value, so a
 // handle passed to the wrong table could alias a foreign object. With the
 // table id embedded, cross-table lookups fail with InvalidHandle (the
-// table checks its own id first). Capacity per table drops 16M -> 32K
+// table checks its own id first). Capacity per table drops 16M -> 8K
 // entries, which exceeds every realistic M4 use (per-process tables hold
 // at most thousands of objects; the limit is typed as HandleTableFull).
 class Handle {
 public:
+    // Reserved Win32-style pseudo-handles. They carry no slot, table, or
+    // type: every HandleTable operation rejects them with InvalidHandle;
+    // API layers interpret them per-Call (GetCurrentProcess semantics).
+    static constexpr std::uint64_t kCurrentProcessPseudo = 0xFFFFFFFFull;
+    static constexpr std::uint64_t kCurrentThreadPseudo = 0xFFFFFFFEull;
+
     Handle() = default;
     constexpr std::uint64_t raw() const { return raw_; }
     static constexpr Handle from_raw(std::uint64_t raw) { Handle h; h.raw_ = raw; return h; }
     constexpr bool is_null() const { return raw_ == 0; }
+    // True when this raw value is one of the reserved pseudo-handles.
+    constexpr bool is_pseudo() const {
+        return raw_ == kCurrentProcessPseudo || raw_ == kCurrentThreadPseudo;
+    }
     constexpr std::uint16_t type() const {
-        return static_cast<std::uint16_t>((raw_ >> 2) & 0x1FF);
+        return static_cast<std::uint16_t>((raw_ >> 2) & 0x3F);
     }
     constexpr std::uint32_t generation() const {
-        return static_cast<std::uint32_t>((raw_ >> 11) & 0x1FFFFFFF);
+        return static_cast<std::uint32_t>((raw_ >> 8) & 0x3F);
     }
     // M11 alignment tag: the low two bits, reserved zero. A nonzero
     // handle with a nonzero tag is a forged/misaligned value.
@@ -86,20 +112,20 @@ public:
         return static_cast<std::uint16_t>(raw_ & 0x3);
     }
     constexpr std::uint32_t index() const {
-        return static_cast<std::uint32_t>((raw_ >> 40) & 0x7FFF);
+        return static_cast<std::uint32_t>((raw_ >> 14) & 0x1FFF);
     }
     constexpr std::uint16_t table_id() const {
-        return static_cast<std::uint16_t>(raw_ >> 55);
+        return static_cast<std::uint16_t>((raw_ >> 27) & 0x1F);
     }
 
     static constexpr Handle from_parts(std::uint32_t index, std::uint32_t gen,
                                        std::uint16_t type,
                                        std::uint16_t table_id) {
         Handle h;
-        h.raw_ = (static_cast<std::uint64_t>(table_id & 0x1FF) << 55) |
-                 (static_cast<std::uint64_t>(index & 0x7FFF) << 40) |
-                 (static_cast<std::uint64_t>(gen & 0x1FFFFFFF) << 11) |
-                 (static_cast<std::uint64_t>(type & 0x1FF) << 2);
+        h.raw_ = (static_cast<std::uint64_t>(table_id & 0x1F) << 27) |
+                 (static_cast<std::uint64_t>(index & 0x1FFF) << 14) |
+                 (static_cast<std::uint64_t>(gen & 0x3F) << 8) |
+                 (static_cast<std::uint64_t>(type & 0x3F) << 2);
         return h;
     }
 
@@ -245,13 +271,15 @@ public:
 
 class HandleTable {
 public:
-    static constexpr std::uint32_t kMaxSlots = 1u << 15;   // 32K (M4 layout)
-    // 29-bit generation field (M11 alignment layout): wrap skips zero so
+    static constexpr std::uint32_t kMaxSlots = 1u << 13;   // 8K (M11.5 layout)
+    // 6-bit generation field (M11.5 32-bit layout): wrap skips zero so
     // an in-use slot never presents generation 0.
-    static constexpr std::uint32_t kMaxGeneration = 0x1FFFFFFF;
+    static constexpr std::uint32_t kMaxGeneration = 0x3F;
     static constexpr std::uint16_t kRuntimeTableId = 0;
+    // 5-bit table id space: 0 = runtime root; process tables 1..31.
+    static constexpr std::uint16_t kMaxTableId = 31;
 
-    // Runtime root table (id 0). Per-process tables get ids 1..511.
+    // Runtime root table (id 0). Per-process tables get ids 1..31.
     explicit HandleTable(ObjectManager& owner);
     // Table with an explicit id (id 0 is reserved for the runtime table).
     HandleTable(ObjectManager& owner, std::uint16_t table_id);
