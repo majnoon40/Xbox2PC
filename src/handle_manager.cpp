@@ -123,6 +123,13 @@ Result<RefGuard> HandleTable::lookup(Handle h) const {
             "handle belongs to table " + std::to_string(h.table_id()) +
                 ", this is table " + std::to_string(table_id_));
     }
+    // M11 alignment invariant: the low two tag bits must be zero. A raw
+    // value with a nonzero tag is forged or corrupted, not a handle this
+    // runtime ever issued.
+    if (h.tag() != 0) {
+        return Result<RefGuard>(RuntimeErrc::InvalidHandle,
+                                "handle is not four-aligned (bad tag bits)");
+    }
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) {
         return Result<RefGuard>(RuntimeErrc::InvalidHandle,
@@ -150,7 +157,7 @@ Result<RefGuard> HandleTable::lookup(Handle h) const {
 }
 
 AccessRights HandleTable::rights_of(Handle h) const {
-    if (h.is_null() || h.table_id() != table_id_) return AccessRights::None;
+    if (h.is_null() || h.tag() != 0 || h.table_id() != table_id_) return AccessRights::None;
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return AccessRights::None;
     const Slot& s = slots_[h.index()];
@@ -161,7 +168,7 @@ AccessRights HandleTable::rights_of(Handle h) const {
 }
 
 bool HandleTable::inheritable(Handle h) const {
-    if (h.is_null() || h.table_id() != table_id_) return false;
+    if (h.is_null() || h.tag() != 0 || h.table_id() != table_id_) return false;
     std::shared_lock lock(lock_);
     if (h.index() >= slots_.size()) return false;
     const Slot& s = slots_[h.index()];

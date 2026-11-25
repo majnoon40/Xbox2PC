@@ -144,7 +144,9 @@ There is no TEB-backed last-error slot and no registered `SetLastError`/`GetLast
 
 Generation checks reject stale slot reuse; table IDs prevent a token from one table resolving in another table. Each `HandleTable` has a 32K-slot maximum. There is a runtime root table and process-owned tables.
 
-This representation is not the M11 format requirement: the object type occupies the low bits, so the raw value is not guaranteed to be a nonzero multiple of four. For example, built-in Event, Mutex, and Semaphore type IDs are 3, 4, and 5 (`include/xbox2pc/runtime_object.hpp:24-34`).
+This representation was not the M11 format requirement: the object type occupied the low bits, so the raw value was not guaranteed to be a nonzero multiple of four. For example, built-in Event, Mutex, and Semaphore type IDs are 3, 4, and 5 (`include/xbox2pc/runtime_object.hpp:24-34`).
+
+**M11 fix (landed):** the layout is now `[table:9][index:15][generation:29][type:9][tag:2=0]`. The low two bits are a reserved alignment tag, always zero — every nonzero handle the runtime issues is a multiple of four, mirroring Windows kernel HANDLE tag bits. Lookups (and rights/inheritability queries) reject a nonzero tag as `InvalidHandle` before any slot resolution, so misaligned forged values never resolve. Generation wrapped from 31 to 29 bits (still ~536M reuses per slot; the wrap skips zero so an in-use slot never presents generation 0).
 
 ### Current service ownership is split
 

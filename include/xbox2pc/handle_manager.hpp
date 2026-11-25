@@ -2,7 +2,10 @@
 // xbox2pc/handle_manager.hpp — M3 handle management + object manager.
 //
 // Design (docs/handle-management.md, docs/runtime-object-model.md):
-//   1. Handles are opaque uint64 tokens: [index:24][generation:31][type:9].
+//   1. Handles are opaque uint64 tokens. M11 layout (4-aligned):
+//      [table:9][index:15][generation:29][type:9][tag:2=0]. The low two
+//      bits are a reserved alignment tag (always zero), so every nonzero
+//      handle is a multiple of four — the M11 guest-visible invariant.
 //      The index picks a slot; the generation invalidates handles whose
 //      slot was closed and reused (stale-handle protection). No raw pointer
 //      or address is ever encoded in a handle.
@@ -49,8 +52,11 @@ std::uint16_t allocate_table_id();
 // ── handle representation ────────────────────────────────────────────────
 //
 // 64-bit layout (little-endian packing, value computed arithmetically):
-//   bits 0..8   : type id (9 bits, mirrors TypeId for cheap validation)
-//   bits 9..39  : generation (31 bits, nonzero while slot in use)
+//   bits 0..1   : reserved alignment tag, always zero (M11: every nonzero
+//                 handle is a multiple of four, like Windows kernel
+//                 HANDLE tag bits — misaligned values reject as invalid)
+//   bits 2..10  : type id (9 bits, mirrors TypeId for cheap validation)
+//   bits 11..39 : generation (29 bits, nonzero while slot in use)
 //   bits 40..54 : slot index (15 bits, max 32K entries per table)
 //   bits 55..63 : table id (9 bits, owning table — M4 hardening)
 //
@@ -69,10 +75,15 @@ public:
     static constexpr Handle from_raw(std::uint64_t raw) { Handle h; h.raw_ = raw; return h; }
     constexpr bool is_null() const { return raw_ == 0; }
     constexpr std::uint16_t type() const {
-        return static_cast<std::uint16_t>(raw_ & 0x1FF);
+        return static_cast<std::uint16_t>((raw_ >> 2) & 0x1FF);
     }
     constexpr std::uint32_t generation() const {
-        return static_cast<std::uint32_t>((raw_ >> 9) & 0x7FFFFFFF);
+        return static_cast<std::uint32_t>((raw_ >> 11) & 0x1FFFFFFF);
+    }
+    // M11 alignment tag: the low two bits, reserved zero. A nonzero
+    // handle with a nonzero tag is a forged/misaligned value.
+    constexpr std::uint16_t tag() const {
+        return static_cast<std::uint16_t>(raw_ & 0x3);
     }
     constexpr std::uint32_t index() const {
         return static_cast<std::uint32_t>((raw_ >> 40) & 0x7FFF);
@@ -87,8 +98,8 @@ public:
         Handle h;
         h.raw_ = (static_cast<std::uint64_t>(table_id & 0x1FF) << 55) |
                  (static_cast<std::uint64_t>(index & 0x7FFF) << 40) |
-                 (static_cast<std::uint64_t>(gen & 0x7FFFFFFF) << 9) |
-                 static_cast<std::uint64_t>(type & 0x1FF);
+                 (static_cast<std::uint64_t>(gen & 0x1FFFFFFF) << 11) |
+                 (static_cast<std::uint64_t>(type & 0x1FF) << 2);
         return h;
     }
 
@@ -235,7 +246,9 @@ public:
 class HandleTable {
 public:
     static constexpr std::uint32_t kMaxSlots = 1u << 15;   // 32K (M4 layout)
-    static constexpr std::uint32_t kMaxGeneration = 0x7FFFFFFF;
+    // 29-bit generation field (M11 alignment layout): wrap skips zero so
+    // an in-use slot never presents generation 0.
+    static constexpr std::uint32_t kMaxGeneration = 0x1FFFFFFF;
     static constexpr std::uint16_t kRuntimeTableId = 0;
 
     // Runtime root table (id 0). Per-process tables get ids 1..511.

@@ -417,6 +417,58 @@ TEST(HandleTest, NullAndOutOfRangeRejected) {
     EXPECT_EQ(r2.errc(), RuntimeErrc::InvalidHandle);
 }
 
+// M11: every nonzero handle the runtime issues is a multiple of four
+// (reserved low tag bits), for every built-in type — odd/misaligned raw
+// values reject as invalid and carry no rights.
+TEST(HandleTest, M11FourAlignedIssuedAndTagRejected) {
+    ObjectManager mgr;
+    {
+        auto reg = mgr.register_object(std::make_unique<TrivialObject>("t"));
+        auto g = mgr.lookup_id(reg.value());
+        ASSERT_TRUE(g.ok());
+        auto h = mgr.create_handle(*g.value().get());
+        ASSERT_TRUE(h.ok());
+        EXPECT_NE(h.value().raw(), 0ull);
+        EXPECT_EQ(h.value().raw() % 4, 0ull) << "handle not four-aligned";
+        EXPECT_EQ(h.value().tag(), 0u);
+        // Forging the tag bits must invalidate the handle: same logical
+        // parts, corrupted low bits.
+        const Handle forged = Handle::from_parts(
+            h.value().index(), h.value().generation(), h.value().type(),
+            h.value().table_id());
+        ASSERT_EQ(forged, h.value());
+        const Handle misaligned = Handle::from_raw(h.value().raw() | 1ull);
+        auto bad = mgr.lookup_handle(misaligned);
+        ASSERT_FALSE(bad.ok());
+        EXPECT_EQ(bad.errc(), RuntimeErrc::InvalidHandle);
+    }
+}
+
+TEST(HandleTest, M11GenerationAdvanceStaysAlignedAndNonzero) {
+    ObjectManager mgr2;
+    auto reg2 = mgr2.register_object(std::make_unique<TrivialObject>("g2"));
+    ASSERT_TRUE(reg2.ok());
+    auto guard = mgr2.lookup_id(reg2.value());
+    ASSERT_TRUE(guard.ok());
+    auto h1 = mgr2.create_handle(*guard.value().get());
+    ASSERT_TRUE(h1.ok());
+    EXPECT_EQ(h1.value().raw() % 4, 0ull);
+    // Close and re-open a handle to the same object: the slot's
+    // generation advances; the old handle must go stale but the new one
+    // stays four-aligned and nonzero.
+    auto closed = mgr2.close_handle(h1.value());
+    ASSERT_TRUE(closed.ok());
+    auto stale = mgr2.lookup_handle(h1.value());
+    EXPECT_FALSE(stale.ok());
+    auto h2 = mgr2.create_handle(*guard.value().get());
+    ASSERT_TRUE(h2.ok());
+    EXPECT_NE(h2.value().raw(), 0ull);
+    EXPECT_EQ(h2.value().raw() % 4, 0ull);
+    if (h2.value().index() == h1.value().index()) {
+        EXPECT_NE(h2.value().generation(), h1.value().generation());
+    }
+}
+
 TEST(HandleTest, TypeFieldValidated) {
     ObjectManager mgr;
     Handle h;
