@@ -164,6 +164,21 @@ struct ExecutionRequest {
     abi::CallSpec entry_spec;
     // Optional cooperative suspend/resume control shared with the owning thread.
     std::shared_ptr<ExecutionControl> control;
+
+    // ── M11 Phase 6: exception dispatch context ─────────────────────────
+    // When an imported API raises a guest exception (RaiseException), the
+    // engine searches this image's unwind data for a language handler.
+    // All fields are guest VAs / copies; no host pointers. An empty
+    // unwind_image (size 0) disables the search (the run faults).
+    struct UnwindContext {
+        // A COPY of the mapped image bytes the .pdata/.xdata RVAs resolve
+        // against (loader-owned file bytes; rva_to_offset maps through the
+        // PE section table, so the copy needs no address-space rebasing).
+        std::vector<std::uint8_t> unwind_image;
+        std::uint64_t image_base = 0;      // guest VA base of the mapping
+        std::uint64_t image_size = 0;      // mapped size (extent check)
+    };
+    UnwindContext unwind;
 };
 
 class IExecutionEngine {

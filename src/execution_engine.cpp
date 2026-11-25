@@ -10,6 +10,7 @@
 #include "xbox2pc/execution_engine.hpp"
 #include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/x86_interpreter.hpp"
+#include "xbox2pc/pe_parser.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -20,6 +21,32 @@ using cpu::CpuState;
 using cpu::Gpr;
 using guest::GuestMemory;
 namespace x86 = xbox2pc::rt::x86;
+
+// ── M11 Phase 6 helpers: bounded hex formatting for exception records ────
+
+std::string hex32(std::uint32_t v) {
+    static const char* d = "0123456789ABCDEF";
+    std::string s = "00000000";
+    for (int i = 7; i >= 0; --i) {
+        s[static_cast<std::size_t>(i)] = d[v & 0xF];
+        v >>= 4;
+    }
+    return s;
+}
+
+std::string hex64(std::uint64_t v) {
+    static const char* d = "0123456789ABCDEF";
+    std::string s = "0000000000000000";
+    for (int i = 15; i >= 0; --i) {
+        s[static_cast<std::size_t>(i)] = d[v & 0xF];
+        v >>= 4;
+    }
+    return s;
+}
+
+// Unwind-search diagnostics sink (bounded: the handler-search path only
+// records warnings; they never propagate to the guest record).
+diag::Diagnostics unwind_diags_;
 
 // ── 1. names + config ─────────────────────────────────────────────────────
 
@@ -330,6 +357,78 @@ ExecutionResult DeterministicBackend::run(
                     : dispatched.value().api_result.error;
                 fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
                       pid_, tid_, Recoverability::Fatal, detail, res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+
+            // M11 Phase 6: the API raised a guest exception (RaiseException
+            // semantics) instead of returning. Phase-1 unwind dispatch: copy
+            // the guest state to the post-call frame (RIP = return address,
+            // RSP popped), then search the image's unwind data for a
+            // language handler. A found handler gets control (documented
+            // establisher-frame contract); no handler means an unhandled
+            // guest exception.
+            if (dispatched.value().api_result.raise_guest_exception) {
+                ++res.api_calls;
+                io_cpu.rip = return_address.value();
+                const auto rsp_now =
+                    rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+                const std::string raised =
+                    "unhandled guest exception 0x" +
+                    hex32(dispatched.value().api_result.exception_code);
+                if (req.unwind.unwind_image.empty()) {
+                    fault(GuestFault::MarshalFailure, io_cpu, AccessType::None,
+                          rip, pid_, tid_, Recoverability::Fatal,
+                          raised + " (no unwind data bound to the request)",
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                pe::PeImage unwind_img;
+                try {
+                    diag::Diagnostics quiet;
+                    unwind_img = pe::parse(req.unwind.unwind_image.data(),
+                                           req.unwind.unwind_image.size(),
+                                           "unwind-context", quiet);
+                } catch (const pe::ParseError&) {
+                    fault(GuestFault::MarshalFailure, io_cpu, AccessType::None,
+                          rip, pid_, tid_, Recoverability::Fatal,
+                          raised + " (bound unwind image is not parseable)",
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                auto search = pe::find_exception_handler(
+                    unwind_img, req.unwind.unwind_image.data(),
+                    req.unwind.unwind_image.size(), req.unwind.image_base,
+                    io_cpu.rip, rsp_now,
+                    [&mem](std::uint64_t va) {
+                        auto v = mem.read_u64(va);
+                        if (!v.ok()) return std::optional<std::uint64_t>();
+                        return std::optional<std::uint64_t>(v.value());
+                    },
+                    unwind_diags_);
+                if (!search.has_value() || !search->found) {
+                    fault(GuestFault::MarshalFailure, io_cpu, AccessType::None,
+                          rip, pid_, tid_, Recoverability::Fatal,
+                          raised + " (no language handler found)",
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                // Handler located: transfer control at the establisher
+                // frame. The language handler body is NOT executed in this
+                // slice (that requires the phase-2 callback contract);
+                // the run completes with a structured record.
+                fault(GuestFault::MarshalFailure, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Recoverable,
+                      "guest exception 0x" +
+                          hex32(dispatched.value().api_result.exception_code) +
+                          " dispatched: handler at RVA 0x" +
+                          hex32(search->handler_rva) +
+                          ", establisher frame 0x" + hex64(search->establisher_frame) +
+                          " (phase-1 search only; handler execution is future work)",
+                      res.exception);
                 res.outcome = Outcome::Faulted;
                 break;
             }
@@ -747,6 +846,15 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
                id == "GetLastError") {
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else if (id == "SetLastError") {
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Void;
+    } else if (id == "RaiseException") {
+        // (code, flags, nArguments, lpArguments): integer-like validation
+        // only — the payload is not copied into a guest EXCEPTION_RECORD
+        // in this slice (phase-1 handler search only).
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
         plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Void;
     } else if (id == "CreateMutexW") {

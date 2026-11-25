@@ -181,6 +181,13 @@ struct ApiCallResult {
     static constexpr std::size_t kMaxOutBytes = 256;
     std::array<std::uint8_t, kMaxOutBytes> out_bytes = {};
     std::size_t out_bytes_size = 0;
+    // M11 Phase 6: the implementation raised a guest exception instead of
+    // returning (RaiseException semantics). The bridge converts this into
+    // the engine's exception-dispatch path; code/flags mirror the
+    // documented EXCEPTION_RECORD fields the runtime can carry.
+    bool raise_guest_exception = false;
+    std::uint32_t exception_code = 0;
+    std::uint32_t exception_flags = 0;
 };
 
 // One implementation: a controlled runtime function.

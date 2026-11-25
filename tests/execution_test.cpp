@@ -3665,3 +3665,128 @@ TEST(TlsImplicitWiring, ContextMismatchAndBadHandleReject) {
     EXPECT_EQ(bad.errc(), RuntimeErrc::InvalidHandle);
     (void)any.destroy();
 }
+
+// ── M11 Phase 6 slice C: RaiseException dispatch through the bridge ───────
+
+TEST(EngineTest, RaiseExceptionSearchesUnwindData) {
+    // A guest calls the imported kernel32!RaiseException through the
+    // marshalling bridge (entry-at-binding pattern: [RSP] = continuation
+    // inside the unwind-covered function). The engine performs the phase-1
+    // unwind search over the request's bound image copy:
+    //   - no unwind data bound -> Fatal "no unwind data"
+    //   - unwind data with a covering EHANDLER -> Recoverable record
+    //     naming the handler RVA + establisher frame
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("raise-exc.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "raise-exc.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x2000, &code_va);   // covers RVA 0x1005
+    scratch_region(*process, 0x1000, &stack_va);
+    // Continuation: a single RET where the RaiseException call would
+    // resume; its VA is the "fault RIP" for the unwind search. The unwind
+    // fixture's function range is RVA 0x1000-0x1050 and image_base maps
+    // RVA 0x1000 to code_va, so the continuation must sit at code_va+0x1005
+    // (RVA 0x1005) to be inside the covered range.
+    ASSERT_TRUE(mem.write_u8(code_va + 0x1005, 0xC3).ok());
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t binding = 0x51000101ull;
+    constexpr std::uint64_t tid = 0x93;
+    const std::uint64_t continuation_va = code_va + 0x1005;
+    const std::uint64_t rsp = stack_va + 0x800;
+    ASSERT_TRUE(mem.write_u64(rsp, continuation_va).ok());
+    // Stack slots the search may read while unwinding (entry RSP, caller).
+    ASSERT_TRUE(mem.write_u64(rsp + 8, continuation_va).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 0x10, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+
+    // PE fixture with unwind data. Map .text at code_va (image base +
+    // RVA 0x1000 == code_va); the outer function 0x1000-0x1050 has one
+    // EHANDLER at RVA 0x1288 and a single PUSH RBP slot.
+    auto build_unwind_image = [&] {
+        test::PeBuildSpec s;
+        std::vector<std::uint8_t> outer = {0x09, 0x02, 1, 0x00,
+                                           0x01, 0x50, 0x00, 0x00,
+                                           0x88, 0x12, 0x00, 0x00};
+        s.text_payloads.emplace_back(0x1000, outer);
+        s.exception_directory_payload = {
+            0x00, 0x10, 0x00, 0x00, 0x50, 0x10, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00};
+        return test::PeBuilder(s).build();
+    };
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    request.api_bindings.push_back(
+        ApiBindingInfo{binding, "kernel32", "RaiseException", false, 0});
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    // RaiseException(code=0xC0000005, flags=0, n=0, args=0)
+    cpu_state.set_reg(cpu::Gpr::Rcx, 0xC0000005ull);
+    cpu_state.set_reg(cpu::Gpr::Rdx, 0);
+    cpu_state.set_reg(cpu::Gpr::R8, 0);
+    cpu_state.set_reg(cpu::Gpr::R9, 0);
+    cpu_state.rip = binding;
+
+    // Case 1: no unwind data bound.
+    {
+        cpu::CpuState cs = cpu_state;
+        std::atomic<bool> interrupted{false};
+        DeterministicBackend backend(w.reg, config.value());
+        ASSERT_TRUE(backend.bind_execution_context(
+            pid, tid, process->address_space()).ok());
+        const auto result = backend.run(request, cs, interrupted);
+        EXPECT_EQ(result.outcome, Outcome::Faulted);
+        ASSERT_TRUE(result.exception.has_value());
+        EXPECT_EQ(result.exception->fault, GuestFault::MarshalFailure);
+        EXPECT_EQ(result.exception->recoverability, Recoverability::Fatal);
+        EXPECT_NE(result.exception->detail.find("no unwind data"),
+                  std::string::npos);
+        EXPECT_NE(result.exception->detail.find("C0000005"),
+                  std::string::npos);
+    }
+
+    // Case 2: unwind data bound; the search finds the outer function's
+    // EHANDLER (the continuation RVA is inside 0x1000-0x1050).
+    {
+        ExecutionRequest with_unwind = request;
+        with_unwind.unwind.unwind_image = build_unwind_image();
+        with_unwind.unwind.image_base = code_va;   // RVA 0x1000 == code_va
+        with_unwind.unwind.image_size = 0x4000;
+        cpu::CpuState cs = cpu_state;
+        std::atomic<bool> interrupted{false};
+        DeterministicBackend backend(w.reg, config.value());
+        ASSERT_TRUE(backend.bind_execution_context(
+            pid, tid, process->address_space()).ok());
+        const auto result = backend.run(with_unwind, cs, interrupted);
+        EXPECT_EQ(result.outcome, Outcome::Faulted);
+        ASSERT_TRUE(result.exception.has_value());
+        EXPECT_EQ(result.exception->fault, GuestFault::MarshalFailure);
+        EXPECT_EQ(result.exception->recoverability, Recoverability::Recoverable);
+        EXPECT_NE(result.exception->detail.find("handler at RVA 0x00001288"),
+                  std::string::npos);
+        EXPECT_NE(result.exception->detail.find("phase-1 search only"),
+                  std::string::npos);
+        EXPECT_EQ(result.api_calls, 1u);
+    }
+    (void)w.pm.terminate_process(process_handle, 0);
+}

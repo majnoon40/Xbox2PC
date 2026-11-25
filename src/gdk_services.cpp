@@ -870,6 +870,33 @@ public:
     std::string describe() const override { return "Win32: GetLastError (guest TEB LastErrorValue)"; }
 };
 
+class RaiseExceptionImpl : public IApiImplementation {
+public:
+    bool invoke(const ApiContext& ctx, ApiCallResult& out) override {
+        if (ctx.arg_count != 4) {
+            out.error = "RaiseException requires four arguments";
+            return false;
+        }
+        // The documented contract: dwExceptionCode uses bits 30/31 as
+        // severity (both set = fatal customer code); nNumberOfArguments
+        // is bounded at EXCEPTION_MAXIMUM_PARAMETERS (15). Arguments are
+        // validated; the payload is not yet materialized into a guest
+        // EXCEPTION_RECORD (phase-1 dispatch only).
+        if (ctx.args[2] > 15) {
+            out.error = "RaiseException argument count exceeds EXCEPTION_MAXIMUM_PARAMETERS (15)";
+            return false;
+        }
+        out.ok = true;                       // the DISPATCH succeeds...
+        out.raise_guest_exception = true;    // ...but does not return
+        out.exception_code = static_cast<std::uint32_t>(ctx.args[0]);
+        out.exception_flags = static_cast<std::uint32_t>(ctx.args[1]);
+        return true;
+    }
+    std::string describe() const override {
+        return "Win32: RaiseException (guest exception dispatch, phase-1 unwind)";
+    }
+};
+
 class CreateEventWImpl : public IApiImplementation {
 public:
     explicit CreateEventWImpl(GameRuntimeService& svc) : svc_(svc) {}
@@ -1141,6 +1168,7 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r24 = api_reg_.register_implementation("kernel32", "WaitForMultipleObjects", keep(std::make_shared<WaitForMultipleObjectsImpl>(*this)), owner);
     auto r25 = api_reg_.register_implementation("kernel32", "SetLastError", keep(std::make_shared<SetLastErrorImpl>()), owner);
     auto r26 = api_reg_.register_implementation("kernel32", "GetLastError", keep(std::make_shared<GetLastErrorImpl>()), owner);
+    auto r26b = api_reg_.register_implementation("kernel32", "RaiseException", keep(std::make_shared<RaiseExceptionImpl>()), owner);
     auto r27 = api_reg_.register_implementation("kernel32", "GetProcessHeap", keep(std::make_shared<GetProcessHeapImpl>(*this)), owner);
     auto r28 = api_reg_.register_implementation("kernel32", "HeapCreate", keep(std::make_shared<HeapCreateImpl>(*this)), owner);
     auto r29 = api_reg_.register_implementation("kernel32", "HeapAlloc", keep(std::make_shared<HeapAllocImpl>(*this)), owner);
@@ -1150,7 +1178,7 @@ Result<void> GameRuntimeService::on_initialize() {
     auto r31c = api_reg_.register_implementation("kernel32", "HeapSize", keep(std::make_shared<HeapSizeImpl>(*this)), owner);
     auto r32 = api_reg_.register_implementation("xmem", "XMemAlloc", keep(std::make_shared<XMemAllocImpl>(*this)), owner);
     auto r33 = api_reg_.register_implementation("xmem", "XMemFree", keep(std::make_shared<XMemFreeImpl>(*this)), owner);
-    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26, &r27, &r28, &r29, &r30, &r31, &r31b, &r31c, &r32, &r33}) {
+    for (const auto* r : {&r1, &r2, &r3, &r4, &r5, &r6, &r7, &r8, &r9, &r10, &r11, &r12, &r13, &r14, &r15, &r16, &r17, &r18, &r19, &r20, &r21, &r22, &r23, &r24, &r25, &r26, &r26b, &r27, &r28, &r29, &r30, &r31, &r31b, &r31c, &r32, &r33}) {
         if (!r->ok()) {
             (void)api_reg_.revoke_owner(id());
             owned_.clear();

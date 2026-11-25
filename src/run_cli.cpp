@@ -130,6 +130,11 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
     DeterministicBackend engine(w.reg, cfg);
     engine.bind_space(proc->address_space());
     engine.bind_process(1, 1);
+    // M11 Phase 6: bind the raw image bytes so RaiseException dispatch can
+    // search .pdata/.xdata (RVAs resolve through the file's section table).
+    req.value().unwind.unwind_image = image;
+    req.value().unwind.image_base = loaded->layout().actual_base;
+    req.value().unwind.image_size = loaded->layout().mapped_size;
     std::atomic<bool> stop{false};
     auto res = ctx.invoke(req.value(), engine, stop);
     const bool ok = res.ok() && res.value().outcome == Outcome::Returned;

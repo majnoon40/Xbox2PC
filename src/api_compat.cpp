@@ -755,6 +755,22 @@ std::vector<ApiDescriptor> builtin_descriptors() {
     }
     {
         ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "RaiseException";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::Void;
+        a.signature = "VOID RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags, DWORD nNumberOfArguments, const ULONG_PTR* lpArguments)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::PartiallyImplemented;
+        a.impl = ApiStatus::PartiallyImplemented;
+        a.evidence = "[MS-RAISE-EXCEPTION]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-raiseexception";
+        a.notes = "raises a guest exception through the M11 phase-1 unwind dispatch (handler search over .pdata/.xdata); nNumberOfArguments/lpArguments are validated but their payload is not copied into a guest EXCEPTION_RECORD yet";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
         a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
         a.convention = Convention::X64Microsoft; a.param_count = 4;
         a.ret = ReturnKind::Uint32;
