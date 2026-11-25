@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/m11-teb-stack-bounds]
+    branches: [main, feature/m11-teb-stack-bounds, feature/m11-native-execution-phase5]
   pull_request:
-    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls]
+    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls, feature/m11-teb-stack-bounds]
   workflow_dispatch:
 
 jobs:
@@ -103,6 +103,30 @@ jobs:
         run: ctest --test-dir build-tsan --output-on-failure
         env:
           TSAN_OPTIONS: halt_on_error=1
+
+  native-execution:
+    name: Native execution (XBOX2PC_NATIVE_EXECUTION=ON)
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc
+      CXX: g++
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++ ninja-build
+
+      - name: Configure (native execution flag ON)
+        run: cmake -S . -B build-native -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DXBOX2PC_NATIVE_EXECUTION=ON
+
+      - name: Build
+        run: cmake --build build-native --parallel 2
+
+      - name: Test (native backend integration + determinism)
+        run: ctest --test-dir build-native --output-on-failure
 
   m11-pe-fixtures:
     name: M11 PE fixtures + static goldens
