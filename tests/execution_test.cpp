@@ -2458,24 +2458,53 @@ TEST(NativeExecutionTest, RejectsGuestStackRequests) {
     api::ApiRegistry standalone_registry;
     NativeExecutionBackend backend(standalone_registry, std::chrono::milliseconds(1000));
     ASSERT_TRUE(backend.bind_execution_context(0x75, 0x85, space).ok());
-    auto expect_rejected = [&](std::uint64_t stack_top, std::uint64_t stack_size) {
+    auto run_with_stack = [&](std::uint64_t stack_top, std::uint64_t stack_size) {
         ExecutionRequest req;
         req.entry_va = region.value();
         req.completion_va = kCompletionSentinel;
+        req.entry_spec.ret = rt::abi::CallSpec::ReturnKind::Int;
         req.stack_top_va = stack_top;
         req.stack_size = stack_size;
         cpu::CpuState cpu;
         cpu.reset();
         std::atomic<bool> interrupted{false};
-        const auto result = backend.run(req, cpu, interrupted);
+        return backend.run(req, cpu, interrupted);
+    };
+    // Phase 5: a committed, aligned guest stack is USED by the native
+    // child (the entry runs on it; RAX comes back through the pipe).
+    {
+        auto stack = space.reserve_region_auto(0x1000, "native-stack");
+        ASSERT_TRUE(stack.ok());
+        ASSERT_TRUE(space.commit_region(stack.value()).ok());
+        const auto result = run_with_stack(stack.value() + 0x1000, 0x1000);
+        ASSERT_EQ(result.outcome, Outcome::Returned)
+            << (result.exception.has_value() ? result.exception->detail : "no exception");
+        EXPECT_EQ(result.return_value, 42u);
+    }
+    // Structural invalids still reject: partial (top with no size),
+    // misaligned top, and top below its size.
+    {
+        const auto result = run_with_stack(0x55002001, 0x1000);
         EXPECT_EQ(result.outcome, Outcome::Faulted);
         ASSERT_TRUE(result.exception.has_value());
-        EXPECT_EQ(result.exception->fault, GuestFault::UnsupportedInstruction);
+        EXPECT_EQ(result.exception->fault, GuestFault::InvalidState);
         EXPECT_NE(result.exception->detail.find("guest stack"), std::string::npos);
-    };
-    expect_rejected(0x55002000, 0);
-    expect_rejected(0, 0x1000);
-    expect_rejected(0x55002000, 0x1000);
+    }
+    {
+        const auto result = run_with_stack(0x800, 0x1000);
+        EXPECT_EQ(result.outcome, Outcome::Faulted);
+        ASSERT_TRUE(result.exception.has_value());
+        EXPECT_EQ(result.exception->fault, GuestFault::InvalidState);
+        EXPECT_NE(result.exception->detail.find("guest stack"), std::string::npos);
+    }
+    // An out-of-space stack range (beyond the address space capacity)
+    // rejects with InvalidAccess.
+    {
+        const auto result = run_with_stack(0x55000000 + (4ull << 20), 0x1000);
+        EXPECT_EQ(result.outcome, Outcome::Faulted);
+        ASSERT_TRUE(result.exception.has_value());
+        EXPECT_EQ(result.exception->fault, GuestFault::InvalidAccess);
+    }
 #else
     GTEST_SKIP() << "native-host slice currently requires x86-64 Linux";
 #endif

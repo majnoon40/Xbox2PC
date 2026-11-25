@@ -173,6 +173,7 @@ tests/CMakeFiles/m11_run_test.dir/m11_run_test.cpp.o: /tmp/x2pc-pr15/tests/m11_r
   /usr/include/c++/14/cstdint \
   /usr/include/c++/14/cstdio \
   /usr/include/c++/14/cstdlib \
+  /usr/include/c++/14/cstring \
   /usr/include/c++/14/ctime \
   /usr/include/c++/14/cwchar \
   /usr/include/c++/14/cwctype \
@@ -717,6 +718,8 @@ src/libxbox2pc_rt_gdk.a:
 
 /usr/include/time.h:
 
+/usr/include/syscall.h:
+
 /usr/lib/x86_64-linux-gnu/crti.o:
 
 /usr/include/c++/14/bits/stl_heap.h:
@@ -752,8 +755,6 @@ src/libxbox2pc_rt_gdk.a:
 /usr/include/x86_64-linux-gnu/bits/types/struct_sched_param.h:
 
 /usr/include/asm-generic/errno.h:
-
-/usr/include/syscall.h:
 
 /tmp/x2pc-pr15/include/xbox2pc/run_cli.hpp:
 
@@ -1006,6 +1007,8 @@ tests/libxbox2pc_pe_builder.a:
 /usr/include/c++/14/bits/atomic_timed_wait.h:
 
 /usr/include/c++/14/bits/stl_multiset.h:
+
+/usr/include/c++/14/cstring:
 
 /usr/include/c++/14/cwchar:
 

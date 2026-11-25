@@ -57,5 +57,5 @@ set_tests_properties("m11_lock_order_test" PROPERTIES  _BACKTRACE_TRIPLES "/tmp/
 add_test("m11_graphics_test" "/tmp/x2pc-pr15/build-native/tests/m11_graphics_test")
 set_tests_properties("m11_graphics_test" PROPERTIES  _BACKTRACE_TRIPLES "/tmp/x2pc-pr15/tests/CMakeLists.txt;292;add_test;/tmp/x2pc-pr15/tests/CMakeLists.txt;0;")
 add_test("m11_run_test" "/tmp/x2pc-pr15/build-native/tests/m11_run_test")
-set_tests_properties("m11_run_test" PROPERTIES  _BACKTRACE_TRIPLES "/tmp/x2pc-pr15/tests/CMakeLists.txt;301;add_test;/tmp/x2pc-pr15/tests/CMakeLists.txt;0;")
+set_tests_properties("m11_run_test" PROPERTIES  _BACKTRACE_TRIPLES "/tmp/x2pc-pr15/tests/CMakeLists.txt;306;add_test;/tmp/x2pc-pr15/tests/CMakeLists.txt;0;")
 subdirs("googletest-build")

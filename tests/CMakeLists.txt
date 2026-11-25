@@ -298,4 +298,9 @@ target_link_libraries(m11_run_test PRIVATE
     xbox2pc_pe_builder
     gtest)
 target_compile_features(m11_run_test PRIVATE cxx_std_20)
+if(XBOX2PC_NATIVE_EXECUTION)
+    target_compile_definitions(m11_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=1)
+else()
+    target_compile_definitions(m11_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
+endif()
 add_test(NAME m11_run_test COMMAND m11_run_test)
