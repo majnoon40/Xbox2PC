@@ -1,0 +1,13 @@
+{
+	"InstallScripts" : 
+	[
+		"/tmp/x2pc-pr15/build-asan-native/cmake_install.cmake",
+		"/tmp/x2pc-pr15/build-asan-native/src/cmake_install.cmake",
+		"/tmp/x2pc-pr15/build-asan-native/tests/cmake_install.cmake",
+		"/tmp/x2pc-pr15/build-asan-native/tests/googletest-build/cmake_install.cmake",
+		"/tmp/x2pc-pr15/build-asan-native/tests/googletest-build/googlemock/cmake_install.cmake",
+		"/tmp/x2pc-pr15/build-asan-native/tests/googletest-build/googletest/cmake_install.cmake",
+		"/tmp/x2pc-pr15/build-asan-native/tools/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

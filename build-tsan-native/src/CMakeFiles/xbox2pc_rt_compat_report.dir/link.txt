@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_rt_compat_report.a CMakeFiles/xbox2pc_rt_compat_report.dir/compat_report.cpp.o
+/usr/bin/ranlib libxbox2pc_rt_compat_report.a

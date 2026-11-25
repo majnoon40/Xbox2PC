@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_rt_x86_interpreter.a CMakeFiles/xbox2pc_rt_x86_interpreter.dir/x86_interpreter.cpp.o
+/usr/bin/ranlib libxbox2pc_rt_x86_interpreter.a

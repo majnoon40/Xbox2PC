@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_json.a CMakeFiles/xbox2pc_json.dir/json_writer.cpp.o
+/usr/bin/ranlib libxbox2pc_json.a

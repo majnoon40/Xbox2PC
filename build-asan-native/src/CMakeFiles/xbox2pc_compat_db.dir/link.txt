@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_compat_db.a CMakeFiles/xbox2pc_compat_db.dir/compat_db.cpp.o
+/usr/bin/ranlib libxbox2pc_compat_db.a

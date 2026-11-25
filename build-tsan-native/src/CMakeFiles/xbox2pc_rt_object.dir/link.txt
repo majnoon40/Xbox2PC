@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_rt_object.a CMakeFiles/xbox2pc_rt_object.dir/runtime_object.cpp.o
+/usr/bin/ranlib libxbox2pc_rt_object.a

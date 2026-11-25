@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_rt_sync.a CMakeFiles/xbox2pc_rt_sync.dir/sync_objects.cpp.o
+/usr/bin/ranlib libxbox2pc_rt_sync.a

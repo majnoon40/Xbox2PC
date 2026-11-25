@@ -1,0 +1,1 @@
+/usr/bin/c++ -fsanitize=thread -fno-omit-frame-pointer -g -Wl,--dependency-file=CMakeFiles/x64_decoder_test.dir/link.d CMakeFiles/x64_decoder_test.dir/x64_decoder_test.cpp.o -o x64_decoder_test  ../src/libxbox2pc_rt_x64_decoder.a ../lib/libgtest.a

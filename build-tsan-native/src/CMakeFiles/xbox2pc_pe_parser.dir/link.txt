@@ -1,0 +1,2 @@
+/usr/bin/ar qc libxbox2pc_pe_parser.a CMakeFiles/xbox2pc_pe_parser.dir/pe_parser.cpp.o CMakeFiles/xbox2pc_pe_parser.dir/pe_tables.cpp.o
+/usr/bin/ranlib libxbox2pc_pe_parser.a
