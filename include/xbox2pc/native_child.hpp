@@ -61,8 +61,10 @@ bool child_install_gs(std::uint64_t teb_host);
 bool child_write_thunks(void* thunk_host, std::uint32_t import_count);
 
 // Rewrite every IAT slot in child memory to point at its thunk.
+// Guest VAs are rebased by load_bias (host_entry - guest_entry): the
+// child dereferences HOST addresses, never raw guest VAs.
 // Returns false when a slot is unreadable/writable-check fails.
-bool child_patch_iats(const ImportThunkTable& imports);
+bool child_patch_iats(const ImportThunkTable& imports, std::int64_t load_bias);
 
 // SIGTRAP handler: dispatch through the ring, fix up the context.
 // Installed by child_install_traps(); also catches fatal signals
@@ -72,8 +74,15 @@ void child_handle_trap(int signal, siginfo_t* info, void* ucontext_v);
 
 // The guest entry call (Microsoft x64). Defined in the .cpp with the
 // ms_abi attribute; the caller passes host-resolved entry + 4 register
-// arguments.
+// arguments. When host_rsp is nonzero the child first switches onto the
+// guest stack (RSP = host_rsp - 8 with the completion sentinel planted
+// as the return address, matching the deterministic engine's entry
+// contract) so guest code that touches [rsp] sees a valid frame. The
+// caller passes the HOST address of the guest stack top — the child
+// never dereferences raw guest VAs.
 std::uint64_t child_invoke_entry(void* host_entry,
+                                 std::uint64_t host_rsp,
+                                 std::uint64_t completion_sentinel,
                                  std::uint64_t a0, std::uint64_t a1,
                                  std::uint64_t a2, std::uint64_t a3);
 

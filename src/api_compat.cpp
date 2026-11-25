@@ -771,6 +771,22 @@ std::vector<ApiDescriptor> builtin_descriptors() {
     }
     {
         ApiDescriptor a;
+        a.library = "kernel32";
+        a.export_name = "ExitProcess";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 1;
+        a.ret = ReturnKind::Void;
+        a.signature = "VOID ExitProcess(UINT uExitCode)";
+        a.category = registry::ApiCategory::WindowsWin32;
+        a.compat = ApiStatus::FullyImplemented;
+        a.impl = ApiStatus::FullyImplemented;
+        a.evidence = "[MS-EXIT-PROCESS]";
+        a.evidence_url = "https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-exitprocess";
+        a.notes = "ends the calling guest process: the deterministic backend faults with GuestTerminated; the native backend terminates the fault-contained child with the code as its exit status";
+        add(a);
+    }
+    {
+        ApiDescriptor a;
         a.library = "kernel32"; a.export_name = "WaitForMultipleObjects";
         a.convention = Convention::X64Microsoft; a.param_count = 4;
         a.ret = ReturnKind::Uint32;

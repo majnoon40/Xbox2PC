@@ -433,8 +433,19 @@ ExecutionResult DeterministicBackend::run(
                 break;
             }
 
-            io_cpu.rip = return_address.value();
             ++res.api_calls;
+            // ExitProcess: the guest process has ended; deterministic
+            // execution cannot continue (the native backend instead
+            // terminates its child and reports the code).
+            if (binding->export_name == "ExitProcess") {
+                fault(GuestFault::GuestTerminated, io_cpu, AccessType::None, rip,
+                      pid_, tid_, Recoverability::Recoverable,
+                      "ExitProcess(" + std::to_string(dispatched.value().api_result.return_value) +
+                          "): guest process exited", res.exception);
+                res.outcome = Outcome::Faulted;
+                break;
+            }
+            io_cpu.rip = return_address.value();
             if (req.completion_va != 0 && io_cpu.rip == req.completion_va) {
                 // Returning from an imported API directly to the entry
                 // return address: the same entry-return contract as a
@@ -855,6 +866,9 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
         plan.call.args.push_back(int_arg());
         plan.call.args.push_back(int_arg());
         plan.call.args.push_back(int_arg());
+        plan.call.args.push_back(int_arg());
+        plan.call.ret = abi::CallSpec::ReturnKind::Void;
+    } else if (id == "ExitProcess") {
         plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Void;
     } else if (id == "CreateMutexW") {

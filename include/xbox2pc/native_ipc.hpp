@@ -42,6 +42,7 @@ enum class ReplyStatus : std::uint32_t {
     Rejected = 1,
     UnknownApi = 2,
     Fatal = 3,
+    GotoHandler = 4,   // SEH: resume at aux[1] (handler VA) with RSP=aux[2]
 };
 
 // Fixed-offset wire accessors (both sides compile the same view).

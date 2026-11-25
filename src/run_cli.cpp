@@ -189,6 +189,8 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
         j.set("return_value", rax);
         j.set("exit_code", rax & 0xFFu);
         j.set("api_calls", res.ok() ? res.value().api_calls : 0);
+        if (res.ok() && res.value().exception.has_value())
+            j.set("detail", rt::exec::format_exception(*res.value().exception));
         j.set("regions_after_terminate", static_cast<std::uint64_t>(st.region_count));
         if (!write_file(*json_out, j.serialize() + "\n")) return 1;
         std::printf("wrote %s\n", json_out->c_str());
@@ -202,6 +204,10 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
                     rt::exec::outcome_to_name(res.value().outcome),
                     (unsigned long long)res.value().instructions_executed,
                     (unsigned long long)rax);
+        if (res.value().exception.has_value()) {
+            std::printf("  detail:      %s\n",
+                        rt::exec::format_exception(*res.value().exception).c_str());
+        }
         std::printf("  exit code:   %llu (RAX & 0xFF)\n",
                     (unsigned long long)(rax & 0xFFu));
         std::printf("  api calls:   %llu\n",

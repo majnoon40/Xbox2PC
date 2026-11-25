@@ -106,6 +106,7 @@ bool ImportRing::parent_wait_request(std::uint64_t* seq_in, RequestSlot& out_req
         if (avail >= want) {
             const std::uint32_t slot = static_cast<std::uint32_t>((*seq_in) % kRingSlots);
             slot_load(&out_request, page_->req[slot], sizeof(RequestSlot));
+            *seq_in = want;   // advance the caller's cursor
             return true;
         }
         int spins = 0;

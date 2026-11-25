@@ -28,7 +28,16 @@
 
 #include "xbox2pc/native_child.hpp"
 #include "xbox2pc/native_ipc.hpp"
+#include "xbox2pc/pe_parser.hpp"
 #endif
+
+namespace xbox2pc::rt::exec {
+namespace {
+// Unwind-search diagnostics sink (bounded: warnings only; never
+// propagated to the guest record).
+diag::Diagnostics unwind_diags_;
+}  // namespace
+}  // namespace xbox2pc::rt::exec
 
 
 namespace xbox2pc::rt::exec {
@@ -123,10 +132,11 @@ ExecutionResult NativeExecutionBackend::run(
     if (req.control != nullptr)
         return fail(GuestFault::UnsupportedInstruction,
                     "native slice does not support cooperative execution control");
-    // The child runs on a host-owned stack; guest stack state is rejected.
-    if (req.stack_top_va != 0 || req.stack_size != 0)
-        return fail(GuestFault::UnsupportedInstruction,
-                    "native slice does not install a guest stack");
+    // Phase 5: the entry runs on the GUEST stack (mapped host memory).
+    if (req.stack_top_va != 0 && req.stack_size != 0 &&
+        (req.stack_top_va < req.stack_size || (req.stack_top_va & 0xF) != 0))
+        return fail(GuestFault::InvalidState,
+                    "native guest stack top is misaligned or below its size");
     if (interrupted.load(std::memory_order_acquire)) {
         result.outcome = Outcome::Interrupted;
         return result;
@@ -139,6 +149,12 @@ ExecutionResult NativeExecutionBackend::run(
                     "native import IAT vector does not match the binding vector");
 #if defined(__linux__) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
     guest::GuestMemory memory(*space_);
+    if (req.stack_top_va != 0 && req.stack_size != 0) {
+        const std::uint64_t floor = req.stack_top_va - req.stack_size;
+        if (!memory.validate(floor, req.stack_size, true, false).ok())
+            return fail(GuestFault::InvalidAccess,
+                        "native guest stack is not a committed writable region");
+    }
     if (!memory.validate_exec(req.entry_va).ok())
         return fail(GuestFault::PermissionExec, "native entry is not executable guest memory");
     auto host_entry = space_->translate(req.entry_va);
@@ -156,10 +172,11 @@ ExecutionResult NativeExecutionBackend::run(
             const std::uint64_t iat_va =
                 i < req.api_iat_vas.size() ? req.api_iat_vas[i] : 0;
             if (iat_va == 0) continue;
-            // The slot must be writable guest memory (the child rewrites it).
-            if (!memory.validate(iat_va, 8, true, false).ok())
+            // The slot must be readable guest memory (the parent patches it
+            // pre-fork; the child only reads).
+            if (!memory.validate(iat_va, 8, false, false).ok())
                 return fail(GuestFault::InvalidAccess,
-                            "native import IAT slot is not writable guest memory");
+                            "native import IAT slot is not readable guest memory");
             // And the bound descriptor must exist parent-side (the ring
             // dispatch needs a plan).
             const auto* descriptor = binding.by_ordinal
@@ -226,6 +243,51 @@ ExecutionResult NativeExecutionBackend::run(
     child_state.imports = imports.get();
     child_state.teb_host = teb_host;
 
+    // Parent-side IAT patch: point every bound import's slot at its
+    // thunk (page at the synthetic binding base). Done here so the child
+    // never needs write access: .text keeps its loader protection.
+    if (has_imports) {
+        for (std::size_t i = 0; i < req.api_bindings.size() &&
+                               i < native::kMaxThunkImports; ++i) {
+            const std::uint64_t iat_va =
+                i < req.api_iat_vas.size() ? req.api_iat_vas[i] : 0;
+            if (iat_va == 0) continue;
+            const std::uint64_t thunk_va =
+                native::kThunkPageBase + static_cast<std::uint64_t>(i) * native::kThunkStride;
+            const std::uint64_t page = iat_va & ~0xFFFull;
+            const auto before = space_->find_containing(iat_va);
+            if (!before.ok())
+                return fail(GuestFault::InvalidAccess,
+                            "native import IAT slot has no containing region");
+            const MemProtect original = before.value().protection;
+            const bool needs_flip = original != MemProtect::ReadWrite &&
+                                    original != MemProtect::Full;
+            if (needs_flip) {
+                auto flipped = space_->protect_region(page, MemProtect::ReadWrite);
+                if (!flipped.ok())
+                    return fail(GuestFault::InvalidAccess,
+                                "native import IAT page flip failed: " +
+                                    flipped.error_string());
+            }
+            auto slot = space_->translate(iat_va);
+            bool written = slot.ok();
+            if (written) {
+                std::memcpy(slot.value(), &thunk_va, sizeof(thunk_va));
+            }
+            if (needs_flip) {
+                auto restored = space_->protect_region(page, original);
+                if (!restored.ok())
+                    return fail(GuestFault::Internal,
+                                "native import IAT page restore failed: " +
+                                    restored.error_string());
+            }
+            if (!written)
+                return fail(GuestFault::InvalidAccess,
+                            "native import IAT slot translate failed: " +
+                                slot.error_string());
+        }
+    }
+
     // Result pipe: the child's final RAX travels as 8 bytes (the ring
     // carries import-call replies; the entry return value has its own
     // documented channel, unchanged from M11.5).
@@ -245,21 +307,32 @@ ExecutionResult NativeExecutionBackend::run(
     }
     if (child == 0) {
         // ── child: everything after here must be async-signal-safe ──
+        native::child_install_traps(&child_state);
         if (thunk_host != nullptr &&
             !native::child_write_thunks(thunk_host, imports->count))
             ::_exit(122);
         if (teb_host != 0 && !native::child_install_gs(teb_host))
             ::_exit(121);
-        if (has_imports && !native::child_patch_iats(*imports))
-            ::_exit(120);
-        native::child_install_traps(&child_state);
+        // IAT slots are already patched parent-side; the child only
+        // reads them (and lands on the thunk page's int3).
         std::array<std::uint64_t, 4> arguments{};
         const std::array<cpu::Gpr, 4> argument_registers = {
             cpu::Gpr::Rcx, cpu::Gpr::Rdx, cpu::Gpr::R8, cpu::Gpr::R9};
         for (std::size_t i = 0; i < req.entry_args.size(); ++i)
             arguments[i] = io_cpu.reg(argument_registers[i]);
+        // Guest stack top -> HOST address (the image's load bias).
+        const std::int64_t stack_bias =
+            static_cast<std::int64_t>(
+                reinterpret_cast<std::uint64_t>(host_entry.value())) -
+            static_cast<std::int64_t>(req.entry_va);
+        const std::uint64_t host_stack_top =
+            req.stack_top_va != 0
+                ? static_cast<std::uint64_t>(
+                      static_cast<std::int64_t>(req.stack_top_va) + stack_bias)
+                : 0;
         const std::uint64_t value = native::child_invoke_entry(
-            host_entry.value(), arguments[0], arguments[1], arguments[2], arguments[3]);
+            host_entry.value(), host_stack_top, req.completion_va,
+            arguments[0], arguments[1], arguments[2], arguments[3]);
         ::close(result_pipe[0]);
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
         std::size_t written = 0;
@@ -327,6 +400,18 @@ ExecutionResult NativeExecutionBackend::run(
                 continue;
             }
             const auto& binding = req.api_bindings[request.api_index];
+            // ExitProcess rides the ordinary ApiCall wire; the parent
+            // recognizes it by identity and answers with the
+            // terminate-after-reply contract instead of dispatching.
+            if (binding.library == "kernel32" &&
+                binding.export_name == "ExitProcess") {
+                reply.status = static_cast<std::uint32_t>(native::ReplyStatus::Ok);
+                reply.exit_code = static_cast<std::uint32_t>(request.args[0]);
+                reply.aux[0] = 1;   // terminate-after-reply contract
+                ring->parent_reply(served - 1, reply);
+                served_any = true;
+                continue;
+            }
             const auto* descriptor = binding.by_ordinal
                 ? registry_.find_ordinal(binding.library, binding.ordinal)
                 : registry_.find(binding.library, binding.export_name);
@@ -348,6 +433,10 @@ ExecutionResult NativeExecutionBackend::run(
             // the deterministic engine (validation + dispatch + return).
             cpu::CpuState call_cpu;
             call_cpu.reset();
+            // A valid guest RSP (the request's stack) so return-value
+            // marshalling's frame accounting cannot overflow.
+            if (req.stack_top_va != 0)
+                call_cpu.set_reg(cpu::Gpr::Sp, req.stack_top_va - 0x100);
             call_cpu.set_reg(cpu::Gpr::Rcx, request.args[0]);
             call_cpu.set_reg(cpu::Gpr::Rdx, request.args[1]);
             call_cpu.set_reg(cpu::Gpr::R8, request.args[2]);
@@ -363,19 +452,117 @@ ExecutionResult NativeExecutionBackend::run(
             }
             const auto& api_res = dispatched.value().api_result;
             if (api_res.raise_guest_exception) {
-                // Phase-1 unwind result (same contract as the
-                // deterministic backend): report and stop the run.
-                ring->parent_reply(served - 1,
-                                   {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                    0, 0, {0, 0, 0, 0}});
+                // Phase-1 unwind dispatch (same contract as the
+                // deterministic backend): search the request's unwind
+                // context for a language handler; a hit transfers child
+                // control to the handler at the establisher frame.
+                if (req.unwind.unwind_image.empty()) {
+                    ring->parent_reply(served - 1,
+                                       {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
+                                        0, 0, {0, 0, 0, 0}});
+                    served_any = true;
+                    (void)::kill(child, SIGKILL);
+                    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+                    child_exited = true;
+                    ::close(result_pipe[0]);
+                    if (thunk_host != nullptr) ::munmap(thunk_host, 4096);
+                    return fail(GuestFault::MarshalFailure,
+                                "unhandled guest exception 0x" +
+                                    hex32(api_res.exception_code) +
+                                    " (no unwind data bound to the request)");
+                }
+                pe::PeImage unwind_img;
+                try {
+                    diag::Diagnostics quiet;
+                    unwind_img = pe::parse(req.unwind.unwind_image.data(),
+                                           req.unwind.unwind_image.size(),
+                                           "native-unwind", quiet);
+                } catch (const pe::ParseError&) {
+                    ring->parent_reply(served - 1,
+                                       {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
+                                        0, 0, {0, 0, 0, 0}});
+                    served_any = true;
+                    (void)::kill(child, SIGKILL);
+                    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+                    child_exited = true;
+                    ::close(result_pipe[0]);
+                    if (thunk_host != nullptr) ::munmap(thunk_host, 4096);
+                    return fail(GuestFault::MarshalFailure,
+                                "unhandled guest exception 0x" +
+                                    hex32(api_res.exception_code) +
+                                    " (bound unwind image is not parseable)");
+                }
+                // The faulting RIP for the search: the return address of
+                // the RaiseException call site, recovered from the GUEST
+                // STACK. The child's RSP at the trap is the pre-call RSP
+                // (the thunk's ret was not executed); the return address
+                // sits at the top of the guest frame. Recover it via the
+                // load bias.
+                const std::int64_t bias =
+                    static_cast<std::int64_t>(
+                        reinterpret_cast<std::uint64_t>(host_entry.value())) -
+                    static_cast<std::int64_t>(req.entry_va);
+                // The child's actual frame at the trap (wire aux,
+                // rebased host->guest): aux[1] is the import call's
+                // return address (the search's faulting RIP), aux[0] is
+                // RSP (with the return address already popped by the
+                // thunk's pending ret).
+                const std::uint64_t guest_rsp_at_call =
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(request.aux[0]) - bias);
+                const std::uint64_t return_va =
+                    static_cast<std::uint64_t>(
+                        static_cast<std::int64_t>(request.aux[1]) - bias);
+                auto read_stack = [&memory](std::uint64_t va) {
+                    auto v = memory.read_u64(va);
+                    if (!v.ok()) return std::optional<std::uint64_t>();
+                    return std::optional<std::uint64_t>(v.value());
+                };
+                (void)bias;
+                // The faulting RIP for the search is the RaiseException
+                // call site's RETURN address (the guest call pushed it at
+                // [RSP] before landing on the thunk); the walked RSP is
+                // one slot above it.
+                // The .pdata range is end-exclusive; the import call's
+                // return address is one PAST the call instruction, so
+                // search from the call's last byte (ret_va - 1) to stay
+                // inside the covering function.
+                auto search = pe::find_exception_handler(
+                    unwind_img, req.unwind.unwind_image.data(),
+                    req.unwind.unwind_image.size(), req.unwind.image_base,
+                    return_va - 1, guest_rsp_at_call, read_stack,
+                    unwind_diags_);
+                if (!search.has_value() || !search->found) {
+                    ring->parent_reply(served - 1,
+                                       {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
+                                        0, 0, {0, 0, 0, 0}});
+                    served_any = true;
+                    (void)::kill(child, SIGKILL);
+                    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+                    child_exited = true;
+                    ::close(result_pipe[0]);
+                    if (thunk_host != nullptr) ::munmap(thunk_host, 4096);
+                    return fail(GuestFault::MarshalFailure,
+                                "unhandled guest exception 0x" +
+                                    hex32(api_res.exception_code) +
+                                    " (no language handler found)");
+                }
+                // Handler located: resume the child there (guest VA is
+                // absolute: image_base + rva).
+                const std::uint64_t handler_guest_va =
+                    req.unwind.image_base + search->handler_rva;
+                native::ReplySlot seh{};
+                seh.status = static_cast<std::uint32_t>(native::ReplyStatus::GotoHandler);
+                seh.aux[1] = handler_guest_va + static_cast<std::uint64_t>(bias);
+                // The handler's RET must land in the establisher frame's
+                // CALLER: set RSP past the frame's saved return address
+                // so the pop returns to the caller, not back into the
+                // excepting function.
+                seh.aux[2] = search->establisher_frame + 8 +
+                             static_cast<std::uint64_t>(bias);
+                ring->parent_reply(served - 1, seh);
                 served_any = true;
-                (void)::kill(child, SIGKILL);
-                while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-                child_exited = true;
-                if (thunk_host != nullptr) ::munmap(thunk_host, 4096);
-                return fail(GuestFault::MarshalFailure,
-                            "guest exception 0x" + hex32(api_res.exception_code) +
-                                " raised under native import dispatch (phase-1 search only)");
+                continue;
             }
             reply.status = static_cast<std::uint32_t>(native::ReplyStatus::Ok);
             reply.rax = call_cpu.reg(cpu::Gpr::Rax);
