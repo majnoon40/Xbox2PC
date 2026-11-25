@@ -86,6 +86,7 @@ Policy (enforced by `validate()`, tested by fuzz + unit tests):
 | CloseHandle | `BOOL ...(HANDLE)` | partially-implemented (typed dispatch: event/mutex/semaphore, task queue, private heap; default heap refused) |
 
 | XMemAlloc | `LPVOID ...(SIZE_T, DWORD)` | partially-implemented (aligned xmem arena allocation; low attribute byte maps to 8..4096 alignment, other bits ignored) |
+| D3D12CreateDevice | `HRESULT ...(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**)` | stubbed (null graphics provider: runtime-owned device object, process-scoped handle, traced; no GPU work) |
 | XMemFree | `BOOL ...(LPVOID, DWORD)` | partially-implemented (xmem arena release; attributes ignored, exact base required) |
 | QueryPerformanceCounter | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
 | QueryPerformanceFrequency | `BOOL ...(LARGE_INTEGER*)` | native-equivalent |
@@ -225,9 +226,9 @@ import must not be mistaken for a complete subsystem.
 | Runtime and process | Partial | PE loading, process/thread managers, minimal TEB/PEB and per-thread TLS storage exist; automatic TLS attach/detach lifecycle and native guest execution remain incomplete. |
 | Memory and xmem | Partial | Process-owned xmem allocator and a subset of virtual-memory APIs exist; full Win32 allocation/protection/query semantics and complete Xbox allocator compatibility are not claimed. |
 | Synchronization and task queues | Partial | Supported event/mutex/semaphore waits and bounded manual task queues exist; unsupported queue modes, scheduler behavior, and broader lock-order proof remain open. |
-| Graphics | Stubbed / roadmap only | No production graphics provider is claimed. The null-provider contract and future graphics direction are documented in `docs/graphics-roadmap.md`. |
-| Audio | Unsupported | No audio provider or guest audio execution path is implemented. |
-| Storage | Unsupported | No Xbox storage provider or title save-data compatibility is implemented. |
+| Graphics | Stubbed (null provider) | `IGraphicsProvider` seam with a deterministic `NullGraphicsProvider` (`src/graphics_service.cpp`): `d3d12!D3D12CreateDevice` dispatches to a runtime-owned device object with a process-scoped generation-checked handle; command records and submission ordering are traced but never executed; unknown semantics fail closed. Traced, stubbed — never `Supported`. A real backend (Vulkan translation) is a separate milestone per `docs/graphics-roadmap.md`. |
+| Audio | Unsupported (boundary defined) | No audio provider or guest audio execution path is implemented. Any future audio provider must follow the graphics provider seam: evidence-backed imports only, runtime-owned objects with process-scoped handles, per-call tracing, and fail-closed unmodeled semantics. |
+| Storage | Unsupported (boundary defined) | No Xbox storage provider or title save-data compatibility is implemented. The package VFS (`src/vfs_process.cpp`) is read-only package inspection, not title storage. A future storage provider must meet the same provider-seam contract as graphics. |
 | Networking | Unsupported | No Xbox networking provider, service emulation, or online compatibility is implemented. |
 
 These are subsystem-level statuses, not a compatibility promise. Any API

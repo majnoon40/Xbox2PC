@@ -54,6 +54,7 @@ enum class TypeId : std::uint16_t {
     MemoryRegion = 7,
     RuntimeService = 8,
     TaskQueue = 9,
+    GraphicsDevice = 10,  // M11 Phase 8 null graphics provider (opaque device)
     // built-in range ends at 999
 };
 

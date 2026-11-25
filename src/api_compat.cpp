@@ -163,10 +163,30 @@ const char* kHeapReAllocUrl = "https://learn.microsoft.com/en-us/windows/win32/a
 const char* kHeapSizeUrl = "https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapsize";
 const char* kXMemAllocUrl = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xmem/functions/xmemalloc";
 const char* kXMemFreeUrl = "https://learn.microsoft.com/en-us/gaming/gdk/docs/reference/system/xmem/functions/xmemfree";
+const char* kD3D12CreateDeviceUrl = "https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-d3d12createdevice";
 
 std::vector<ApiDescriptor> builtin_descriptors() {
     std::vector<ApiDescriptor> d;
     auto add = [&](ApiDescriptor x) { d.push_back(std::move(x)); };
+
+    // — d3d12.h (graphics; null-provider dispatch) —
+    {
+        ApiDescriptor a;
+        a.library = "d3d12";
+        a.export_name = "D3D12CreateDevice";
+        a.convention = Convention::X64Microsoft;
+        a.param_count = 4;
+        a.ret = ReturnKind::HResult;
+        a.signature = "HRESULT D3D12CreateDevice(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**)";
+        a.category = registry::ApiCategory::Direct3D;
+        a.compat = ApiStatus::Stubbed;
+        a.impl = ApiStatus::Stubbed;
+        a.evidence = "[D3D12-CREATE-DEVICE]";
+        a.evidence_url = kD3D12CreateDeviceUrl;
+        a.notes = "null graphics provider: runtime-owned device object with a "
+                  "process-scoped handle; no GPU work; traced";
+        add(a);
+    }
 
     // — XGameRuntimeInit.h (lifecycle) —
     {

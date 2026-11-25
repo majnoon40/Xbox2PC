@@ -272,7 +272,7 @@ target_link_libraries(xbox2pc_rt_api PUBLIC
     xbox2pc_rt_loader xbox2pc_rt_services xbox2pc_api_registry xbox2pc_compat_db)
 target_compile_features(xbox2pc_rt_api PUBLIC cxx_std_20)
 
-add_library(xbox2pc_rt_gdk STATIC gdk_services.cpp)
+add_library(xbox2pc_rt_gdk STATIC gdk_services.cpp graphics_service.cpp)
 target_include_directories(xbox2pc_rt_gdk PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(xbox2pc_rt_gdk PUBLIC
     xbox2pc_rt_api xbox2pc_rt_procman xbox2pc_rt_thread xbox2pc_rt_pal)

@@ -280,3 +280,13 @@ target_link_libraries(m11_lock_order_test PRIVATE
     gtest)
 target_compile_features(m11_lock_order_test PRIVATE cxx_std_20)
 add_test(NAME m11_lock_order_test COMMAND m11_lock_order_test)
+
+# M11 Phase 8: graphics null-provider suite (project-authored test DLL).
+add_executable(m11_graphics_test m11_graphics_test.cpp)
+target_link_libraries(m11_graphics_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_gdk
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(m11_graphics_test PRIVATE cxx_std_20)
+add_test(NAME m11_graphics_test COMMAND m11_graphics_test)

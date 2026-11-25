@@ -853,6 +853,17 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     } else if (id == "XMemFree") {
         plan.call.args.push_back(int_arg()); plan.call.args.push_back(int_arg());
         plan.call.ret = abi::CallSpec::ReturnKind::Int;
+    } else if (id == "D3D12CreateDevice") {
+        // D3D12CreateDevice(adapter, minFeatureLevel, riid, ppDevice).
+        // The adapter and riid are passed through as pointer VALUES (the
+        // null provider does not dereference them); ppDevice is an 8-byte
+        // out slot carrying the device handle.
+        plan.call.args.push_back(ptr_in(0));    // adapter (nullable)
+        plan.call.args.push_back(int_arg());    // D3D_FEATURE_LEVEL
+        plan.call.args.push_back(ptr_in(0));    // riid (not dereferenced)
+        plan.call.args.push_back(ptr_out(8));   // ppDevice
+        plan.out_buffer_args.push_back(3);
+        plan.call.ret = abi::CallSpec::ReturnKind::Int;
     } else {
         return Ret(RuntimeErrc::NotFound,
                    "no marshalling plan for " + d.library + "!" + id +
