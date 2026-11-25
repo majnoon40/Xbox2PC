@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_rt_memory.a CMakeFiles/xbox2pc_rt_memory.dir/memory_management.cpp.o CMakeFiles/xbox2pc_rt_memory.dir/xmem_allocator.cpp.o
-/usr/bin/ranlib libxbox2pc_rt_memory.a

@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_rt_m9_cli.a CMakeFiles/xbox2pc_rt_m9_cli.dir/m9_cli.cpp.o
-/usr/bin/ranlib libxbox2pc_rt_m9_cli.a

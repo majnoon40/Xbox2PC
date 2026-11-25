@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_diagnostics.a CMakeFiles/xbox2pc_diagnostics.dir/diagnostics.cpp.o
-/usr/bin/ranlib libxbox2pc_diagnostics.a

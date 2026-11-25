@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_dep_graph.a CMakeFiles/xbox2pc_dep_graph.dir/dep_graph.cpp.o
-/usr/bin/ranlib libxbox2pc_dep_graph.a

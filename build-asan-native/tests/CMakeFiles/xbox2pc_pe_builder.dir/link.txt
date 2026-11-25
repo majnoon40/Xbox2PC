@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_pe_builder.a CMakeFiles/xbox2pc_pe_builder.dir/__/src/pe_builder.cpp.o
-/usr/bin/ranlib libxbox2pc_pe_builder.a

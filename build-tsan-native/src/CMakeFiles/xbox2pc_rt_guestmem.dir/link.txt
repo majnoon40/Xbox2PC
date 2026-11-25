@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_rt_guestmem.a CMakeFiles/xbox2pc_rt_guestmem.dir/guest_memory.cpp.o
-/usr/bin/ranlib libxbox2pc_rt_guestmem.a

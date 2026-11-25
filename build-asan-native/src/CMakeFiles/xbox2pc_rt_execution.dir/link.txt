@@ -1,2 +1,0 @@
-/usr/bin/ar qc libxbox2pc_rt_execution.a CMakeFiles/xbox2pc_rt_execution.dir/execution_engine.cpp.o CMakeFiles/xbox2pc_rt_execution.dir/execution_context.cpp.o CMakeFiles/xbox2pc_rt_execution.dir/guest_environment.cpp.o CMakeFiles/xbox2pc_rt_execution.dir/native_execution.cpp.o CMakeFiles/xbox2pc_rt_execution.dir/native_ipc.cpp.o CMakeFiles/xbox2pc_rt_execution.dir/native_child.cpp.o CMakeFiles/xbox2pc_rt_execution.dir/process_tls_wiring.cpp.o
-/usr/bin/ranlib libxbox2pc_rt_execution.a
