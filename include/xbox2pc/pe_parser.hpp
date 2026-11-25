@@ -185,15 +185,23 @@ struct UnwindCode {
 
 // Decoded UNWIND_INFO (.xdata) for one function. codes keep their stored
 // order (reverse application order); count_of_codes is the header's slot
-// count. chained_unwind_rva is set only for UNW_FLAG_CHAININFO entries.
+// count (a full byte — arrays over 15 slots are legal). language_handler_rva
+// is the language-handler RVA from the trailer: non-chained entries store
+// it after the (slot-padded) code array; CHAININFO entries store a
+// per-function handler RVA followed by the 12-byte chained RUNTIME_FUNCTION
+// trailer (whose BeginAddress is the chained function). handler_present()
+// reports only the EHANDLER flag — the unwind procedure never invokes
+// handlers of chained entries.
 struct UnwindInfo {
     std::uint8_t version = 0;
     std::uint8_t flags = 0;
     std::uint8_t size_of_prolog = 0;
+    std::uint8_t count_of_codes = 0;   // full byte-2 slot count
     std::uint8_t frame_register = 0;   // 0 when no frame pointer
-    std::uint8_t frame_offset = 0;     // unscaled (already >>4) frame offset
+    std::uint8_t frame_offset = 0;     // scaled: (byte3 >> 4) * 16
     std::vector<UnwindCode> codes;
-    std::uint32_t chained_unwind_rva = 0;
+    std::uint32_t language_handler_rva = 0;  // 0 when no handler
+    std::uint32_t chained_unwind_rva = 0;    // begin RVA of chained function
 
     bool is_chained() const { return (flags & 0x4) != 0; }
     bool handler_present() const { return (flags & 0x1) != 0; }
@@ -357,6 +365,35 @@ struct UnwindFrame {
 std::optional<UnwindFrame> unwind_one_frame(
     const PeImage& img, const RuntimeFunction& fn, const std::uint8_t* base,
     std::uint64_t size, std::uint32_t target_offset, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags);
+
+// ── exception handler search (M11 Phase 6 slice B) ────────────────────────
+
+// One step of the documented unwind procedure.
+struct UnwindStep {
+    std::uint64_t rip = 0;           // guest RIP at this step
+    std::uint64_t rsp = 0;           // guest RSP at this step
+    std::vector<SavedRegister> saved; // registers this step restores
+};
+
+// Result of searching for an exception handler.
+struct ExceptionHandlerSearchResult {
+    bool found = false;              // a handler accepted the exception
+    std::uint32_t handler_rva = 0;   // image-relative language handler
+    std::uint64_t establisher_frame = 0; // guest RSP of the handler frame
+    std::vector<UnwindStep> frames;  // walk steps, innermost first
+};
+
+// Walk the documented x64 unwind procedure from fault_rip/current_rsp
+// looking for a function whose (primary, non-chained) UNWIND_INFO has
+// UNW_FLAG_EHANDLER set. Leaf functions (no .pdata entry) advance by
+// popping the return address. Returns nullopt only on decode/walk
+// failure; a completed walk with no handler returns found=false with
+// the walked chain.
+std::optional<ExceptionHandlerSearchResult> find_exception_handler(
+    const PeImage& img, const std::uint8_t* base, std::uint64_t size,
+    std::uint64_t image_base, std::uint64_t fault_rip, std::uint64_t current_rsp,
     const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
     diag::Diagnostics& diags);
 

@@ -650,6 +650,12 @@ std::vector<std::uint8_t> u16_bytes(std::uint16_t v) {
             static_cast<std::uint8_t>(v >> 8)};
 }
 
+// Append a raw 16-bit slot to a byte vector (trailer padding).
+void append_slot(std::vector<std::uint8_t>& out, std::uint16_t v) {
+    const auto b = u16_bytes(v);
+    out.insert(out.end(), b.begin(), b.end());
+}
+
 }  // namespace
 
 TEST(XdataUnwindInfoDecode, DecodesPrologCodesAndFrameRegister) {
@@ -662,8 +668,8 @@ TEST(XdataUnwindInfoDecode, DecodesPrologCodesAndFrameRegister) {
     unwind.clear();
     unwind.push_back(static_cast<std::uint8_t>(0x01));       // version 1, flags 0
     unwind.push_back(0x0E);                                   // size_of_prolog
-    unwind.push_back(static_cast<std::uint8_t>(6 | (5 << 4))); // 6 slots, frame reg = rbp(5)
-    unwind.push_back(0x10);                                   // frame offset 1 (unscaled 0x1)
+    unwind.push_back(6);                                      // 6 slots (full byte)
+    unwind.push_back(static_cast<std::uint8_t>((1 << 4) | 5)); // fp offset 1, frame reg rbp(5)
     auto append = [&](const std::vector<std::uint8_t>& v) {
         unwind.insert(unwind.end(), v.begin(), v.end());
     };
@@ -716,7 +722,7 @@ TEST(XdataUnwindInfoDecode, DecodesLargeAllocFarSaveAndChaining) {
     };
     unwind.push_back(static_cast<std::uint8_t>(0x01 | (0x4 << 3)));  // v1, CHAININFO
     unwind.push_back(0x20);
-    unwind.push_back(static_cast<std::uint8_t>(6));  // 2+3+1 slots, no frame reg
+    unwind.push_back(6);             // 2+3+1 slots, no frame reg (full byte)
     unwind.push_back(0x00);
     append(code_slot(0x02, 1, 0));    // ALLOC_LARGE
     append(u16_bytes(0x0123));        //   0x123*8 = 0x918
@@ -724,8 +730,12 @@ TEST(XdataUnwindInfoDecode, DecodesLargeAllocFarSaveAndChaining) {
     append(u16_bytes(0x0040));        //   low 16 of offset
     append(u16_bytes(0x0001));        //   high 16 -> 0x10040
     append(code_slot(0x0A, 0, 5));    // PUSH_NONVOL rbp (3rd slot)
-    append(u16_bytes(0x1000));        // chained unwind RVA (low half)
-    append(u16_bytes(0x0000));        // chained unwind RVA (high half)
+    // 6 slots is already even: no padding before the trailer.
+    // Chained RUNTIME_FUNCTION (12 bytes): begin=0x1000, end=0x1010,
+    // unwind=0 (only BeginAddress is consulted).
+    append(u16_bytes(0x1000)); append(u16_bytes(0x0000));
+    append(u16_bytes(0x1010)); append(u16_bytes(0x0000));
+    append(u16_bytes(0x0000)); append(u16_bytes(0x0000));
     const std::uint32_t unwind_rva = 0x1900;
     s.text_payloads.emplace_back(unwind_rva, unwind);
     s.exception_directory_payload = concat({
@@ -938,15 +948,21 @@ TEST(VirtualUnwindOneFrame, ChainedInfoContributesAllCodes) {
     s.text_payloads.emplace_back(inner_rva, inner);
 
     // Outer UNWIND_INFO: 1 slot (push rbp) + CHAININFO link to inner.
+    // Odd code counts are padded to an even slot count before the trailer,
+    // so one unused 16-bit slot precedes the 12-byte RUNTIME_FUNCTION.
     std::vector<std::uint8_t> outer;
     outer.push_back(static_cast<std::uint8_t>(0x01 | (0x4 << 3)));  // v1 + chain
     outer.push_back(0x04);
-    outer.push_back(static_cast<std::uint8_t>(1));
+    outer.push_back(1);
     outer.push_back(0x00);
     const auto push_rbp = code_slot(0x01, 0, 5);     // PUSH_NONVOL rbp
     outer.insert(outer.end(), push_rbp.begin(), push_rbp.end());
-    // Chained RUNTIME_FUNCTION RVA (32-bit): the inner function's begin.
+    append_slot(outer, 0x0000);                      // unused padding slot
+    // Chained RUNTIME_FUNCTION (12 bytes): begin=inner, end=inner+0x10,
+    // unwind=inner's .xdata (only BeginAddress is consulted).
     outer.push_back(0x50); outer.push_back(0x10); outer.push_back(0x00); outer.push_back(0x00);
+    outer.push_back(0x60); outer.push_back(0x10); outer.push_back(0x00); outer.push_back(0x00);
+    outer.push_back(0x00); outer.push_back(0x1E); outer.push_back(0x00); outer.push_back(0x00);
     const std::uint32_t outer_rva = 0x1F00;
     s.text_payloads.emplace_back(outer_rva, outer);
 
@@ -1120,4 +1136,244 @@ TEST(UnwindSavedRegisters, FarSaveAndXmmLocations) {
     EXPECT_FALSE(frame->saved[2].is_xmm);
     EXPECT_EQ(frame->saved[2].reg, 12u);
     EXPECT_EQ(frame->saved[2].location, 0x7FFF0000u);
+}
+
+// ── M11 Phase 6 slice B: exception handler search ─────────────────────────
+
+namespace {
+
+// v1 UNWIND_INFO header helper for handler-search fixtures.
+std::vector<std::uint8_t> unwind_header(unsigned flags, unsigned slots,
+                                        unsigned size_of_prolog) {
+    return {static_cast<std::uint8_t>(0x01 | (flags << 3)),
+            static_cast<std::uint8_t>(size_of_prolog),
+            static_cast<std::uint8_t>(slots), 0x00};
+}
+
+}  // namespace
+
+TEST(FindExceptionHandler, FindsOuterEhandler) {
+    // Inner (0x1080-0x10A0): no handler, push rbx only.
+    // Outer (0x1000-0x1050): EHANDLER, push rbp.
+    // Fault in inner: walk inner, then outer's handler is found.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+
+    std::vector<std::uint8_t> inner = unwind_header(0, 1, 4);
+    {
+        const auto c = code_slot(0x01, 0, 3);  // PUSH_NONVOL rbx
+        inner.insert(inner.end(), c.begin(), c.end());
+        append_slot(inner, 0x0000);  // odd -> pad before trailer (none)
+    }
+    s.text_payloads.emplace_back(0x1E00, inner);
+
+    // Outer: EHANDLER (0x1) + handler RVA after padded array.
+    std::vector<std::uint8_t> outer = unwind_header(0x1, 1, 2);
+    {
+        const auto c = code_slot(0x01, 0, 5);  // PUSH_NONVOL rbp
+        outer.insert(outer.end(), c.begin(), c.end());
+        append_slot(outer, 0x0000);  // padding slot (odd count)
+        outer.push_back(0x88); outer.push_back(0x12); outer.push_back(0x00); outer.push_back(0x00);
+    }
+    s.text_payloads.emplace_back(0x1F00, outer);
+
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, 0x1E00),
+        pdata_entry(0x1000, 0x1050, 0x1F00),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+
+    FakeStack stack;
+    // Step 1 (inner, push rbx): entry rsp 0x7FFF0008 holds the return
+    // address into outer.
+    stack.slots[0x7FFF0008] = 0x140001002;   // outer+2 (inside outer range)
+    // Step 2 (outer, push rbp): the found frame's own return address sits
+    // at its entry rsp 0x7FFF0018 (unwind_one_frame reads it while
+    // reconstructing the establisher frame).
+    stack.slots[0x7FFF0018] = 0x140009999;   // outer's caller
+    const auto found = xbox2pc::pe::find_exception_handler(
+        img, image.data(), image.size(), 0x140000000ull, 0x140001085ull,
+        0x7FFF0000ull, [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_TRUE(found->found);
+    EXPECT_EQ(found->handler_rva, 0x1288u);
+    EXPECT_EQ(found->establisher_frame, 0x7FFF0018u);
+    ASSERT_EQ(found->frames.size(), 2u);
+    EXPECT_EQ(found->frames[0].rip, 0x140001085ull);  // inner
+    EXPECT_EQ(found->frames[1].rip, 0x140001002ull);  // outer
+}
+
+TEST(FindExceptionHandler, LeafPopsReturnAddress) {
+    // No .pdata entry covers the fault RIP: leaf rule pops [rsp].
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> outer = unwind_header(0x1, 1, 2);
+    {
+        const auto c = code_slot(0x01, 0, 5);  // PUSH_NONVOL rbp
+        outer.insert(outer.end(), c.begin(), c.end());
+        append_slot(outer, 0x0000);
+        outer.push_back(0x34); outer.push_back(0x12); outer.push_back(0x00); outer.push_back(0x00);
+    }
+    s.text_payloads.emplace_back(0x1F00, outer);
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1000, 0x1050, 0x1F00),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+
+    FakeStack stack;
+    stack.slots[0x7FFF0000] = 0x140001002;  // leaf's return into outer
+    stack.slots[0x7FFF0010] = 0x140009999;  // outer's caller (entry rsp after pop)
+    const auto found = xbox2pc::pe::find_exception_handler(
+        img, image.data(), image.size(), 0x140000000ull, 0x140001200ull,
+        0x7FFF0000ull, [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_TRUE(found->found);
+    EXPECT_EQ(found->handler_rva, 0x1234u);
+    ASSERT_EQ(found->frames.size(), 2u);
+    EXPECT_EQ(found->frames[0].rip, 0x140001200ull);  // leaf
+    EXPECT_EQ(found->frames[1].rip, 0x140001002ull);  // outer
+}
+
+TEST(FindExceptionHandler, NoHandlerWalksChain) {
+    // Single function, no handler flag: walk completes, found=false.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> fn = unwind_header(0, 1, 4);
+    {
+        const auto c = code_slot(0x01, 0, 3);
+        fn.insert(fn.end(), c.begin(), c.end());
+        append_slot(fn, 0x0000);
+    }
+    s.text_payloads.emplace_back(0x1E00, fn);
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, 0x1E00),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+
+    FakeStack stack;
+    // Frame step (push rbx undone): return address at 0x7FFF0008.
+    stack.slots[0x7FFF0008] = 0x140003000;  // somewhere outside .pdata
+    // Leaf step at 0x140003000: pops [0x7FFF0010]; provide it so the walk
+    // terminates by leaving the image extent (0x140008000) instead of a
+    // stack-read failure.
+    stack.slots[0x7FFF0010] = 0x140008000;  // one past size_of_image (0x4000)
+    const auto found = xbox2pc::pe::find_exception_handler(
+        img, image.data(), image.size(), 0x140000000ull, 0x140001085ull,
+        0x7FFF0000ull, [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(found.has_value());
+    EXPECT_FALSE(found->found);
+    ASSERT_EQ(found->frames.size(), 2u);  // function step + leaf step
+    EXPECT_EQ(found->frames[0].rip, 0x140001085ull);
+    EXPECT_EQ(found->frames[1].rip, 0x140003000ull);
+}
+
+TEST(FindExceptionHandler, ChainedHandlerFlagsIgnored) {
+    // A CHAININFO-linked outer entry carries the EHANDLER flag; the inner
+    // (primary) entry does not. The unwind procedure must IGNORE the
+    // chained entry's handler flag: no handler found, walk continues.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+
+    // Inner (primary, walked first): plain, 1 slot (push rbx).
+    std::vector<std::uint8_t> inner = unwind_header(0x4, 1, 4);
+    {
+        const auto c = code_slot(0x01, 0, 3);  // push rbx
+        inner.insert(inner.end(), c.begin(), c.end());
+        // No handler RVA: EHANDLER not set. Odd count -> pad slot.
+        append_slot(inner, 0x0000);
+        // Chained RUNTIME_FUNCTION (12 bytes) pointing at outer.
+        append_slot(inner, 0x1000);
+        append_slot(inner, 0x0000);
+        append_slot(inner, 0x1050);
+        append_slot(inner, 0x0000);
+        append_slot(inner, 0x1F00);
+        append_slot(inner, 0x0000);
+    }
+    s.text_payloads.emplace_back(0x1E00, inner);
+
+    // Outer (chained): EHANDLER set — must be ignored per the docs.
+    std::vector<std::uint8_t> outer = unwind_header(0x1, 1, 2);
+    {
+        const auto c = code_slot(0x01, 0, 5);  // push rbp
+        outer.insert(outer.end(), c.begin(), c.end());
+        append_slot(outer, 0x0000);
+        outer.push_back(0x88); outer.push_back(0x12); outer.push_back(0x00); outer.push_back(0x00);
+    }
+    s.text_payloads.emplace_back(0x1F00, outer);
+
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, 0x1E00),
+        pdata_entry(0x1000, 0x1050, 0x1F00),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+
+    FakeStack stack;
+    // Inner (with its chained outer codes) unwinds: push rbx (8) + chained
+    // push rbp (8) = 16 -> return address at 0x7FFF0010.
+    stack.slots[0x7FFF0010] = 0x140003000;  // outside .pdata: leaf pop next
+    // Leaf pop at 0x140003000 reads [0x7FFF0018]; provide it so the walk
+    // ends by leaving the image, not by a stack-read failure.
+    stack.slots[0x7FFF0018] = 0x140008000;  // one past the image extent
+    const auto found = xbox2pc::pe::find_exception_handler(
+        img, image.data(), image.size(), 0x140000000ull, 0x140001085ull,
+        0x7FFF0000ull, [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(found.has_value());
+    // The chained outer's EHANDLER must NOT satisfy the search.
+    EXPECT_FALSE(found->found);
+    EXPECT_EQ(found->handler_rva, 0u);
+}
+
+TEST(XdataUnwindInfoDecode, CountOfCodesAbove15Decodes) {
+    // Conformance proof for the full-byte count: 16+ slots must decode.
+    // 20 pushes (20 slots, even) + handler RVA trailer.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind = unwind_header(0x1, 20, 40);
+    for (unsigned i = 0; i < 20; ++i) {
+        const auto c = code_slot(static_cast<std::uint8_t>(i + 1), 0,
+                                 static_cast<unsigned>((i % 12) + 1));
+        unwind.insert(unwind.end(), c.begin(), c.end());
+    }
+    unwind.push_back(0x00); unwind.push_back(0x11); unwind.push_back(0x00); unwind.push_back(0x00);
+    s.text_payloads.emplace_back(0x1A80, unwind);
+    s.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, 0x1A80)});
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+    auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                image.size(), diags);
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->count_of_codes, 20u);
+    ASSERT_EQ(info->codes.size(), 20u);
+    EXPECT_EQ(info->language_handler_rva, 0x1100u);
+}
+
+TEST(XdataUnwindInfoDecode, AllocLargeOpinfo1Decodes) {
+    // ALLOC_LARGE opinfo==1: raw 32-bit byte size (0x10000) in two slots.
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind = unwind_header(0, 3, 6);
+    {
+        const auto c = code_slot(0x02, 1, 1);  // ALLOC_LARGE, opinfo 1
+        unwind.insert(unwind.end(), c.begin(), c.end());
+        append_slot(unwind, 0x0000);          // low 16: 0
+        append_slot(unwind, 0x0001);          // high 16: 1 -> 0x10000
+    }
+    s.text_payloads.emplace_back(0x1A90, unwind);
+    s.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, 0x1A90)});
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+    auto info = xbox2pc::pe::decode_unwind_info(img, *fn, image.data(),
+                                                image.size(), diags);
+    ASSERT_TRUE(info.has_value());
+    ASSERT_EQ(info->codes.size(), 1u);
+    EXPECT_EQ(info->codes[0].opcode, 1u);
+    EXPECT_EQ(info->codes[0].operand, 0x10000u);  // NOT scaled by 8
 }

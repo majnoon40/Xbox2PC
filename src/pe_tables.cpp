@@ -338,11 +338,14 @@ void parse_exports(PeImage& img, const std::uint8_t* base, std::uint64_t size,
 // RIP lookup is a binary search. Malformed entries are warned and skipped;
 // the table stays sorted by (begin, end).
 // ── .xdata UNWIND_INFO decoding (M11 Phase 6 slice 2) ─────────────────────
-// Header layout: byte 0 = version | flags<<3; byte 1 = size_of_prolog;
-// byte 2 = count_of_codes | frame_register<<4; byte 3 = frame_offset<<4.
-// The unwind code array follows as count_of_codes 16-bit slots; some
-// opcodes consume extra slots for operands. The header's count is never
-// trusted beyond per-fetch bounds checks against the file size.
+// Header layout (MS Learn, "x64 exception handling"): byte 0 packs
+// version (bits 0-2) and flags (bits 3-7); byte 1 is SizeOfProlog;
+// byte 2 is the FULL CountOfCodes byte; byte 3 packs FrameOffset (high
+// nibble) and FrameRegister (low nibble). The unwind-code array follows
+// as CountOfCodes 16-bit slots; some opcodes consume extra slots for
+// operands. When a language handler or CHAININFO trailer follows, the
+// array is padded to an even slot count first. The header's count is
+// never trusted beyond per-fetch bounds checks against the file size.
 std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
                                              const RuntimeFunction& fn,
                                              const std::uint8_t* base,
@@ -368,15 +371,16 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
     info.version = static_cast<std::uint8_t>(b0 & 0x7);
     info.flags = static_cast<std::uint8_t>(b0 >> 3);
     info.size_of_prolog = rd.u8(*off + 1);
-    const std::uint8_t b2 = rd.u8(*off + 2);
-    const unsigned slot_count = b2 & 0xF;
-    info.frame_register = static_cast<std::uint8_t>(b2 >> 4);
-    info.frame_offset = static_cast<std::uint8_t>(rd.u8(*off + 3) >> 4);
+    info.count_of_codes = rd.u8(*off + 2);
+    const std::uint8_t b3 = rd.u8(*off + 3);
+    info.frame_register = static_cast<std::uint8_t>(b3 & 0xF);
+    info.frame_offset = static_cast<std::uint8_t>(b3 >> 4);
     if (info.version != 1) {
         diags.warning("unsupported UNWIND_INFO version " +
                       std::to_string(info.version), *off);
         return std::nullopt;
     }
+    const unsigned slot_count = info.count_of_codes;
     std::uint64_t cursor = *off + 4;
     // count_of_codes is a SLOT budget: a code plus its operand slots
     // consumes 1 + extra_slots of it. Loop over codes while slots remain;
@@ -407,8 +411,8 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
             extra_slots = 0;
             code.operand = static_cast<std::uint32_t>(code.opinfo) * 8 + 8;
             break;
-        case 1:  // UWOP_ALLOC_LARGE — size in next slot *8 (opinfo==0 form)
-            extra_slots = 1;
+        case 1:  // UWOP_ALLOC_LARGE
+            extra_slots = (code.opinfo == 0) ? 1 : 2;
             break;
         case 4:  // UWOP_SAVE_NONVOL — offset in next slot*8
         case 6:  // UWOP_EPILOG
@@ -437,11 +441,14 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
                 return std::nullopt;
             }
             if (code.opcode == 1) {  // ALLOC_LARGE
-                if (code.opinfo != 0) {
-                    diags.warning("ALLOC_LARGE reserved opinfo form", cursor);
-                    return std::nullopt;
+                if (code.opinfo == 0) {
+                    // 16-bit slot count, scaled by 8
+                    code.operand = static_cast<std::uint32_t>(rd.u16(cursor + 2)) * 8;
+                } else {
+                    // opinfo==1: raw 32-bit byte size in two operand slots
+                    code.operand = rd.u16(cursor + 2) |
+                                   (static_cast<std::uint32_t>(rd.u16(cursor + 4)) << 16);
                 }
-                code.operand = static_cast<std::uint32_t>(rd.u16(cursor + 2)) * 8;
             } else if (extra_slots == 1) {
                 code.operand = rd.u16(cursor + 2);
             } else {
@@ -453,9 +460,25 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
         cursor += 2 + static_cast<std::uint64_t>(extra_slots) * 2;
         consumed += 1 + extra_slots;
     }
-    if (info.is_chained()) {
+    // Trailer: a language handler (when any handler flag is set) and/or a
+    // CHAININFO RUNTIME_FUNCTION. The code array is padded to an even slot
+    // count before the trailer; an odd count leaves one unused 16-bit slot.
+    const unsigned padded = (slot_count + 1) & ~1u;
+    cursor = *off + 4 + static_cast<std::uint64_t>(padded) * 2;
+    if (info.handler_present() || (info.flags & 0x2) /* UHANDLER */) {
         if (!in_range(cursor, 4, size)) {
-            diags.warning("chained unwind RVA truncated", cursor);
+            diags.warning("language handler RVA truncated", cursor);
+            return std::nullopt;
+        }
+        info.language_handler_rva = rd.u32(cursor);
+        cursor += 4;
+    }
+    if (info.is_chained()) {
+        // 12-byte RUNTIME_FUNCTION; only BeginAddress is needed for
+        // continuing the walk (find_function resolves the entry), but the
+        // full trailer is bounds-checked so malformed inputs fail closed.
+        if (!in_range(cursor, 12, size)) {
+            diags.warning("chained RUNTIME_FUNCTION trailer truncated", cursor);
             return std::nullopt;
         }
         info.chained_unwind_rva = rd.u32(cursor);
@@ -564,6 +587,79 @@ std::optional<UnwindFrame> unwind_one_frame(
     frame.rsp_after = entry_rsp + 8;
     frame.saved = std::move(saved);
     return frame;
+}
+
+// ── exception handler search (M11 Phase 6 slice B) ────────────────────────
+// The documented unwind procedure: repeatedly (1) find the RUNTIME_FUNCTION
+// covering RIP, (2a) if none, the function is a leaf — pop the return
+// address, (2b) if one exists and its primary UNWIND_INFO has
+// UNW_FLAG_EHANDLER, the search succeeds; otherwise unwind one frame and
+// repeat. Handler flags on CHAININFO-linked entries never count (the OS
+// ignores them too). The walk is bounded to 64 frames and refuses to leave
+// the image extent, so malformed unwind chains terminate.
+std::optional<ExceptionHandlerSearchResult> find_exception_handler(
+    const PeImage& img, const std::uint8_t* base, std::uint64_t size,
+    std::uint64_t image_base, std::uint64_t fault_rip, std::uint64_t current_rsp,
+    const std::function<std::optional<std::uint64_t>(std::uint64_t va)>& read_stack,
+    diag::Diagnostics& diags) {
+    ExceptionHandlerSearchResult result;
+    std::uint64_t rip = fault_rip;
+    std::uint64_t rsp = current_rsp;
+    const std::uint64_t image_end = image_base + img.opt.size_of_image;
+    for (int depth = 0; depth < 64; ++depth) {
+        UnwindStep step;
+        step.rip = rip;
+        step.rsp = rsp;
+        if (rip < image_base || rip >= image_end) {
+            diags.warning("handler search: RIP " + std::to_string(rip) +
+                          " left the image extent");
+            return result;  // found=false with the walked chain
+        }
+        const std::uint32_t rva = static_cast<std::uint32_t>(rip - image_base);
+        const RuntimeFunction* fn = img.exceptions.find_function(rva);
+        if (fn == nullptr) {
+            // Leaf: the return address is the u64 at RSP.
+            const auto ret = read_stack(rsp);
+            if (!ret.has_value()) {
+                diags.warning("handler search: leaf return-address read failed "
+                              "at guest " + std::to_string(rsp));
+                return std::nullopt;
+            }
+            rip = ret.value();
+            rsp += 8;
+            result.frames.push_back(std::move(step));
+            continue;
+        }
+        auto info = decode_unwind_info(img, *fn, base, size, diags);
+        if (!info.has_value()) return std::nullopt;
+        if (info->handler_present() && info->language_handler_rva != 0) {
+            // Establisher frame: RSP after this frame's prolog is undone
+            // is unwound by unwind_one_frame below; record the handler now.
+            result.found = true;
+            result.handler_rva = info->language_handler_rva;
+            const auto frame = unwind_one_frame(img, *fn, base, size, rva - fn->begin_rva,
+                                                rsp, read_stack, diags);
+            if (!frame.has_value()) return std::nullopt;
+            // UNWIND_INFO define: establisher frame = RSP - (FrameOffset+1)*16
+            // when a frame pointer exists, else RSP at function entry —
+            // approximated by rsp_after (post-RET) minus 8 when the prolog
+            // does not establish one. unwind_one_frame reconstructs the
+            // exact entry RSP; use it.
+            step.saved = frame->saved;
+            result.establisher_frame = frame->rsp_after - 8;
+            result.frames.push_back(std::move(step));
+            return result;
+        }
+        const auto frame = unwind_one_frame(img, *fn, base, size, rva - fn->begin_rva,
+                                            rsp, read_stack, diags);
+        if (!frame.has_value()) return std::nullopt;
+        step.saved = frame->saved;
+        rip = frame->return_rip;
+        rsp = frame->rsp_after;
+        result.frames.push_back(std::move(step));
+    }
+    diags.warning("handler search exceeded 64 frames; walk stopped");
+    return result;
 }
 
 void parse_exception_table(PeImage& img, const std::uint8_t* base, std::uint64_t size,
