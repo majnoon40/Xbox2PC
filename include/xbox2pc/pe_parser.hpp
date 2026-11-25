@@ -323,10 +323,25 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
                                              std::uint64_t size,
                                              diag::Diagnostics& diags);
 
+// Where a saved non-volatile register lives once the frame is undone.
+// reg uses the x64 unwind-code register encoding (0=RAX..9=R9,
+// 10=R10..15=R15); is_xmm marks 128-bit XMM saves (16 bytes at
+// location, value not read by this API — only the location is
+// reported; the caller reads it with its own memory access).
+struct SavedRegister {
+    std::uint8_t reg = 0;
+    bool is_xmm = false;
+    std::uint64_t location = 0;     // guest VA of the saved value
+};
+
 // Result of virtually unwinding one frame.
 struct UnwindFrame {
     std::uint64_t return_rip = 0;   // guest VA of the return address
     std::uint64_t rsp_after = 0;    // guest RSP after the RET pops it
+    // Saved non-volatile locations in walk (reverse-execution) order:
+    // the FIRST entry per register is the most recently executed save,
+    // i.e. the live value. Duplicates appear only in malformed data.
+    std::vector<SavedRegister> saved;
 };
 
 // Virtually unwind one frame. current_rsp is the guest RSP at the

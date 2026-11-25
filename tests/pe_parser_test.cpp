@@ -662,7 +662,7 @@ TEST(XdataUnwindInfoDecode, DecodesPrologCodesAndFrameRegister) {
     unwind.clear();
     unwind.push_back(static_cast<std::uint8_t>(0x01));       // version 1, flags 0
     unwind.push_back(0x0E);                                   // size_of_prolog
-    unwind.push_back(static_cast<std::uint8_t>(5 | (5 << 4))); // 5 slots, frame reg = rbp(5)
+    unwind.push_back(static_cast<std::uint8_t>(6 | (5 << 4))); // 6 slots, frame reg = rbp(5)
     unwind.push_back(0x10);                                   // frame offset 1 (unscaled 0x1)
     auto append = [&](const std::vector<std::uint8_t>& v) {
         unwind.insert(unwind.end(), v.begin(), v.end());
@@ -716,7 +716,7 @@ TEST(XdataUnwindInfoDecode, DecodesLargeAllocFarSaveAndChaining) {
     };
     unwind.push_back(static_cast<std::uint8_t>(0x01 | (0x4 << 3)));  // v1, CHAININFO
     unwind.push_back(0x20);
-    unwind.push_back(static_cast<std::uint8_t>(3));  // 3 slots, no frame reg
+    unwind.push_back(static_cast<std::uint8_t>(6));  // 2+3+1 slots, no frame reg
     unwind.push_back(0x00);
     append(code_slot(0x02, 1, 0));    // ALLOC_LARGE
     append(u16_bytes(0x0123));        //   0x123*8 = 0x918
@@ -791,7 +791,7 @@ TEST(XdataUnwindInfoDecode, MalformedInputsRejected) {
     // argument mid-blob (the API's per-fetch bounds checks guard exactly
     // this for hostile buffers).
     {
-        std::vector<std::uint8_t> bad{0x01, 0x10, 0x01, 0x00};
+        std::vector<std::uint8_t> bad{0x01, 0x10, 0x02, 0x00};
         bad.push_back(0x01);
         bad.push_back(0x01);  // ALLOC_LARGE: opcode nibble 1, opinfo 0
         const std::uint32_t rva = 0x1C00;
@@ -856,7 +856,7 @@ TEST(VirtualUnwindOneFrame, UndoesPushesAndAlloc) {
     };
     unwind.push_back(0x01);                                  // version 1, flags 0
     unwind.push_back(0x0A);                                  // prolog size
-    unwind.push_back(static_cast<std::uint8_t>(3));          // 3 slots, no FP
+    unwind.push_back(static_cast<std::uint8_t>(3));          // 1+1+1 slots, no FP
     unwind.push_back(0x00);
     append(code_slot(0x09, 0, 3));    // PUSH_NONVOL rbx       (executed last)
     append(code_slot(0x06, 2, 4));    // ALLOC_SMALL 4*8+8=40  (0x28)
@@ -1009,4 +1009,115 @@ TEST(VirtualUnwindOneFrame, StackReadFailureAndMachframeRejection) {
         img2, *fn2, image2.data(), image2.size(), 0x20, 0x7FFF0000,
         [&](std::uint64_t va) { return empty.read(va); }, diags2);
     EXPECT_FALSE(frame2.has_value());
+}
+
+// ── M11 Phase 6 slice 4: non-volatile restore locations ──────────────────
+
+TEST(UnwindSavedRegisters, PushAndNearSaveLocations) {
+    // Prolog: push rbp; sub rsp,0x28; mov [rbp-0x10], rbx; push rsi.
+    // Executed in that order. Walk (reverse) encounters: push rsi (value
+    // at current_rsp), ALLOC 0x28, SAVE rbx (near, offset slot 2 ->
+    // 2*8 below the fragment's end-of-prolog RSP), push rbp (value at
+    // current_rsp + 0x38).
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind;
+    auto append = [&](const std::vector<std::uint8_t>& v) {
+        unwind.insert(unwind.end(), v.begin(), v.end());
+    };
+    unwind.push_back(0x01);                                  // v1, flags 0
+    unwind.push_back(0x0C);                                  // prolog size
+    unwind.push_back(static_cast<std::uint8_t>(5));          // 5 slots, no FP
+    unwind.push_back(0x00);
+    append(code_slot(0x0A, 0, 6));    // PUSH_NONVOL rsi   (last executed)
+    append(code_slot(0x08, 4, 3));    // SAVE_NONVOL rbx, offset slot 2
+    append(u16_bytes(0x0002));        //   near offset: 2*8 = 16
+    append(code_slot(0x03, 2, 4));    // ALLOC_SMALL 4*8+8 = 40 (0x28)
+    append(code_slot(0x01, 0, 5));    // PUSH_NONVOL rbp  (first executed)
+    const std::uint32_t unwind_rva = 0x1D00;
+    s.text_payloads.emplace_back(unwind_rva, unwind);
+    s.exception_directory_payload = concat({
+        pdata_entry(0x1080, 0x10A0, unwind_rva),
+    });
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+
+    FakeStack stack;
+    stack.slots[0x7FFF0038] = 0x140001000;   // return address
+    stack.slots[0x7FFF0030] = 0xAAAA1111;    // pushed rbp value
+    stack.slots[0x7FFF0000] = 0xBBBB2222;    // pushed rsi value
+    stack.slots[0x7FFF0018] = 0xCCCC3333;    // saved rbx value
+    const std::uint64_t current_rsp = 0x7FFF0000;
+    auto frame = xbox2pc::pe::unwind_one_frame(
+        img, *fn, image.data(), image.size(), 0x20, current_rsp,
+        [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(frame.has_value());
+    ASSERT_EQ(frame->saved.size(), 3u);
+    // Walk order: rsi push first (most recent), then rbx save, then rbp.
+    EXPECT_EQ(frame->saved[0].reg, 6u);         // rsi
+    EXPECT_FALSE(frame->saved[0].is_xmm);
+    EXPECT_EQ(frame->saved[0].location, 0x7FFF0000u);
+    EXPECT_EQ(frame->saved[1].reg, 3u);         // rbx
+    // SAVE offsets are relative to the fragment's end-of-prolog RSP
+    // (0x7FFF0000 here: the fault is past the full prolog): 2*8 = 16.
+    EXPECT_EQ(frame->saved[1].location, 0x7FFF0010u);
+    EXPECT_EQ(frame->saved[2].reg, 5u);         // rbp
+    EXPECT_EQ(frame->saved[2].location, 0x7FFF0030u);
+    // Sanity: the frame control fields still work.
+    EXPECT_EQ(frame->return_rip, 0x140001000u);
+    EXPECT_EQ(frame->rsp_after, 0x7FFF0040u);
+}
+
+TEST(UnwindSavedRegisters, FarSaveAndXmmLocations) {
+    // Prolog: SAVE_XMM128_FAR xmm6 at 32-bit offset 0x100; SAVE rbx far
+    // at 0x200; push r12. SAVE bases are the fragment end-of-prolog RSP,
+    // which (no allocs) equals the walked RSP at fragment entry:
+    // current_rsp + 0x8 (after the push is undone).
+    Diagnostics diags;
+    PeBuildSpec s = default_spec();
+    std::vector<std::uint8_t> unwind;
+    auto append = [&](const std::vector<std::uint8_t>& v) {
+        unwind.insert(unwind.end(), v.begin(), v.end());
+    };
+    unwind.push_back(0x01);
+    unwind.push_back(0x10);
+    unwind.push_back(static_cast<std::uint8_t>(7));  // 1 + 3 + 3 slots
+    unwind.push_back(0x00);
+    append(code_slot(0x04, 9, 6));    // SAVE_XMM128_FAR xmm6 (executed last)
+    append(u16_bytes(0x0100));        //   low 16
+    append(u16_bytes(0x0000));        //   high 16 -> 0x100
+    append(code_slot(0x02, 5, 3));    // SAVE_NONVOL_FAR rbx
+    append(u16_bytes(0x0200));        //   low 16
+    append(u16_bytes(0x0000));        //   high 16 -> 0x200
+    append(code_slot(0x01, 0, 12));   // PUSH_NONVOL r12 (executed first)
+    const std::uint32_t unwind_rva = 0x1D00;
+    s.text_payloads.emplace_back(unwind_rva, unwind);
+    s.exception_directory_payload = concat({pdata_entry(0x1080, 0x10A0, unwind_rva)});
+    const auto image = PeBuilder(s).build();
+    const PeImage img = parse_ok(image, diags);
+    const auto* fn = img.exceptions.find_function(0x1080u);
+    ASSERT_NE(fn, nullptr);
+
+    FakeStack stack;
+    stack.slots[0x7FFF0008] = 0x140001000;   // return address (entry_rsp)
+    const std::uint64_t current_rsp = 0x7FFF0000;
+    auto frame = xbox2pc::pe::unwind_one_frame(
+        img, *fn, image.data(), image.size(), 0x20, current_rsp,
+        [&](std::uint64_t va) { return stack.read(va); }, diags);
+    ASSERT_TRUE(frame.has_value());
+    ASSERT_EQ(frame->saved.size(), 3u);
+    // Walk order: xmm6 far save first, then rbx far save, then r12 push.
+    // SAVE offsets are relative to the end-of-prolog RSP (0x7FFF0000 —
+    // the fault is past the full prolog, so that equals current_rsp).
+    EXPECT_TRUE(frame->saved[0].is_xmm);
+    EXPECT_EQ(frame->saved[0].reg, 6u);
+    EXPECT_EQ(frame->saved[0].location, 0x7FFF0000u + 0x100u);
+    EXPECT_FALSE(frame->saved[1].is_xmm);
+    EXPECT_EQ(frame->saved[1].reg, 3u);
+    EXPECT_EQ(frame->saved[1].location, 0x7FFF0000u + 0x200u);
+    EXPECT_FALSE(frame->saved[2].is_xmm);
+    EXPECT_EQ(frame->saved[2].reg, 12u);
+    EXPECT_EQ(frame->saved[2].location, 0x7FFF0000u);
 }

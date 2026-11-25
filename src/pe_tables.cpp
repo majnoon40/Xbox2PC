@@ -378,10 +378,15 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
         return std::nullopt;
     }
     std::uint64_t cursor = *off + 4;
-    for (unsigned i = 0; i < slot_count; ++i) {
+    // count_of_codes is a SLOT budget: a code plus its operand slots
+    // consumes 1 + extra_slots of it. Loop over codes while slots remain;
+    // a code straddling the budget end fails closed (the entry would be
+    // unreadable by the OS unwinder too).
+    unsigned consumed = 0;
+    while (consumed < slot_count) {
         if (!in_range(cursor, 2, size)) {
             diags.warning("unwind code array truncated at slot " +
-                          std::to_string(i), cursor);
+                          std::to_string(consumed), cursor);
             return std::nullopt;
         }
         const std::uint8_t lo = rd.u8(cursor);
@@ -417,13 +422,18 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
             break;
         default:
             diags.warning("unknown unwind opcode " + std::to_string(code.opcode) +
-                          " at slot " + std::to_string(i), cursor);
+                          " at slot " + std::to_string(consumed), cursor);
             return std::nullopt;
         }
         if (extra_slots != 0) {
+            if (consumed + extra_slots >= slot_count) {
+                diags.warning("unwind code operand exceeds the declared slot "
+                              "budget at slot " + std::to_string(consumed), cursor);
+                return std::nullopt;
+            }
             if (!in_range(cursor + 2, static_cast<std::uint64_t>(extra_slots) * 2, size)) {
                 diags.warning("unwind code operand truncated at slot " +
-                              std::to_string(i), cursor + 2);
+                              std::to_string(consumed), cursor + 2);
                 return std::nullopt;
             }
             if (code.opcode == 1) {  // ALLOC_LARGE
@@ -441,6 +451,7 @@ std::optional<UnwindInfo> decode_unwind_info(const PeImage& img,
         }
         info.codes.push_back(code);
         cursor += 2 + static_cast<std::uint64_t>(extra_slots) * 2;
+        consumed += 1 + extra_slots;
     }
     if (info.is_chained()) {
         if (!in_range(cursor, 4, size)) {
@@ -469,9 +480,14 @@ std::optional<UnwindFrame> unwind_one_frame(
     std::uint64_t delta = 0;  // current_rsp + delta == entry_rsp
     const RuntimeFunction* current = &fn;
     const std::optional<UnwindFrame> none;
+    std::vector<SavedRegister> saved;
     for (int depth = 0; depth < 8; ++depth) {  // chain-loop guard
         auto info = decode_unwind_info(img, *current, base, size, diags);
         if (!info.has_value()) return none;
+        // SAVE offsets are relative to this fragment's end-of-prolog RSP.
+        // Entering the fragment, the walked RSP (current_rsp + delta, with
+        // all outer fragments' effects undone) equals exactly that value.
+        const std::uint64_t fragment_save_base = current_rsp + delta;
         const bool outer = (current == &fn);
         for (const auto& code : info->codes) {
             // Outer codes are target-filtered: a prolog op at offset X has
@@ -481,7 +497,9 @@ std::optional<UnwindFrame> unwind_one_frame(
             // prolog completed).
             if (outer && code.slot_offset > target_offset) continue;
             switch (code.opcode) {
-            case 0:  // PUSH_NONVOL: 8 bytes to undo
+            case 0:  // PUSH_NONVOL: the value sits at the walked position
+                saved.push_back(
+                    {code.opinfo, false, current_rsp + delta});
                 delta += 8;
                 break;
             case 1:  // ALLOC_LARGE (operand pre-scaled by 8)
@@ -490,10 +508,24 @@ std::optional<UnwindFrame> unwind_one_frame(
                 break;
             case 3:  // SET_FPREG: walked RSP already equals FP here
                 break;
-            case 4:  // SAVE_NONVOL: below the frame, no RSP effect
-            case 5:  // SAVE_NONVOL_FAR
-            case 8:  // SAVE_XMM128
-            case 9:  // SAVE_XMM128_FAR
+            case 4:  // SAVE_NONVOL: near, offset scaled by 8
+                saved.push_back({code.opinfo, false,
+                                 fragment_save_base +
+                                     static_cast<std::uint64_t>(code.operand) * 8});
+                break;
+            case 5:  // SAVE_NONVOL_FAR: raw 32-bit offset
+                saved.push_back({code.opinfo, false,
+                                 fragment_save_base + code.operand});
+                break;
+            case 8:  // SAVE_XMM128: near, offset scaled by 16
+                saved.push_back({code.opinfo, true,
+                                 fragment_save_base +
+                                     static_cast<std::uint64_t>(code.operand) * 16});
+                break;
+            case 9:  // SAVE_XMM128_FAR: raw 32-bit offset
+                saved.push_back({code.opinfo, true,
+                                 fragment_save_base + code.operand});
+                break;
             case 6:  // EPILOG
             case 7:  // SPARE_CODE (padding)
                 break;
@@ -530,6 +562,7 @@ std::optional<UnwindFrame> unwind_one_frame(
     UnwindFrame frame;
     frame.return_rip = return_rip.value();
     frame.rsp_after = entry_rsp + 8;
+    frame.saved = std::move(saved);
     return frame;
 }
 
