@@ -218,6 +218,16 @@ jobs:
               inspect = (Path("samples/m11/golden") / f"{name}.inspect.txt").read_text()
               assert "image_type:    executable" in inspect, f"{name} misclassified by inspect"
               print(f"{name}: PE validation and executable classification passed")
+          # The compat-report reflects the registry's descriptor policy
+          # (not build output), so it is content-checked, not hash-checked:
+          # kernel32's SetLastError/GetLastError/ExitProcess must all be
+          # reported as implemented for the freestanding sample.
+          freestanding = json.loads(
+              (Path("samples/m11/golden") / "m11_freestanding.compat-report.json").read_text())
+          text = json.dumps(freestanding)
+          for symbol in ("SetLastError", "GetLastError", "ExitProcess"):
+              assert symbol in text, f"{symbol} missing from the compat report"
+          print("compat-report descriptor policy verified (incl. ExitProcess)")
           PY
 
       - name: Upload PE fixtures, hashes, and golden outputs
