@@ -401,8 +401,8 @@ TEST(HostBackendTest, RejectsIntermediateSymlinkComponents) {
 
 TEST(XpkTest, Roundtrip) {
     std::vector<XpkBuildEntry> entries = {
-        {"a", true},
-        {"a/b", true},
+        {"a", true, {}},
+        {"a/b", true, {}},
         {"a/b/f.bin", false, std::string(100, 'z')},
         {"top.txt", false, "hello"},
     };
@@ -430,16 +430,13 @@ namespace {
 void poke(std::vector<std::uint8_t>& b, std::uint64_t off, std::uint8_t v) {
     b[static_cast<std::size_t>(off)] = v;
 }
-std::uint16_t rd16(const std::vector<std::uint8_t>& b, std::uint64_t off) {
-    return static_cast<std::uint16_t>(b[off] | (b[off + 1] << 8));
-}
 void wr32(std::vector<std::uint8_t>& b, std::uint64_t off, std::uint32_t v) {
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         b[off + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
     }
 }
 void wr64(std::vector<std::uint8_t>& b, std::uint64_t off, std::uint64_t v) {
-    for (int i = 0; i < 8; ++i) {
+    for (std::size_t i = 0; i < 8; ++i) {
         b[off + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xFF);
     }
 }
@@ -447,7 +444,7 @@ void wr64(std::vector<std::uint8_t>& b, std::uint64_t off, std::uint64_t v) {
 
 TEST(XpkAdversarialTest, BadMagicVersionAndTruncation) {
     auto good = xpk_build({
-        {"d", true},
+        {"d", true, {}},
         {"d/f.bin", false, std::string(16, 'q')},
     });
     // Magic corruption.
@@ -496,10 +493,10 @@ TEST(XpkAdversarialTest, FuzzHeadersAndEntries) {
     // reproducible). Every mutated input must parse to either a typed
     // failure or a valid container — NEVER crash, hang, or leak.
     const auto base = xpk_build({
-        {"d", true},
+        {"d", true, {}},
         {"d/a.txt", false, "alpha"},
         {"d/b.bin", false, std::string(32, 'B')},
-        {"d/c", true},
+        {"d/c", true, {}},
     });
     MiniRng rng(0x5eed1234u);
     int parse_ok = 0;
@@ -554,7 +551,7 @@ TEST(PackageMountTest, ReadOnlyMountAndDiscovery) {
     };
     const auto image = test::PeBuilder(spec).build();
     std::vector<XpkBuildEntry> entries = {
-        {"content", true},
+        {"content", true, {}},
         {"content/game.exe", false,
          std::string(image.begin(), image.end())},
         {"content/asset.png", false,
@@ -729,7 +726,7 @@ TEST(IntegrationM5Test, ParsedImagePackageMountDiscoveryTermination) {
     const auto img = pe::parse(image.data(), image.size(), "game.exe", diags);
 
     std::vector<XpkBuildEntry> entries = {
-        {"content", true},
+        {"content", true, {}},
         {"content/game.exe", false, std::string(image.begin(), image.end())},
     };
     auto bytes = xpk_build(entries);

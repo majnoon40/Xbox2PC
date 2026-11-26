@@ -53,7 +53,7 @@ void diag_fault(int signal, unsigned long long rip, unsigned long long addr,
         char tmp[24]; int len = 0;
         if (v < 0) { put('-'); v = -v; }
         if (v == 0) tmp[len++] = '0';
-        while (v > 0 && len < 23) { tmp[len++] = '0' + (v % 10); v /= 10; }
+        while (v > 0 && len < 23) { tmp[len++] = static_cast<char>('0' + (v % 10)); v /= 10; }
         while (len > 0) put(tmp[--len]);
     };
     const char* msg = "[child] fatal signal ";

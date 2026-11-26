@@ -13,14 +13,6 @@ bool same_module(const std::string& a, const std::string& b) {
     return registry::normalize_module_name(a) == registry::normalize_module_name(b);
 }
 
-std::string lower_copy(const std::string& s) {
-    std::string out = s;
-    for (char& c : out) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return out;
-}
-
 }  // namespace
 
 void split_forwarder(const std::string& forwarder, std::string& dll, std::string& api) {

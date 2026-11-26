@@ -124,7 +124,7 @@ TEST(M11LockOrder, ManagerLookupDuringTerminationCompletes) {
 
     std::atomic<std::uint64_t> observer_exit_codes_sum{0};
     std::atomic<int> observer_reentries{0};
-    auto observer = w.pm.add_process_exit_observer([&](std::uint64_t pid) {
+    auto observer = w.pm.add_process_exit_observer([&](std::uint64_t /*pid*/) {
         // Re-enter the manager the way a real service observer would.
         const auto count = w.pm.process_count();
         observer_reentries.fetch_add(static_cast<int>(count > 0 ? 1 : 0),
@@ -273,11 +273,11 @@ TEST(M11ExitCode, PropagatesToListingAndObservers) {
     EXPECT_EQ(proc->exit_code(), kCode);
 
     bool listed = false;
-    for (const auto& proc : w.pm.list_processes()) {
-        if (proc.pid == pid) {
+    for (const auto& entry : w.pm.list_processes()) {
+        if (entry.pid == pid) {
             listed = true;
-            EXPECT_EQ(proc.exit_code, kCode);
-            EXPECT_EQ(proc.state, rt::ProcessState::Terminated);
+            EXPECT_EQ(entry.exit_code, kCode);
+            EXPECT_EQ(entry.state, rt::ProcessState::Terminated);
         }
     }
     EXPECT_TRUE(listed);

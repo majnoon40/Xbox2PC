@@ -168,7 +168,7 @@ TEST(LoaderValidationTest, SecurityDirectoryUsesFileOffsetNotRva) {
     const std::uint64_t security = 0x98 + 112 + 4 * 8;
     const std::uint32_t file_offset = 0x5000;
     const std::uint32_t cert_size = 0x100;
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         image[security + i] = static_cast<std::uint8_t>(file_offset >> (8 * i));
         image[security + 4 + i] = static_cast<std::uint8_t>(cert_size >> (8 * i));
     }
@@ -830,7 +830,7 @@ TEST(LoaderTlsTest, RejectsTlsPointersBelowImageBase) {
     ASSERT_TRUE(tls_off.has_value());
     // StartAddressOfRawData is the first VA in IMAGE_TLS_DIRECTORY64.
     const std::uint64_t start = *tls_off;
-    for (int i = 0; i < 8; ++i) image[start + i] = 0;
+    for (std::size_t i = 0; i < 8; ++i) image[start + i] = 0;
     const auto img = parse_image(image, "tls-bad2.exe", diags);
     LoadDiagnostics ld;
     auto tls = decode_tls(img, image.data(), image.size(), ld);

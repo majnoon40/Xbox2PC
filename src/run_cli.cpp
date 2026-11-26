@@ -202,16 +202,16 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
     if (res.ok()) {
         std::printf("  outcome:     %s  instructions=%llu  RAX=%llu\n",
                     rt::exec::outcome_to_name(res.value().outcome),
-                    (unsigned long long)res.value().instructions_executed,
-                    (unsigned long long)rax);
+                    static_cast<unsigned long long>(res.value().instructions_executed),
+                    static_cast<unsigned long long>(rax));
         if (res.value().exception.has_value()) {
             std::printf("  detail:      %s\n",
                         rt::exec::format_exception(*res.value().exception).c_str());
         }
         std::printf("  exit code:   %llu (RAX & 0xFF)\n",
-                    (unsigned long long)(rax & 0xFFu));
+                    static_cast<unsigned long long>(rax & 0xFFu));
         std::printf("  api calls:   %llu\n",
-                    (unsigned long long)res.value().api_calls);
+                    static_cast<unsigned long long>(res.value().api_calls));
     } else {
         std::printf("  outcome:     error: %s\n", res.error_string().c_str());
     }

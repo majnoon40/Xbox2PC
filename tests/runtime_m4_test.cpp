@@ -1313,12 +1313,12 @@ TEST(ProcessMgmtTest, ActiveThreadsAtTermination) {
         auto th = pm.spawn_thread(
             ph.value(),
             [](rt::RtThread& self, void* arg) -> void* {
-                auto* counters = static_cast<WorkerCounters*>(arg);
-                counters->started->fetch_add(1, std::memory_order_release);
+                auto* worker_counters = static_cast<WorkerCounters*>(arg);
+                worker_counters->started->fetch_add(1, std::memory_order_release);
                 while (!self.stop_requested()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
-                counters->finished->fetch_add(1, std::memory_order_release);
+                worker_counters->finished->fetch_add(1, std::memory_order_release);
                 return nullptr;
             },
             &counters, "worker-" + std::to_string(i));

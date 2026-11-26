@@ -1074,7 +1074,7 @@ struct DemoVfs {
         using xbox2pc::rt::PackageVfsBackend;
         // Fixture entries (SYNTHETIC — not Xbox content).
         std::vector<XpkBuildEntry> entries = {
-            {"content", true},
+            {"content", true, {}},
             {"content/README.txt", false, "xbox2pc synthetic package fixture\n"},
             {"content/asset.png",
              false,
@@ -1313,26 +1313,10 @@ int cmd_packages(const std::optional<std::string>& json_out) {
     if (!demo.ok()) return 1;
     auto m = demo.mount_demo_package();
     if (!m.ok()) return 1;
-    // The mounted backend IS the parsed package: enumerate entries.
-    auto found = demo.core.objects().lookup_handle(demo.process);
-    auto* proc = found.value().get()->as<xbox2pc::rt::ManagedProcess>();
-    const std::string sid = proc->meta("vfs_session");
-    auto s = demo.core.objects().lookup_id(std::strtoull(sid.c_str(), nullptr, 10));
-    auto* session = s.value().get()->as<xbox2pc::rt::VfsSession>();
-    // Walk mounts to find the package backend.
-    const auto mounts = session->namespace_().list_mounts();
-    const auto& info = [&]() -> const xbox2pc::rt::PackageInfo& {
-        for (const auto& mi : mounts) {
-            // Resolve the backend object by entry (backends registered as objects).
-        }
-        static xbox2pc::rt::PackageInfo empty{};
-        return empty;
-    }();
-    (void)info;
-    // Simpler: re-parse the built fixture for metadata display (identical
-    // to what is mounted).
+    // mount_demo_package only hands back a mount id, so re-parse the
+    // identical fixture for the metadata display.
     std::vector<xbox2pc::rt::XpkBuildEntry> entries = {
-        {"content", true},
+        {"content", true, {}},
         {"content/README.txt", false, "xbox2pc synthetic package fixture\n"},
         {"content/asset.png", false,
          std::string("\x89PNG\r\n\x1a\n", 8) + std::string(64, '\0')},
@@ -2572,7 +2556,7 @@ int cmd_cpu_state(const std::optional<std::string>& json_out) {
         j.set("rip", c.rip);
         j.set("rflags", c.rflags);
         j.set("rflags_hex", "0x" + [&] { char b[20]; std::snprintf(b, sizeof b, "%llx",
-                (unsigned long long)c.rflags); return std::string(b); }());
+                static_cast<unsigned long long>(c.rflags)); return std::string(b); }());
         j.set("mxcsr", static_cast<std::uint64_t>(c.mxcsr));
         j.set("fcw", static_cast<std::uint64_t>(c.fcw));
         j.set("xmm_count", 16u);
@@ -2590,10 +2574,11 @@ int cmd_cpu_state(const std::optional<std::string>& json_out) {
                              "r8","r9","r10","r11","r12","r13","r14","r15"};
     for (int i = 0; i < 16; ++i) {
         std::printf("  %-4s 0x%016llx\n", names[i],
-                    (unsigned long long)c.gprs[i]);
+                    static_cast<unsigned long long>(c.gprs[i]));
     }
     std::printf("  rip  0x%016llx\n  rflags 0x%llx (bit1 fixed, IF=1)\n",
-                (unsigned long long)c.rip, (unsigned long long)c.rflags);
+                static_cast<unsigned long long>(c.rip),
+                static_cast<unsigned long long>(c.rflags));
     std::printf("  mxcsr 0x%x (documented 0x1F80)  fcw 0x%x (documented 0x027F)\n",
                 c.mxcsr, c.fcw);
     std::printf("  xmm0-15: 128-bit storage (YMM/ZMM deliberately NOT modeled)\n");
@@ -2797,8 +2782,8 @@ int cmd_execute_test(const std::optional<std::string>& json_out) {
     if (res.ok()) {
         std::printf("  outcome: %s  instructions=%llu  RAX=%llu (expect 42)\n",
                     xbox2pc::rt::exec::outcome_to_name(res.value().outcome),
-                    (unsigned long long)res.value().instructions_executed,
-                    (unsigned long long)res.value().return_value);
+                    static_cast<unsigned long long>(res.value().instructions_executed),
+                    static_cast<unsigned long long>(res.value().return_value));
     }
     std::printf("  teardown: regions after terminate = %u\n", st.region_count);
     std::printf("  NOTE: subset interpreter execution — NOT a general emulator,\n");

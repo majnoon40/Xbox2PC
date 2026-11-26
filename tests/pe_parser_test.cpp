@@ -523,7 +523,7 @@ namespace {
 std::vector<std::uint8_t> pdata_entry(std::uint32_t begin, std::uint32_t end,
                                       std::uint32_t unwind) {
     std::vector<std::uint8_t> e(12);
-    for (int i = 0; i < 4; ++i) {
+    for (std::size_t i = 0; i < 4; ++i) {
         e[i] = static_cast<std::uint8_t>(begin >> (8 * i));
         e[4 + i] = static_cast<std::uint8_t>(end >> (8 * i));
         e[8 + i] = static_cast<std::uint8_t>(unwind >> (8 * i));
