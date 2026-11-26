@@ -432,6 +432,16 @@ class ExplicitPathsModeTest(RepoCase):
         self.assertRejected(self.check("dir"), "only regular files and symlinks can be checked")
 
 
+class RealRepositoryTest(unittest.TestCase):
+    def test_this_repository_passes_the_whole_tree_check(self) -> None:
+        """The tree this self-test ships in satisfies its own policy, so the
+        self-test doubles as a local guard for developers without the hook."""
+        result = subprocess.run([sys.executable, SCRIPT, "--all"], cwd=HERE,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("0 violation(s), clean", result.stdout)
+
+
 class CommandLineTest(RepoCase):
     def test_a_mode_is_required(self) -> None:
         for args in ((), ("--staged", "x.txt"), ("--all", "--staged")):
