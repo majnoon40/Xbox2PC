@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# pre-commit: enforce docs/input-policy.md on everything this commit stages.
+#
+# This hook lives in the repository and is enabled per clone with
+#     scripts/install-hooks.sh
+# which points git's core.hooksPath at this directory.  CI runs the same
+# checker over the whole tree, so the policy holds even where the hook is
+# not installed.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+exec "${PYTHON:-python3}" "$root/scripts/check_assets.py" --staged

@@ -1,2 +1,39 @@
 build/
 build-*/
+
+# Input policy (docs/input-policy.md).  These rules only keep local files out
+# of `git status`; the content check in scripts/check_assets.py is what
+# actually rejects a file, because a renamed package or a renamed executable
+# would slip past any list of names.
+
+# Game data and packages are never test input.
+*.xvc
+*.msixvc
+*.xvd
+/content/
+/game/
+/games/
+/roms/
+/titles/
+
+# Crash dumps and run telemetry.
+/core
+/samples/core
+core.[0-9]*
+*.dmp
+*.mdmp
+*.stackdump
+/crashes.log
+/crashes/
+
+# Caches and local state.
+/.cache/
+/.xbox2pc/
+__pycache__/
+*.py[cod]
+CMakeUserPresets.json
+compile_commands.json
+
+# Frame and trace captures.
+/captures/
+/frames/
