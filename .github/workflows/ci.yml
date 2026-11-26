@@ -2,12 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/m11-teb-stack-bounds, feature/m11-native-execution-phase5]
+    branches: [main, feature/m12, feature/m11-teb-stack-bounds, feature/m11-native-execution-phase5]
   pull_request:
-    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls, feature/m11-teb-stack-bounds]
+    branches: [main, feature/m12, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls, feature/m11-teb-stack-bounds]
   workflow_dispatch:
 
 jobs:
+  asset-policy:
+    name: Asset policy (no binaries, archives or oversized files)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Self-test the asset-policy checker
+        run: python3 scripts/check_assets_test.py
+
+      # The same check as scripts/hooks/pre-commit, over the whole tree, so
+      # the policy holds where the hook is not installed.  On a pull request
+      # the checkout is the merge result, so the merged tree is what is
+      # checked.  See docs/input-policy.md.
+      - name: Reject binaries, archives and oversized files
+        run: python3 scripts/check_assets.py --all --annotations
+
   build-and-test:
     name: ${{ matrix.build_type }} · ${{ matrix.compiler }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
