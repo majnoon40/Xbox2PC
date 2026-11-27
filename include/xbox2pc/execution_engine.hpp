@@ -127,6 +127,10 @@ struct ExecutionResult {
     cpu::CpuSnapshot cpu;
     // Registered-API calls marshalled during this run.
     std::uint32_t api_calls = 0;
+    // M12 P0: calls that reached an import bound as unimplemented, and the
+    // first one reached ("library!export"). Zero and empty when none did.
+    std::uint32_t unimplemented_calls = 0;
+    std::string first_unimplemented;
 };
 
 // ── the engine interface ──────────────────────────────────────────────────
@@ -140,7 +144,15 @@ struct ApiBindingInfo {
     std::string export_name;
     bool by_ordinal = false;
     std::uint32_t ordinal = 0;
+    // M12 P0: bound by --unimplemented=trap|zero (see api_compat.hpp), not by
+    // a registered implementation. Trap faults a call with
+    // GuestFault::UnimplementedApi; Zero answers 0 and the guest continues.
+    bool unimplemented = false;
+    bool unimplemented_returns_zero = false;
 };
+
+// "library!export" (or "library!#ordinal") for reports and fault details.
+std::string binding_identity(const ApiBindingInfo& binding);
 
 // Alias the M3-managed-thread gate for execution requests and backends.
 using ExecutionControl = CooperativeExecutionGate;

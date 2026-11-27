@@ -92,6 +92,7 @@ void usage() {
                  "       xbox2pc relocations <pe-file> [--json <out>]\n"
                  "       xbox2pc imports <pe-file> [--json <out>]\n"
                  "       xbox2pc load-image <pe-file> [--json <out>]\n"
+                 "       xbox2pc run <pe-file> [--backend deterministic|native] [--unimplemented strict|trap|zero] [--json <out>]\n"
                  "       xbox2pc unload-image <pe-file>\n"
                  "       xbox2pc image-info <pe-file> [--json <out>]\n"
                  "       xbox2pc cpu-state [--json <out>]\n"
@@ -2801,25 +2802,45 @@ int main(int argc, char** argv) {
     const int m9_binary_result = xbox2pc::cli::run_m9_binary_cli(argc, argv);
     if (m9_binary_result >= 0) return m9_binary_result;
     if (argc >= 2 && std::strcmp(argv[1], "run") == 0) {
+        static const char* const kRunUsage =
+            "usage: xbox2pc run <file> [--backend deterministic|native]\n"
+            "                      [--unimplemented strict|trap|zero] [--json <out>]\n"
+            "  --unimplemented  what an import without an implementation does:\n"
+            "                   strict  the image does not load (default)\n"
+            "                   trap    a call stops the run with an unimplemented-api fault\n"
+            "                           that names the import\n"
+            "                   zero    a call returns 0 and the guest continues\n"
+            "  exit status: 0 returned, 1 load/prepare/execution failure, 2 usage or input error\n"
+            "  with --json, a report object is written on every outcome\n";
         if (argc < 3) {
-            std::fprintf(stderr, "usage: xbox2pc run <file> [--backend deterministic|native] [--json <out>]\n");
+            std::fprintf(stderr, "%s", kRunUsage);
             return 2;
+        }
+        if (std::strcmp(argv[2], "--help") == 0 || std::strcmp(argv[2], "-h") == 0) {
+            std::printf("%s", kRunUsage);
+            return 0;
         }
         std::optional<std::string> json_out;
         std::string backend = "deterministic";
-        int file_arg = 2;
+        auto unimplemented = xbox2pc::rt::api::UnimplementedPolicy::Strict;
         for (int i = 3; i < argc; ++i) {
             if (std::strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
                 backend = argv[++i];
+            } else if (std::strcmp(argv[i], "--unimplemented") == 0 && i + 1 < argc) {
+                if (!xbox2pc::rt::api::unimplemented_policy_from_name(argv[++i], unimplemented)) {
+                    std::fprintf(stderr,
+                                 "error: unknown --unimplemented mode '%s' (strict | trap | zero)\n",
+                                 argv[i]);
+                    return 2;
+                }
             } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
                 json_out = argv[++i];
             } else {
-                std::fprintf(stderr, "error: invalid run arguments\n");
+                std::fprintf(stderr, "error: invalid run arguments\n%s", kRunUsage);
                 return 2;
             }
         }
-        (void)file_arg;
-        return xbox2pc::cli::run_file(argv[2], json_out, backend);
+        return xbox2pc::cli::run_file(argv[2], json_out, backend, unimplemented);
     }
     if (argc >= 2 && std::strcmp(argv[1], "interpreter-info") == 0) {
         std::optional<std::string> json_out;

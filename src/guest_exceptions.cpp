@@ -19,6 +19,7 @@ const char* guest_fault_to_name(GuestFault f) {
         case GuestFault::BudgetExceeded: return "budget-exceeded";
         case GuestFault::Internal: return "internal";
         case GuestFault::DivideError: return "divide-error";
+        case GuestFault::UnimplementedApi: return "unimplemented-api";
     }
     return "?";
 }
@@ -37,6 +38,7 @@ std::optional<GuestFault> guest_fault_from_name(const std::string& n) {
     if (n == "budget-exceeded") return GuestFault::BudgetExceeded;
     if (n == "internal") return GuestFault::Internal;
     if (n == "divide-error") return GuestFault::DivideError;
+    if (n == "unimplemented-api") return GuestFault::UnimplementedApi;
     return std::nullopt;
 }
 

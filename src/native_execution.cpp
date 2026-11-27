@@ -151,7 +151,20 @@ ExecutionResult NativeExecutionBackend::run(
     guest::GuestMemory memory(*space_);
     if (req.stack_top_va != 0 && req.stack_size != 0) {
         const std::uint64_t floor = req.stack_top_va - req.stack_size;
-        if (!memory.validate(floor, req.stack_size, true, false).ok())
+        // The context places the usable top 64 bytes below the committed
+        // region's high end but reports the full region size, so `floor` can
+        // lie up to 64 bytes below the region. Validate the part of the range
+        // inside the region that holds the top: that is the stack the child
+        // pushes on. (Until M12 P0 the whole range was validated, which passed
+        // only when the region below the stack happened to be writable; for a
+        // compiler-built image it is a read-only section.)
+        const auto region = space_->find_containing(req.stack_top_va - 8);
+        if (!region.ok())
+            return fail(GuestFault::InvalidAccess,
+                        "native guest stack top is not inside a mapped region");
+        const std::uint64_t region_base = region.value().xbox_va;
+        const std::uint64_t start = floor > region_base ? floor : region_base;
+        if (!memory.validate(start, req.stack_top_va - start, true, false).ok())
             return fail(GuestFault::InvalidAccess,
                         "native guest stack is not a committed writable region");
     }
@@ -177,6 +190,10 @@ ExecutionResult NativeExecutionBackend::run(
             if (!memory.validate(iat_va, 8, false, false).ok())
                 return fail(GuestFault::InvalidAccess,
                             "native import IAT slot is not readable guest memory");
+            // M12 P0: a binding for an unimplemented import has no descriptor
+            // by definition; the ring answers it without a plan (trap or
+            // zero), so the descriptor checks below do not apply.
+            if (binding.unimplemented) continue;
             // And the bound descriptor must exist parent-side (the ring
             // dispatch needs a plan).
             const auto* descriptor = binding.by_ordinal
@@ -400,6 +417,34 @@ ExecutionResult NativeExecutionBackend::run(
                 continue;
             }
             const auto& binding = req.api_bindings[request.api_index];
+            // M12 P0: --unimplemented=trap|zero. Zero answers 0 and the child
+            // continues past the thunk's ret; Trap ends the run with the same
+            // typed fault the deterministic backend raises, naming the import.
+            if (binding.unimplemented) {
+                if (binding.unimplemented_returns_zero) {
+                    ++result.unimplemented_calls;
+                    if (result.first_unimplemented.empty())
+                        result.first_unimplemented = binding_identity(binding);
+                    reply.status = static_cast<std::uint32_t>(native::ReplyStatus::Ok);
+                    reply.rax = 0;
+                    ring->parent_reply(served - 1, reply);
+                    served_any = true;
+                    continue;
+                }
+                ring->parent_reply(served - 1,
+                                   {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
+                                    0, 0, {0, 0, 0, 0}});
+                served_any = true;
+                (void)::kill(child, SIGKILL);
+                while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+                child_exited = true;
+                ::close(result_pipe[0]);
+                if (thunk_host != nullptr) ::munmap(thunk_host, 4096);
+                result.unimplemented_calls = 1;
+                result.first_unimplemented = binding_identity(binding);
+                return fail(GuestFault::UnimplementedApi,
+                            "unimplemented import called: " + result.first_unimplemented);
+            }
             // ExitProcess rides the ordinary ApiCall wire; the parent
             // recognizes it by identity and answers with the
             // terminate-after-reply contract instead of dispatching.

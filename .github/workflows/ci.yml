@@ -179,6 +179,32 @@ jobs:
       - name: Build both synthetic Windows PE fixtures
         run: scripts/build-m11-samples.sh
 
+      # M12 P0: execute a compiler-built PE, not only inspect it. Today the
+      # freestanding sample loads (13 of 13 imports resolved) and starts
+      # running on the native backend, then stalls after its fourth import
+      # call and is ended by the 5 s watchdog (docs/m12-what-broke.md, entry
+      # 10). This step asserts the part that must hold -- the image loads and
+      # guest code runs -- and prints the outcome. Tighten it to
+      # outcome == "returned" and exit_code == 42 once the stall is fixed.
+      - name: Run the freestanding sample through xbox2pc run (native backend)
+        run: |
+          cmake -S . -B build-native -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBOX2PC_NATIVE_EXECUTION=ON
+          cmake --build build-native --target xbox2pc --parallel 2
+          set +e
+          build-native/tools/xbox2pc run build/m11-samples/m11_freestanding.exe \
+            --backend native --json build/m11-samples/run-native.json
+          echo "xbox2pc run exit status: $?"
+          set -e
+          python3 - <<'PY'
+          import json
+          r = json.load(open("build/m11-samples/run-native.json"))
+          assert r["ran"] is True, r
+          assert r["imports"]["total"] == 13, r["imports"]
+          assert r["imports"]["resolved"] == 13, r["imports"]
+          assert r["unimplemented"] == "strict", r
+          print("m11_freestanding.exe on the native backend:", r["outcome"], "|", r["detail"][:160])
+          PY
+
       - name: Verify imports, TLS directory, and C++ unwind metadata
         run: |
           python3 - <<'PY'

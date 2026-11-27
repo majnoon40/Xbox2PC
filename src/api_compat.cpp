@@ -1135,42 +1135,70 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
         lookup.by_ordinal
             ? reg_.find_ordinal(lookup.dll, lookup.ordinal)
             : reg_.find(lookup.dll, lookup.symbol);
+    // M12 P0: under --unimplemented=trap|zero an import without an
+    // implementation still gets a real dispatch binding, issued from the same
+    // registry-wide ID budget as any other, so the image loads and an engine
+    // asked to call it can name the import. Strict keeps the required-import
+    // rule: no binding, and the loader rejects the image.
+    const auto bind_unimplemented = [&](const std::string& why) {
+        if (unimplemented_ == UnimplementedPolicy::Strict) return false;
+        std::uint32_t stub_id = 0;
+        {
+            std::lock_guard lock(reg_.lock_);
+            if (reg_.next_binding_id_ > 0xFFFEu) return false;
+            stub_id = reg_.next_binding_id_++;
+        }
+        b.status = loader::ImportStatus::Resolved;
+        b.value = 0x51010000ull + stub_id;   // Win32-style dispatch address
+        b.unimplemented = true;
+        b.unimplemented_returns_zero = unimplemented_ == UnimplementedPolicy::Zero;
+        b.note = why + "; bound as an unimplemented import (--unimplemented=" +
+                 unimplemented_policy_to_name(unimplemented_) + ")";
+        ++bindings_issued_;
+        return true;
+    };
     if (d == nullptr) {
         // No verified descriptor: distinguish "known module, unknown API"
         // from "unknown module".
         const bool known_module = resolve_module(lookup.dll);
+        const std::string why = known_module
+            ? "module known (partial support) but this export has no verified descriptor"
+            : "no verified descriptors for this module (missing library from the "
+              "compatibility runtime's evidence base)";
+        if (bind_unimplemented(why)) return b;
         b.status = known_module ? loader::ImportStatus::Unresolved
-                                 : loader::ImportStatus::Unsupported;
-        b.note = known_module
-                     ? std::string("module known (partial support) but this "
-                       "export has no verified descriptor")
-                     : std::string("no verified descriptors for this module "
-                       "(missing library from the compatibility runtime's "
-                       "evidence base)");
+                                : loader::ImportStatus::Unsupported;
+        b.note = why;
         return b;
     }
     // Implementation check and registry-wide binding allocation are
     // serialized together so separate resolver instances cannot issue the
     // same synthetic guest address for different imports.
     std::uint32_t binding_id = 0;
+    bool no_implementation = false;
     {
         std::lock_guard lock(reg_.lock_);
         const auto it = reg_.impls_.find(desc_key(d->library, d->export_name));
         if (it == reg_.impls_.end()) {
-            b.status = loader::ImportStatus::Unresolved;
-            b.note = std::string("verified descriptor exists (") +
-                     api_status_to_name(d->compat) +
-                     ") but no implementation is registered: " + d->evidence;
-            return b;
-        }
-        // Both subranges share one registry-wide 65,534-ID budget.
-        // The completion sentinel 0x5100FFFF is deliberately never allocated.
-        if (reg_.next_binding_id_ > 0xFFFEu) {
+            no_implementation = true;   // decided below, outside the lock
+        } else if (reg_.next_binding_id_ > 0xFFFEu) {
+            // Both subranges share one registry-wide 65,534-ID budget.
+            // The completion sentinel 0x5100FFFF is deliberately never allocated.
             b.status = loader::ImportStatus::Unsupported;
             b.note = "registry-wide API binding address space exhausted";
             return b;
+        } else {
+            binding_id = reg_.next_binding_id_++;
         }
-        binding_id = reg_.next_binding_id_++;
+    }
+    if (no_implementation) {
+        const std::string why = std::string("verified descriptor exists (") +
+                                api_status_to_name(d->compat) +
+                                ") but no implementation is registered: " + d->evidence;
+        if (bind_unimplemented(why)) return b;
+        b.status = loader::ImportStatus::Unresolved;
+        b.note = why;
+        return b;
     }
     b.status = loader::ImportStatus::Resolved;
     b.value = (d->category == registry::ApiCategory::XboxGdk ? 0x51000000ull : 0x51010000ull) +
@@ -1179,6 +1207,22 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
     b.note = "dispatch-table binding (registry id " + std::to_string(binding_id) +
              "); evidence " + d->evidence + " " + d->evidence_url;
     return b;
+}
+
+const char* unimplemented_policy_to_name(UnimplementedPolicy p) {
+    switch (p) {
+        case UnimplementedPolicy::Strict: return "strict";
+        case UnimplementedPolicy::Trap: return "trap";
+        case UnimplementedPolicy::Zero: return "zero";
+    }
+    return "?";
+}
+
+bool unimplemented_policy_from_name(const std::string& n, UnimplementedPolicy& out) {
+    if (n == "strict") { out = UnimplementedPolicy::Strict; return true; }
+    if (n == "trap") { out = UnimplementedPolicy::Trap; return true; }
+    if (n == "zero") { out = UnimplementedPolicy::Zero; return true; }
+    return false;
 }
 
 // ── 5. delay-load imports ─────────────────────────────────────────────────

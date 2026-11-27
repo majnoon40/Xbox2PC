@@ -228,6 +228,46 @@ ExecutionResult DeterministicBackend::run(
                 break;
             }
 
+            // M12 P0: an import bound by --unimplemented=trap|zero has an
+            // exact identity but no implementation. Trap ends the run with a
+            // typed fault that names it; Zero answers 0 and the guest goes on
+            // at its return address under the same contract as a marshalled
+            // API call (RSP popped; a return straight to the sentinel
+            // completes the entry call).
+            if (binding->unimplemented) {
+                ++res.api_calls;
+                ++res.unimplemented_calls;
+                if (res.first_unimplemented.empty())
+                    res.first_unimplemented = binding_identity(*binding);
+                if (!binding->unimplemented_returns_zero) {
+                    fault(GuestFault::UnimplementedApi, io_cpu, AccessType::None, rip,
+                          pid_, tid_, Recoverability::Fatal,
+                          "unimplemented import called: " + res.first_unimplemented,
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                const auto stub_rsp = rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+                auto stub_return = mem.read_u64(stub_rsp);
+                if (!stub_return.ok()) {
+                    fault(GuestFault::InvalidAccess, io_cpu, AccessType::Read, stub_rsp,
+                          pid_, tid_, Recoverability::Fatal,
+                          "unimplemented import call return address is unreadable",
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                io_cpu.set_reg(Gpr::Rax, 0);
+                io_cpu.set_reg(Gpr::Sp, stub_rsp + 8);
+                io_cpu.rip = stub_return.value();
+                if (req.completion_va != 0 && io_cpu.rip == req.completion_va) {
+                    res.outcome = Outcome::Returned;
+                    res.return_value = 0;
+                    break;
+                }
+                continue;
+            }
+
             const auto* descriptor = binding->by_ordinal
                 ? registry_.find_ordinal(binding->library, binding->ordinal)
                 : registry_.find(binding->library, binding->export_name);
@@ -994,6 +1034,12 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     const auto ok = abi::validate_call(plan.call);
     if (!ok.ok()) return Ret(ok.errc(), ok.context());
     return Ret(plan);
+}
+
+std::string binding_identity(const ApiBindingInfo& binding) {
+    return binding.library + "!" +
+           (binding.by_ordinal ? "#" + std::to_string(binding.ordinal)
+                               : binding.export_name);
 }
 
 }  // namespace xbox2pc::rt::exec

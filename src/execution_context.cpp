@@ -342,6 +342,8 @@ Result<ExecutionRequest> ExecutionContext::prepare_entry(
         binding.export_name = imported.lookup.symbol;
         binding.by_ordinal = imported.lookup.by_ordinal;
         binding.ordinal = imported.lookup.ordinal;
+        binding.unimplemented = imported.unimplemented;
+        binding.unimplemented_returns_zero = imported.unimplemented_returns_zero;
         req.api_binding_values.push_back(binding.value);
         req.api_bindings.push_back(std::move(binding));
     }

@@ -304,3 +304,19 @@ else()
     target_compile_definitions(m11_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
 endif()
 add_test(NAME m11_run_test COMMAND m11_run_test)
+
+# M12 P0: `xbox2pc run` report on every outcome + the --unimplemented policy
+# (trap/zero end to end on the native backend; the deterministic engine's
+# handling is covered in execution_test.cpp).
+add_executable(m12_run_test m12_run_test.cpp)
+target_link_libraries(m12_run_test PRIVATE
+    xbox2pc_rt_run_cli
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(m12_run_test PRIVATE cxx_std_20)
+if(XBOX2PC_NATIVE_EXECUTION)
+    target_compile_definitions(m12_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=1)
+else()
+    target_compile_definitions(m12_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
+endif()
+add_test(NAME m12_run_test COMMAND m12_run_test)
