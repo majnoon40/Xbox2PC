@@ -128,7 +128,8 @@ Pushed, in pull request #18:
 | `a45758b` | M12.P0: rung fixtures B to G, built from source and executed in CI |
 | `852a4db` | M12.P0: `xbox2pc census` with first-reach ranking, and a JSON reader |
 | `2b20414` | M12.P0: crash telemetry, `XBOX2PC_WATCH`, `xbox2pc report` |
-| (pushed with this page's update) | M12.P0: warning-clean with clang |
-| (pushed with this page's update) | M12.P0: README honesty table, status and what-broke after the third session |
+| `f7eb166` | M12.P0: warning-clean with clang |
+| `0f52eb9` | M12.P0: README honesty table, status and what-broke after the third session |
+| (pushed with this fix) | M12.P0: correct the commit count on this page |
 
 Sixteen commits; the plan asks for under forty per pull request.
