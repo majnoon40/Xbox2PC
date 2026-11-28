@@ -1,0 +1,19 @@
+{
+  "contract_exit": 60,
+  "exit_code": 0,
+  "fault": "unimplemented-api",
+  "first_unimplemented": "kernel32.dll!GetModuleHandleW",
+  "imports": {
+    "invalid": 0,
+    "resolved": 1,
+    "total": 9,
+    "unimplemented": 8,
+    "unresolved": 0,
+    "unsupported": 0
+  },
+  "outcome": "faulted",
+  "source": "rung_b_bootloop.exe",
+  "stage": "teardown",
+  "status": "blocked",
+  "unimplemented_calls": 1
+}

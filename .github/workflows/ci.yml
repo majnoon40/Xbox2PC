@@ -297,3 +297,40 @@ jobs:
             build/m11-samples/SHA256SUMS.txt
             samples/m11/golden/
           if-no-files-found: error
+
+  # M12 P0.2: the rung ladder (plan section 3.2).  Every rung is built from
+  # project-authored source with clang + lld-link, executed through
+  # `xbox2pc run --backend native --unimplemented trap`, and compared with
+  # its committed golden.  A rung counts as passing only when it returns its
+  # contract exit code; one that stops on an unimplemented import is
+  # reported as blocked, never as passing (samples/rungs/README.md).
+  rung-fixtures:
+    name: M12 rung fixtures B-G (built from source, executed, goldens)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchains and inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld ninja-build
+
+      - name: Build the CLI with the native backend
+        run: |
+          cmake -S . -B build-native -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBOX2PC_NATIVE_EXECUTION=ON
+          cmake --build build-native --target xbox2pc --parallel 2
+
+      - name: Build the rung fixtures from source
+        run: scripts/build-rung-fixtures.sh
+
+      - name: Run the ladder and compare with the committed goldens
+        run: python3 scripts/rung_check.py --cli build-native/tools/xbox2pc --dir build/rungs
+
+      - name: Upload run reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m12-rung-run-reports
+          path: build/rungs/*.run.json
+          if-no-files-found: error

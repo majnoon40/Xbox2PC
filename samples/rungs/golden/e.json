@@ -1,0 +1,19 @@
+{
+  "contract_exit": 36,
+  "exit_code": 0,
+  "fault": "unimplemented-api",
+  "first_unimplemented": "kernel32.dll!CreateThread",
+  "imports": {
+    "invalid": 0,
+    "resolved": 5,
+    "total": 7,
+    "unimplemented": 2,
+    "unresolved": 0,
+    "unsupported": 0
+  },
+  "outcome": "faulted",
+  "source": "rung_e_threads.exe",
+  "stage": "teardown",
+  "status": "blocked",
+  "unimplemented_calls": 1
+}

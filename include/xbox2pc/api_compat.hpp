@@ -319,6 +319,8 @@ private:
     ApiRegistry& reg_;
     UnimplementedPolicy unimplemented_;
     std::atomic<std::uint64_t> bindings_issued_{0};
+    // True when at least one verified descriptor exists for the module.
+    bool module_has_descriptors(const std::string& dll) const;
 };
 
 // ── delay-load imports ────────────────────────────────────────────────────

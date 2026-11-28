@@ -1,0 +1,19 @@
+{
+  "contract_exit": 37,
+  "exit_code": 0,
+  "fault": "unimplemented-api",
+  "first_unimplemented": "d3d12.dll!D3D12CreateDevice",
+  "imports": {
+    "invalid": 0,
+    "resolved": 8,
+    "total": 13,
+    "unimplemented": 5,
+    "unresolved": 0,
+    "unsupported": 0
+  },
+  "outcome": "faulted",
+  "source": "rung_g_titlelike.exe",
+  "stage": "teardown",
+  "status": "blocked",
+  "unimplemented_calls": 1
+}

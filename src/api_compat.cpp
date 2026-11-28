@@ -1117,15 +1117,23 @@ ApiRegistry& default_registry() {
 
 // ── 4. ApiResolver ────────────────────────────────────────────────────────
 
-bool ApiResolver::resolve_module(const std::string& dll) {
-    // Module-level gate: a module is "supported" when at least one
-    // descriptor exists for it (partial support is honest support).
+bool ApiResolver::module_has_descriptors(const std::string& dll) const {
     std::lock_guard lock(reg_.lock_);
     const std::string norm = registry::normalize_module_name(dll);
     for (const auto& kv : reg_.descriptors_) {
         if (kv.first.rfind(norm + '\x1F', 0) == 0) return true;
     }
     return false;
+}
+
+bool ApiResolver::resolve_module(const std::string& dll) {
+    // Module-level gate: a module is "supported" when at least one
+    // descriptor exists for it (partial support is honest support). The
+    // loader asks this once per DLL and does not consult resolve() for an
+    // unsupported module, so under --unimplemented=trap|zero every module
+    // passes the gate and each import is bound (or not) on its own.
+    if (unimplemented_ != UnimplementedPolicy::Strict) return true;
+    return module_has_descriptors(dll);
 }
 
 loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
@@ -1159,8 +1167,9 @@ loader::ImportBinding ApiResolver::resolve(const loader::ImportLookup& lookup) {
     };
     if (d == nullptr) {
         // No verified descriptor: distinguish "known module, unknown API"
-        // from "unknown module".
-        const bool known_module = resolve_module(lookup.dll);
+        // from "unknown module" (by the descriptors, not by the module gate,
+        // which passes everything under trap|zero).
+        const bool known_module = module_has_descriptors(lookup.dll);
         const std::string why = known_module
             ? "module known (partial support) but this export has no verified descriptor"
             : "no verified descriptors for this module (missing library from the "
