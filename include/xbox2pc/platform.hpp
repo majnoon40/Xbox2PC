@@ -152,11 +152,21 @@ public:
     // reserved state. The mapping itself remains reserved.
     virtual Result<void> decommit_subrange(std::uint64_t offset,
                                            std::uint64_t size) = 0;
+
+    // ADR-0009: for shared-backed regions, the underlying object's fd
+    // (a forked child re-maps the same object at guest VAs). Private and
+    // anonymous regions return -1.
+    virtual int fd() const { return -1; }
 };
 
 // reserve = reserve address space without committing; commit = accessible.
 std::unique_ptr<PalMemoryRegion> reserve_memory(std::uint64_t size);
 std::unique_ptr<PalMemoryRegion> commit_memory(std::uint64_t size);
+// ADR-0009: reserve a SHARED region backed by one memfd (ftruncate'd to
+// size). Same protection semantics as reserve_memory; the fd stays open
+// for the region's lifetime. Used for the managed address space so a
+// forked child shares every byte the parent writes after the fork.
+std::unique_ptr<PalMemoryRegion> reserve_shared_memory(std::uint64_t size);
 std::uint64_t host_page_size();
 std::string host_backend_name();  // "linux-mmap" etc.
 

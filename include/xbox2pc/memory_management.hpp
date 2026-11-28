@@ -148,6 +148,10 @@ public:
     // Returns the host pointer for a virtual address INSIDE a committed
     // region; typed errors otherwise. Used by tests + future loader.
     Result<void*> translate(std::uint64_t xbox_va) const;
+    // ADR-0009: the shared memfd behind the space (-1 without shared
+    // backing). The native child re-maps this fd at the guest VAs after
+    // the fork so guest VA == child host VA.
+    int backing_fd() const;
     // Validate an access (read/write/execute) at a virtual address:
     // checks containment + protection; InvalidArgument when denied.
     Result<void> validate_access(std::uint64_t xbox_va, bool write,

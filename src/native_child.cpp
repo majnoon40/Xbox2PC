@@ -96,16 +96,30 @@ bool child_write_thunks(void* thunk_host, std::uint32_t import_count) {
     return true;
 }
 
-bool child_patch_iats(const ImportThunkTable& imports, std::int64_t load_bias) {
-    for (std::uint32_t i = 0; i < imports.count && i < kMaxThunkImports; ++i) {
-        const std::uint64_t va = imports.iat_vas[i];
-        if (va == 0) continue;
-        // Rebase: guest VA -> host address in THIS process.
-        const std::int64_t host = static_cast<std::int64_t>(va) + load_bias;
-        auto* slot = reinterpret_cast<std::uint64_t*>(host);
-        // The parent validated every IAT VA against the guest mapping
-        // before the fork; the rebased store is safe there.
-        slot[0] = kThunkPageBase + static_cast<std::uint64_t>(i) * kThunkStride;
+bool child_map_guest_identity(const GuestIdentityMap& plan) {
+    // ADR-0009: whole range PROT_NONE first, then per-region protections —
+    // the same W^X discipline the parent's window carries. PROT_NONE is
+    // also the reservation state: a reserved-but-uncommitted region in
+    // the plan would map no access anyway (the parent serializes only
+    // committed regions).
+    if (plan.space_base == 0 || plan.space_size == 0 || plan.fd < 0)
+        return false;
+    if (plan.space_base & 0xFFFull) return false;
+    void* base = ::mmap(reinterpret_cast<void*>(plan.space_base),
+                        static_cast<std::size_t>(plan.space_size),
+                        PROT_NONE, MAP_SHARED | MAP_FIXED_NOREPLACE,
+                        plan.fd, 0);
+    if (base == MAP_FAILED)
+        return false;
+    for (std::uint32_t i = 0; i < plan.region_count && i < GuestIdentityMap::kMaxRegions; ++i) {
+        const auto& r = plan.regions[i];
+        if (r.size == 0 || r.offset > plan.space_size ||
+            r.size > plan.space_size - r.offset)
+            return false;
+        if (::mprotect(reinterpret_cast<void*>(plan.space_base + r.offset),
+                       static_cast<std::size_t>(r.size),
+                       static_cast<int>(r.prot)) != 0)
+            return false;
     }
     return true;
 }
@@ -161,11 +175,12 @@ void child_handle_trap(int signal, siginfo_t* info, void* ucontext_v) {
     request.args[1] = static_cast<std::uint64_t>(uc->uc_mcontext.gregs[kRegRdx]);
     request.args[2] = static_cast<std::uint64_t>(uc->uc_mcontext.gregs[kRegR8]);
     request.args[3] = static_cast<std::uint64_t>(uc->uc_mcontext.gregs[kRegR9]);
-    // Aux: the child's frame state at the trap (host addresses; the
-    // parent rebases via the load bias).
+    // Aux: the child's frame state at the trap. ADR-0009: with the
+    // identity mapping these ARE guest VAs (guest VA == host VA), so the
+    // parent uses them unchanged — no load-bias rebasing on either side.
     request.aux[0] = static_cast<std::uint64_t>(uc->uc_mcontext.gregs[kRegRsp]);
     // The import call's return address, read directly from the child's
-    // stack (host memory; the parent rebases it to a guest VA).
+    // stack (a guest VA through the identity mapping).
     request.aux[1] = *reinterpret_cast<std::uint64_t*>(
         uc->uc_mcontext.gregs[kRegRsp]);
 
@@ -178,18 +193,11 @@ void child_handle_trap(int signal, siginfo_t* info, void* ucontext_v) {
             // dispatched the exit; the child ends here with the code.
             ::_exit(static_cast<int>(reply.exit_code & 0xFF));
         }
-        // M12 P0 (what-broke entry 16): apply the call's out-buffer
-        // payload. The parent's bridge wrote its own copy-on-write view;
-        // only bytes that cross this shared ring reach the child, so the
-        // reply carries the payload and the child writes it to the raw
-        // pointer it passed (the parent already validated that pointer as
-        // guest-writable for exactly this many bytes before filling it).
-        if (reply.out_len != 0 && reply.out_len <= kMaxReplyOutBytes &&
-            reply.out_arg < kMaxApiArgs && request.args[reply.out_arg] != 0) {
-            std::memcpy(reinterpret_cast<void*>(
-                            static_cast<std::uintptr_t>(request.args[reply.out_arg])),
-                        reply.out_bytes, reply.out_len);
-        }
+        // ADR-0009: no out-buffer application here. The parent's bridge
+        // wrote the call's out bytes through its MAP_SHARED window of
+        // the same memfd this child identity-maps — the bytes are already
+        // visible at the guest pointer the caller passed (what-broke
+        // entry 16's reply-slot payload was deleted with the migration).
         uc->uc_mcontext.gregs[kRegRax] =
             static_cast<greg_t>(reply.rax);
         // Resume at the ret (RIP already past int3).

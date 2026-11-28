@@ -22,6 +22,8 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <linux/falloc.h>
 #include <sys/types.h>
 #include <limits>
 #include <time.h>
@@ -587,9 +589,17 @@ public:
         if (base_ != nullptr) {
             munmap(base_, static_cast<std::size_t>(size_));
         }
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
     }
 
-    Result<void> map(std::uint64_t size, bool commit, bool exec) {
+    // shared=true (ADR-0009): back the region with one memfd mapped
+    // MAP_SHARED instead of an anonymous private mapping, so a forked
+    // child shares every post-fork write and can re-map the same object
+    // at guest VAs. exec is meaningless for a shared reservation (the
+    // child's identity mapping applies protections itself).
+    Result<void> map(std::uint64_t size, bool commit, bool exec, bool shared) {
         const long page = sysconf(_SC_PAGESIZE);
         const std::uint64_t psize = page > 0 ? static_cast<std::uint64_t>(page) : 4096;
         if (size == 0 || size > (~0ull) - (psize - 1)) {
@@ -598,20 +608,44 @@ public:
         }
         const std::uint64_t aligned = ((size - 1) / psize + 1) * psize;
         const int prot = commit ? (PROT_READ | PROT_WRITE) : PROT_NONE;
-        const int flags = MAP_PRIVATE | MAP_ANONYMOUS | (exec ? 0 : MAP_NORESERVE);
+        int fd = -1;
+        int flags;
+        if (shared) {
+            fd = static_cast<int>(::syscall(SYS_memfd_create,
+                                            "xbox2pc-space", 1u /* MFD_CLOEXEC */));
+            if (fd < 0) {
+                return Result<void>(RuntimeErrc::OutOfResources,
+                                    errno_string("memfd_create"));
+            }
+            if (::ftruncate(fd, static_cast<off_t>(aligned)) != 0) {
+                const std::string e = errno_string("ftruncate(memfd)");
+                ::close(fd);
+                return Result<void>(RuntimeErrc::OutOfResources, e);
+            }
+            flags = MAP_SHARED;
+        } else {
+            flags = MAP_PRIVATE | MAP_ANONYMOUS | (exec ? 0 : MAP_NORESERVE);
+        }
         void* base = mmap(nullptr, static_cast<std::size_t>(aligned),
-                          static_cast<int>(prot), flags, -1, 0);
+                          static_cast<int>(prot), flags, fd, 0);
         if (base == MAP_FAILED) {
-            return Result<void>(RuntimeErrc::OutOfResources,
-                                errno_string("mmap"));
+            const std::string e = errno_string("mmap");
+            if (fd >= 0) ::close(fd);
+            return Result<void>(RuntimeErrc::OutOfResources, e);
         }
         base_ = base;
         size_ = aligned;
+        fd_ = fd;
         return Result<void>::ok_result();
+    }
+
+    Result<void> map(std::uint64_t size, bool commit, bool exec) {
+        return map(size, commit, exec, /*shared=*/false);
     }
 
     void* base() const override { return base_; }
     std::uint64_t size() const override { return size_; }
+    int fd() const override { return fd_; }
 
     Result<void> protect(bool read, bool write, bool exec) override {
         if (base_ == nullptr) {
@@ -675,6 +709,19 @@ public:
             return errno_result("mprotect(decommit)");
         if (madvise(addr, static_cast<std::size_t>(size), MADV_DONTNEED) != 0)
             return errno_result("madvise(MADV_DONTNEED)");
+        // ADR-0009: on a shmem backing, MADV_DONTNEED only drops this
+        // mapping's page-table entries — the page cache keeps the data, so
+        // a re-commit would expose the old bytes. Punch a hole in the
+        // memfd so the range reads zeros again from every mapping
+        // (the anonymous-mapping contract AddressSpace tests rely on;
+        // measured in docs/adr-0009-guest-memory-memfd-identity.md).
+        if (fd_ >= 0) {
+            if (::syscall(SYS_fallocate, fd_,
+                          FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                          static_cast<off_t>(offset),
+                          static_cast<off_t>(size)) != 0)
+                return errno_result("fallocate(PUNCH_HOLE)");
+        }
         return Result<void>::ok_result();
     }
 
@@ -682,6 +729,7 @@ public:
 private:
     void* base_ = nullptr;
     std::uint64_t size_ = 0;
+    int fd_ = -1;   // memfd for shared regions (ADR-0009); -1 otherwise
 };
 
 }  // namespace
@@ -695,6 +743,12 @@ std::unique_ptr<PalMemoryRegion> reserve_memory(std::uint64_t size) {
 std::unique_ptr<PalMemoryRegion> commit_memory(std::uint64_t size) {
     auto r = std::make_unique<LinuxMemoryRegion>();
     if (r->map(size, true, false).ok()) return r;
+    return nullptr;
+}
+
+std::unique_ptr<PalMemoryRegion> reserve_shared_memory(std::uint64_t size) {
+    auto r = std::make_unique<LinuxMemoryRegion>();
+    if (r->map(size, false, false, /*shared=*/true).ok()) return r;
     return nullptr;
 }
 

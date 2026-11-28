@@ -19,6 +19,12 @@
 
 #include <gtest/gtest.h>
 
+#if defined(__linux__) && defined(__x86_64__)
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #include "xbox2pc/execution_engine.hpp"
 #include "xbox2pc/gdk_services.hpp"
 #include "xbox2pc/guest_cpu_state.hpp"
@@ -206,6 +212,83 @@ TEST(BridgeTest, VirtualQueryMarshalsExactAndShortBuffers) {
         EXPECT_FALSE(r.ok());
     }
 }
+
+#if defined(__linux__) && defined(__x86_64__)
+// ADR-0009: the managed address space is backed by one memfd mapped
+// MAP_SHARED. A forked child re-maps the same object at the guest VAs with
+// MAP_FIXED_NOREPLACE, so guest VA == child host VA, and the parent's
+// post-fork writes reach the child through the shared object — the old
+// anonymous MAP_PRIVATE window never carried them (what-broke entry 16).
+TEST(BridgeTest, AddressSpaceBackingIsASharedMemfdIdentityMappableAcrossFork) {
+    ExecWorld w;
+    auto [ph, proc] = w.new_process("memfd-identity.exe");
+    (void)ph;
+    auto& space = proc->address_space();
+    const std::uint64_t base = space.base();
+    const std::uint64_t capacity = space.capacity();
+    const std::uint64_t page = space.page_size();
+    ASSERT_GE(space.backing_fd(), 0) << "space is not memfd-backed";
+    // A committed RW page with a pre-fork canary.
+    auto r = space.reserve_region_auto(page, "identity-canary");
+    ASSERT_TRUE(r.ok()) << r.error_string();
+    ASSERT_TRUE(space.commit_region(r.value()).ok());
+    const std::uint64_t canary_va = r.value() + 0x20;
+    auto host = space.translate(canary_va);
+    ASSERT_TRUE(host.ok()) << host.error_string();
+    *static_cast<std::uint64_t*>(host.value()) = 0x1111111111111111ull;
+
+    int ready[2], go[2];
+    ASSERT_EQ(::pipe(ready), 0);
+    ASSERT_EQ(::pipe(go), 0);
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        // Child (async-signal-safe from here): identity-map the space's
+        // memfd at the guest VAs, re-apply the region protection, then
+        // read the canary THROUGH THE GUEST VA, tell the parent, and wait
+        // for the parent's post-fork write. Exit codes name the step.
+        ::close(ready[0]);
+        ::close(go[1]);
+        void* id = ::mmap(reinterpret_cast<void*>(base), capacity,
+                         PROT_NONE, MAP_SHARED | MAP_FIXED_NOREPLACE,
+                         space.backing_fd(), 0);
+        if (id == MAP_FAILED) ::_exit(80);
+        if (::mprotect(reinterpret_cast<void*>(r.value()), page,
+                       PROT_READ | PROT_WRITE) != 0)
+            ::_exit(81);
+        if (*reinterpret_cast<volatile std::uint64_t*>(canary_va) !=
+            0x1111111111111111ull)
+            ::_exit(82);
+        const std::uint8_t ok_byte = 1;
+        if (::write(ready[1], &ok_byte, 1) != 1) ::_exit(83);
+        std::uint8_t b = 0;
+        if (::read(go[0], &b, 1) != 1) ::_exit(84);
+        if (*reinterpret_cast<volatile std::uint64_t*>(canary_va) !=
+            0x2222222222222222ull)
+            ::_exit(85);
+        ::_exit(0);
+    }
+    ::close(ready[1]);
+    ::close(go[0]);
+    // Wait for the child's readiness, THEN write through the space after
+    // the fork — exactly the ring-serve pattern the bridge uses on every
+    // call.
+    std::uint8_t ready_byte = 0;
+    ASSERT_EQ(::read(ready[0], &ready_byte, 1), 1);
+    *static_cast<std::uint64_t*>(host.value()) = 0x2222222222222222ull;
+    const std::uint8_t go_byte = 1;
+    ASSERT_EQ(::write(go[1], &go_byte, 1), 1);
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    // 80 identity map, 81 protection, 82 pre-fork canary through the guest
+    // VA, 83 ready pipe, 84 go pipe, 85 post-fork visibility.
+    EXPECT_EQ(WEXITSTATUS(status), 0)
+        << "identity-map child failed at step " << WEXITSTATUS(status);
+    ::close(ready[0]);
+    ::close(go[1]);
+}
+#endif  // __linux__ && __x86_64__
 
 }  // namespace
 

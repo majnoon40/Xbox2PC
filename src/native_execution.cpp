@@ -40,67 +40,6 @@ namespace {
 // Unwind-search diagnostics sink (bounded: warnings only; never
 // propagated to the guest record).
 diag::Diagnostics unwind_diags_;
-
-// M12 P0 (what-broke entry 15): the child dereferences the TLS chain
-// (GS -> TEB.ThreadLocalStoragePointer -> vector slot -> TLS block) with
-// raw addresses, but the environment materializes that chain in guest
-// VAs. Rewrite the chain into the child's host form for the lifetime of
-// the run; the destructor restores the guest form on every exit path,
-// after the child is reaped, so the deterministic view never observes
-// host pointers. The other TEB pointer fields (self, stack bounds, PEB)
-// stay in guest form: nothing reads them through GS yet.
-class NativeTlsChain {
-public:
-    explicit NativeTlsChain(guest::GuestMemory& memory) : memory_(memory) {}
-    Result<void> adapt(std::uint64_t teb_va, const AddressSpace& space) {
-        using Ret = Result<void>;
-        const auto vector_va = memory_.read_u64(
-            teb_va + GuestThreadEnvironment::kTebTlsVectorOffset);
-        if (!vector_va.ok())
-            return Ret(vector_va.errc(),
-                       "TEB TLS vector pointer is unreadable: " +
-                           vector_va.error_string());
-        if (vector_va.value() == 0) return Ret::ok_result();   // nothing materialized
-        const auto vector_host = space.translate(vector_va.value());
-        if (!vector_host.ok())
-            return Ret(vector_host.errc(),
-                       "TLS vector has no committed host backing: " +
-                           vector_host.error_string());
-        const auto wrote_vector = memory_.write_u64(
-            teb_va + GuestThreadEnvironment::kTebTlsVectorOffset,
-            reinterpret_cast<std::uint64_t>(vector_host.value()));
-        if (!wrote_vector.ok())
-            return Ret(wrote_vector.errc(), "TEB TLS vector pointer is not writable");
-        saved_.emplace_back(teb_va + GuestThreadEnvironment::kTebTlsVectorOffset,
-                            vector_va.value());
-        for (std::uint32_t i = 0; i < GuestThreadEnvironment::kTlsSlotCount; ++i) {
-            const std::uint64_t slot_va =
-                vector_va.value() + static_cast<std::uint64_t>(i) * 8;
-            const auto value = memory_.read_u64(slot_va);
-            if (!value.ok())
-                return Ret(value.errc(),
-                           "TLS vector slot is unreadable: " + value.error_string());
-            if (value.value() == 0) continue;
-            const auto host = space.translate(value.value());
-            if (!host.ok()) continue;   // not a mapped guest VA: untouched
-            const auto wrote_slot = memory_.write_u64(
-                slot_va, reinterpret_cast<std::uint64_t>(host.value()));
-            if (!wrote_slot.ok())
-                return Ret(wrote_slot.errc(), "TLS vector slot is not writable");
-            saved_.emplace_back(slot_va, value.value());
-        }
-        return Ret::ok_result();
-    }
-    ~NativeTlsChain() {
-        for (auto it = saved_.rbegin(); it != saved_.rend(); ++it)
-            (void)memory_.write_u64(it->first, it->second);
-    }
-    NativeTlsChain(const NativeTlsChain&) = delete;
-    NativeTlsChain& operator=(const NativeTlsChain&) = delete;
-private:
-    guest::GuestMemory& memory_;
-    std::vector<std::pair<std::uint64_t, std::uint64_t>> saved_;
-};
 }  // namespace
 }  // namespace xbox2pc::rt::exec
 
@@ -276,25 +215,17 @@ ExecutionResult NativeExecutionBackend::run(
         }
     }
 
-    // TEB: resolve the host address once (child installs it as GS).
-    std::uint64_t teb_host = 0;
+    // TEB (ADR-0009): the child identity-maps the space, so the guest TEB
+    // VA is a host address in the child; GS is installed at the GUEST VA
+    // and the TEB contents (the TLS chain included) stay in guest form —
+    // what-broke entry 15's translate/restore layer is deleted with the
+    // identity model.
+    std::uint64_t teb_guest = 0;
     if (req.guest_teb_va != 0) {
-        auto t = space_->translate(req.guest_teb_va);
-        if (!t.ok())
+        if (!memory.validate(req.guest_teb_va, 8, false, false).ok())
             return fail(GuestFault::InvalidAccess,
-                        "native TEB has no committed host backing");
-        teb_host = reinterpret_cast<std::uint64_t>(t.value());
-    }
-    // ... and translate the TLS chain into the child's host form for the
-    // run's lifetime (what-broke entry 15); the destructor restores the
-    // guest form once the child is reaped.
-    NativeTlsChain tls_chain(memory);
-    if (req.guest_teb_va != 0) {
-        const auto adapted = tls_chain.adapt(req.guest_teb_va, *space_);
-        if (!adapted.ok())
-            return fail(GuestFault::InvalidAccess,
-                        "native TLS chain adaptation failed: " +
-                            adapted.error_string());
+                        "native TEB is not readable guest memory");
+        teb_guest = req.guest_teb_va;
     }
 
     // Thunk page: mapped at the fixed synthetic binding VA so guest
@@ -334,7 +265,45 @@ ExecutionResult NativeExecutionBackend::run(
     native::ChildRunState child_state;
     child_state.ring = ring.get();
     child_state.imports = imports.get();
-    child_state.teb_host = teb_host;
+    child_state.teb_host = teb_guest;
+
+    // ADR-0009: serialize the child's identity-mapping plan as plain data
+    // (read COW after the fork). Committed regions carry their protections;
+    // the whole range maps PROT_NONE first — the same reservation model the
+    // parent's window uses. A space with more committed regions than the
+    // plan holds fails the run before any fork (typed, honest).
+    native::GuestIdentityMap identity{};
+    identity.space_base = space_->base();
+    identity.space_size = space_->capacity();
+    identity.fd = space_->backing_fd();
+    if (identity.fd < 0)
+        return fail(GuestFault::Internal,
+                    "native guest space has no shared backing (ADR-0009)");
+    if (identity.space_base == 0 || identity.space_size == 0 ||
+        (identity.space_base & 0xFFFull) != 0 ||
+        identity.space_size > (std::uint64_t{1} << 47))
+        return fail(GuestFault::InvalidState,
+                    "native guest space geometry is not identity-mappable");
+    for (const auto& region : space_->list_regions()) {
+        if (region.state != RegionState::Committed) continue;
+        if (identity.region_count >= native::GuestIdentityMap::kMaxRegions)
+            return fail(GuestFault::InvalidState,
+                        "guest space exceeds the child identity plan's region budget");
+        auto& slot = identity.regions[identity.region_count++];
+        slot.offset = region.xbox_va - identity.space_base;
+        slot.size = region.size;
+        switch (region.protection) {
+            case MemProtect::NoAccess:  slot.prot = PROT_NONE; break;
+            case MemProtect::ReadOnly:  slot.prot = PROT_READ; break;
+            case MemProtect::ReadWrite:
+                slot.prot = PROT_READ | PROT_WRITE; break;
+            case MemProtect::ReadExecute:
+                slot.prot = PROT_READ | PROT_EXEC; break;
+            case MemProtect::Full:
+                slot.prot = PROT_READ | PROT_WRITE | PROT_EXEC; break;
+        }
+    }
+    child_state.identity = &identity;
 
     // Parent-side IAT patch: point every bound import's slot at its
     // thunk (page at the synthetic binding base). Done here so the child
@@ -401,10 +370,15 @@ ExecutionResult NativeExecutionBackend::run(
     if (child == 0) {
         // ── child: everything after here must be async-signal-safe ──
         native::child_install_traps(&child_state);
+        // ADR-0009: identity first — the space's memfd at the guest VAs,
+        // so guest VA == host VA from here on. MAP_FIXED_NOREPLACE fails
+        // the run honestly on any collision (sanitizer shadow, a library).
+        if (!native::child_map_guest_identity(*child_state.identity))
+            ::_exit(120);
         if (thunk_host != nullptr &&
             !native::child_write_thunks(thunk_host, imports->count))
             ::_exit(122);
-        if (teb_host != 0 && !native::child_install_gs(teb_host))
+        if (teb_guest != 0 && !native::child_install_gs(teb_guest))
             ::_exit(121);
         // IAT slots are already patched parent-side; the child only
         // reads them (and lands on the thunk page's int3).
@@ -413,18 +387,11 @@ ExecutionResult NativeExecutionBackend::run(
             cpu::Gpr::Rcx, cpu::Gpr::Rdx, cpu::Gpr::R8, cpu::Gpr::R9};
         for (std::size_t i = 0; i < req.entry_args.size(); ++i)
             arguments[i] = io_cpu.reg(argument_registers[i]);
-        // Guest stack top -> HOST address (the image's load bias).
-        const std::int64_t stack_bias =
-            static_cast<std::int64_t>(
-                reinterpret_cast<std::uint64_t>(host_entry.value())) -
-            static_cast<std::int64_t>(req.entry_va);
-        const std::uint64_t host_stack_top =
-            req.stack_top_va != 0
-                ? static_cast<std::uint64_t>(
-                      static_cast<std::int64_t>(req.stack_top_va) + stack_bias)
-                : 0;
+        // ADR-0009: the entry VA and the guest stack top ARE host
+        // addresses in the child (identity) — passed unchanged.
         const std::uint64_t value = native::child_invoke_entry(
-            host_entry.value(), host_stack_top, req.completion_va,
+            reinterpret_cast<void*>(req.entry_va), req.stack_top_va,
+            req.completion_va,
             arguments[0], arguments[1], arguments[2], arguments[3]);
         ::close(result_pipe[0]);
         const auto* bytes = reinterpret_cast<const std::uint8_t*>(&value);
@@ -514,7 +481,7 @@ ExecutionResult NativeExecutionBackend::run(
                 }
                 ring->parent_reply(served - 1,
                                    {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                    0, 0, {0, 0, 0, 0}, 0, 0, {}});
+                                    0, 0, {0, 0, 0, 0}});
                 served_any = true;
                 (void)::kill(child, SIGKILL);
                 while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -563,36 +530,18 @@ ExecutionResult NativeExecutionBackend::run(
             // register slots and marshal through the SAME bridge used by
             // the deterministic engine (validation + dispatch + return).
             //
-            // M12 P0 (what-broke entry 12): the wire args are the child's
-            // raw register values, and the child executes the image through
-            // the load bias. A pointer the guest computed from its own
-            // frame or image (a stack local, a callback address) is a HOST
-            // address; a value a runtime API produced (VirtualAlloc's base,
-            // a handle) is already a GUEST VA. The plan says which arguments
-            // are pointers: translate a pointer argument's host form back
-            // to its guest VA through the same bias the stack translation
-            // uses, and only when the translated value is inside the
-            // managed space — every other value passes through untouched
-            // (integers and guest VAs translate outside it). Until this,
-            // VirtualQuery(allocation, &stack_local, 48) was rejected at
-            // the bridge as an invalid guest pointer and answered 0, and
-            // the M11 sample exited 53.
-            const std::int64_t load_bias =
-                static_cast<std::int64_t>(
-                    reinterpret_cast<std::uint64_t>(host_entry.value())) -
-                static_cast<std::int64_t>(req.entry_va);
-            const auto& plan_args = plan.value().call.args;
+            // ADR-0009: the wire args are the child's raw register
+            // values, and the child identity-maps the space — a pointer
+            // the guest computed (a stack local, a callback address) is
+            // already a GUEST VA, and so is a value a runtime API
+            // produced. The args pass through unchanged; what-broke
+            // entry 12's load-bias translation is deleted with the
+            // identity model (its regression test,
+            // M12NativeRun.VirtualQueryReceivesGuestStackPointers, now
+            // proves identity: the child sends guest VAs or the bridge
+            // rejects them).
             std::array<std::uint64_t, 4> call_args = {
                 request.args[0], request.args[1], request.args[2], request.args[3]};
-            for (std::size_t i = 0; i < call_args.size() && i < plan_args.size(); ++i) {
-                if (plan_args[i].kind != abi::ArgKind::Ptr) continue;
-                const std::int64_t guest =
-                    static_cast<std::int64_t>(call_args[i]) - load_bias;
-                if (guest >= 0 &&
-                    space_->find_containing(static_cast<std::uint64_t>(guest)).ok()) {
-                    call_args[i] = static_cast<std::uint64_t>(guest);
-                }
-            }
             cpu::CpuState call_cpu;
             call_cpu.reset();
             // A valid guest RSP (the request's stack) so return-value
@@ -621,7 +570,7 @@ ExecutionResult NativeExecutionBackend::run(
                 if (req.unwind.unwind_image.empty()) {
                     ring->parent_reply(served - 1,
                                        {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                        0, 0, {0, 0, 0, 0}, 0, 0, {}});
+                                        0, 0, {0, 0, 0, 0}});
                     served_any = true;
                     (void)::kill(child, SIGKILL);
                     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -642,7 +591,7 @@ ExecutionResult NativeExecutionBackend::run(
                 } catch (const pe::ParseError&) {
                     ring->parent_reply(served - 1,
                                        {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                        0, 0, {0, 0, 0, 0}, 0, 0, {}});
+                                        0, 0, {0, 0, 0, 0}});
                     served_any = true;
                     (void)::kill(child, SIGKILL);
                     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -656,31 +605,19 @@ ExecutionResult NativeExecutionBackend::run(
                 }
                 // The faulting RIP for the search: the return address of
                 // the RaiseException call site, recovered from the GUEST
-                // STACK. The child's RSP at the trap is the pre-call RSP
-                // (the thunk's ret was not executed); the return address
-                // sits at the top of the guest frame. Recover it via the
-                // load bias.
-                const std::int64_t bias =
-                    static_cast<std::int64_t>(
-                        reinterpret_cast<std::uint64_t>(host_entry.value())) -
-                    static_cast<std::int64_t>(req.entry_va);
-                // The child's actual frame at the trap (wire aux,
-                // rebased host->guest): aux[1] is the import call's
-                // return address (the search's faulting RIP), aux[0] is
-                // RSP (with the return address already popped by the
-                // thunk's pending ret).
-                const std::uint64_t guest_rsp_at_call =
-                    static_cast<std::uint64_t>(
-                        static_cast<std::int64_t>(request.aux[0]) - bias);
-                const std::uint64_t return_va =
-                    static_cast<std::uint64_t>(
-                        static_cast<std::int64_t>(request.aux[1]) - bias);
+                // STACK. ADR-0009: the child's RSP and the return address
+                // it reads from the stack ARE guest VAs (identity) — the
+                // wire aux words need no rebasing. aux[1] is the import
+                // call's return address (the search's faulting RIP),
+                // aux[0] is RSP (with the return address already popped
+                // by the thunk's pending ret).
+                const std::uint64_t guest_rsp_at_call = request.aux[0];
+                const std::uint64_t return_va = request.aux[1];
                 auto read_stack = [&memory](std::uint64_t va) {
                     auto v = memory.read_u64(va);
                     if (!v.ok()) return std::optional<std::uint64_t>();
                     return std::optional<std::uint64_t>(v.value());
                 };
-                (void)bias;
                 // The faulting RIP for the search is the RaiseException
                 // call site's RETURN address (the guest call pushed it at
                 // [RSP] before landing on the thunk); the walked RSP is
@@ -697,7 +634,7 @@ ExecutionResult NativeExecutionBackend::run(
                 if (!search.has_value() || !search->found) {
                     ring->parent_reply(served - 1,
                                        {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                        0, 0, {0, 0, 0, 0}, 0, 0, {}});
+                                        0, 0, {0, 0, 0, 0}});
                     served_any = true;
                     (void)::kill(child, SIGKILL);
                     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -709,48 +646,30 @@ ExecutionResult NativeExecutionBackend::run(
                                     hex32(api_res.exception_code) +
                                     " (no language handler found)");
                 }
-                // Handler located: resume the child there (guest VA is
-                // absolute: image_base + rva).
+                // Handler located: resume the child there. ADR-0009:
+                // guest VAs are host addresses in the child (identity) —
+                // no bias on the transfer words.
                 const std::uint64_t handler_guest_va =
                     req.unwind.image_base + search->handler_rva;
                 native::ReplySlot seh{};
                 seh.status = static_cast<std::uint32_t>(native::ReplyStatus::GotoHandler);
-                seh.aux[1] = handler_guest_va + static_cast<std::uint64_t>(bias);
+                seh.aux[1] = handler_guest_va;
                 // The handler's RET must land in the establisher frame's
                 // CALLER: set RSP past the frame's saved return address
                 // so the pop returns to the caller, not back into the
                 // excepting function.
-                seh.aux[2] = search->establisher_frame + 8 +
-                             static_cast<std::uint64_t>(bias);
+                seh.aux[2] = search->establisher_frame + 8;
                 ring->parent_reply(served - 1, seh);
                 served_any = true;
                 continue;
             }
             reply.status = static_cast<std::uint32_t>(native::ReplyStatus::Ok);
             reply.rax = call_cpu.reg(cpu::Gpr::Rax);
-            // M12 P0 (what-broke entry 16): the bridge wrote the out
-            // payload into this parent's copy-on-write view; the child
-            // only sees bytes that cross the shared ring, so carry the
-            // payload in the reply (bounded by the plan's out deref size
-            // and the wire cap) for the child to apply itself.
-            {
-                const auto& res = dispatched.value().api_result;
-                if (res.has_out && res.out_bytes_size != 0) {
-                    for (std::uint32_t idx : plan.value().out_buffer_args) {
-                        if (idx >= plan.value().call.args.size()) continue;
-                        const auto& spec = plan.value().call.args[idx];
-                        if (!spec.is_out || spec.deref_size == 0) continue;
-                        const std::uint64_t n = std::min<std::uint64_t>(
-                            res.out_bytes_size, spec.deref_size);
-                        if (n == 0 || n > native::kMaxReplyOutBytes) break;
-                        reply.out_arg = idx;
-                        reply.out_len = static_cast<std::uint32_t>(n);
-                        std::memcpy(reply.out_bytes, res.out_bytes.data(),
-                                    static_cast<std::size_t>(n));
-                        break;   // one out payload per call in the M9 model
-                    }
-                }
-            }
+            // ADR-0009: no out payload on the wire. The bridge's out
+            // writes went through the parent's MAP_SHARED window of the
+            // memfd the child identity-maps — the child already sees
+            // every byte (what-broke entry 16's reply-slot payload and
+            // its 200-byte cap are deleted with the identity model).
             ring->parent_reply(served - 1, reply);
             served_any = true;
         }

@@ -127,7 +127,11 @@ AddressSpace::AddressSpace(std::uint64_t host_capacity, std::uint64_t xbox_base,
     if (capacity_ == 0 || capacity_ != host_capacity) return;
     // Backing host mapping: reserve (PROT_NONE) the whole capacity up
     // front; per-region commit flips subranges to RW via mprotect.
-    impl_->host = pal::reserve_memory(capacity_);
+    // ADR-0009: the backing is one memfd mapped MAP_SHARED — a forked
+    // native child shares every post-fork write and re-maps the same
+    // object at the guest VAs (identity). Decommit punches holes in the
+    // memfd so re-commit still reads zeros.
+    impl_->host = pal::reserve_shared_memory(capacity_);
     if (impl_->host == nullptr) {
         // Construction failure is observable: every region op will fail
         // with OutOfResources and the failure is recorded in metadata of
@@ -722,6 +726,13 @@ Result<void*> AddressSpace::translate(std::uint64_t xbox_va) const {
     const std::uint64_t offset_in_region = xbox_va - r.xbox_va;
     auto* base = static_cast<std::uint8_t*>(impl_->host->base());
     return Result<void*>(base + (r.xbox_va - xbox_base_) + offset_in_region);
+}
+
+int AddressSpace::backing_fd() const {
+    // ADR-0009: the shared memfd behind the space (-1 when construction
+    // failed or on a backend without shared regions). The native child
+    // re-maps this object at the guest VAs so guest VA == child host VA.
+    return impl_->host ? impl_->host->fd() : -1;
 }
 
 Result<void> AddressSpace::validate_access(std::uint64_t xbox_va, bool write,
