@@ -10,14 +10,17 @@ and the result was read back; stubs and partials are labeled as such.
 
 ## Where this branch stands
 
-**P0 is not complete.** Three sessions went into it. The plan's week-3
-checkpoint — rungs B to G merged with tests, plus the `census` and `report`
-commands — is met on this branch: the rung fixtures exist, are built from
-source in CI, executed and compared with goldens; `census` and `report`
-exist. What the checkpoint does not say, and what is honest to add, is that
-every rung is **blocked**, not passing: the runtime lacks the APIs they
-call. P0's remaining gap is the VirtualQuery layer of entry 12 and the
-deterministic `call [iat]` limit of entry 8.
+**P0's stop point has arrived.** Four sessions went into it. The plan's
+week-3 checkpoint — rungs B to G merged with tests, plus the `census`
+and `report` commands — is met on this branch, and the fourth session
+finished the run path: the VirtualQuery layer of entry 12 is fixed end
+to end (entries 15 and 16 with it), so the compiler-built M11 sample
+runs all thirteen of its imports and returns 42, asserted in CI. What
+the checkpoint does not say, and what is honest to add, is that every
+rung is still **blocked**, not passing: the runtime lacks the APIs
+they call. P0's remaining open item is the deterministic `call [iat]`
+limit of entry 8, deliberately left documented for the P1 benchmark
+and ADR decision.
 
 ## Status per pillar
 
@@ -27,10 +30,10 @@ deterministic `call [iat]` limit of entry 8.
 | P0.1 committed binaries removed | done | tip only; history not rewritten |
 | P0.1 third-party register, ADR-0008 | done | project license left to the maintainer |
 | CI sanitizers, native flag OFF and ON | done | all four legs green on GitHub for the latest commit |
-| Warning-clean | done | 0 warnings with gcc 14.2.0 (five configurations) and with clang 18.1.8 (Release, native flag ON); 32 of 32 tests in both final builds |
+| Warning-clean | done | 0 warnings in all six gcc configurations and with clang 18.1.8 (Release, native flag ON) on the final tree; 33 of 33 tests in every build |
 | P0.4 `xbox2pc run` JSON report on every outcome | done | `tests/m12_run_test.cpp` |
 | P0.4 `--unimplemented=strict\|trap\|zero` | done | native backend end to end; deterministic backend at engine level (entry 8) |
-| P0.4 `xbox2pc run` on the M11 sample | in progress | loads (13 of 13), allocates, exits 53: `VirtualQuery` (entry 12) |
+| P0.4 `xbox2pc run` on the M11 sample | done | returns 42 on the native backend: 13 of 13 imports resolved and called; `m11-pe-fixtures` job asserts it (entries 12, 15, 16) |
 | P0.4 crash telemetry (`crashes.log`, `XBOX2PC_WATCH`, `XBOX2PC_CRASH_SAVE`, `XBOX2PC_STACKS`) | done, bounded | API-boundary sampling; no `.pdata` frame walk yet; one guest thread |
 | P0.4 `xbox2pc report` | done | faults by site, unimplemented calls, API histogram |
 | P0.2 rung fixtures B–G, `cxxthrow` | done as fixtures; all six **blocked** | built from source and executed in CI against goldens |
@@ -43,7 +46,7 @@ deterministic `call [iat]` limit of entry 8.
 | P3 graphics providers | not started | no window, no triangle, no GPU run |
 | P4 shader translation | not started | |
 | P5 x86-64 conformance, proxy title | not started | |
-| "What broke" report | in progress | `docs/m12-what-broke.md`, fourteen entries |
+| "What broke" report | in progress | `docs/m12-what-broke.md`, sixteen entries |
 | M13 proposal | not started | |
 
 No API and no feature is marked supported by this branch beyond what the
@@ -61,54 +64,59 @@ Workflow runs exist for every pushed commit of the branch. Read back:
 | `a45758b` (rung fixtures) | 24 | all green, including the new `M12 rung fixtures B-G` job |
 | `852a4db` (census), `2b20414` (telemetry), `f7eb166` (clang-clean), `0f52eb9`, `b29d153` | 24 | all green |
 | (this page's final update) | 24 | all green |
+| (the VirtualQuery fix and its regressions, then this page's update) | 24 | read back after the push |
 
 ## Verified locally
 
-gcc 14.2.0, cmake 3.31.10, Linux x86-64, 2 vCPU; sanitizer flags as in
-`.github/workflows/ci.yml`. Clean builds of the tree before the last docs
-commit.
+gcc 14.2.0 and clang 18.1.8, cmake 3.31.10, Linux x86-64, 2 vCPU;
+sanitizer flags as in `.github/workflows/ci.yml`. Clean builds of the
+final tree, after the last code change.
 
 | Configuration | Native flag | Tests | Warnings | Sanitizer reports |
 | --- | --- | --- | --- | --- |
-| Release | ON | 32 of 32 | 0 | not applicable |
-| ASan + UBSan | OFF | 30 of 30 | 0 | 0 |
-| ASan + UBSan | ON | 30 of 30 | 0 | 0 |
-| TSan | OFF | 30 of 30 | 0 | 0 |
-| TSan | ON | 30 of 30 | 0 | 0 |
+| Release (gcc) | OFF | 33 of 33 | 0 | not applicable |
+| ASan + UBSan (gcc) | OFF | 33 of 33 | 0 | 0 |
+| ASan + UBSan (gcc) | ON | 33 of 33 | 0 | 0 |
+| TSan (gcc) | OFF | 33 of 33 | 0 | 0 |
+| TSan (gcc) | ON | 33 of 33 | 0 | 0 |
+| Release (gcc) | ON | 33 of 33 | 0 | not applicable |
+| Release (clang 18.1.8) | ON | 33 of 33 | 0 | not applicable |
 
-The sanitizer rows were run before the census and telemetry slices (30
-tests); those two slices and the clang warning fixes are covered by the
-GitHub sanitizer legs of their pushed commits, which are green. After the
-last code change the tree was rebuilt and tested with both compilers:
-gcc 14.2.0, Release, native flag ON: 32 of 32 tests, 0 warnings; clang
-18.1.8, same configuration: 32 of 32 tests, 0 warnings. One gcc run in
-between reported a failure that was not a test failure: a build killed at
-this machine's ten-minute command limit had left a zero-length, non-
-executable test binary behind (`x86_differential_test`), which make did not
-relink because its timestamp was newer than the sources. That was this
-sandbox's tooling, not the project; the file was removed and relinked.
+The M11 freestanding sample returns 42 through the `xbox2pc` binary of
+every native-flag-ON build above (gcc and clang), and five consecutive
+native runs were checked individually on the final tree (all 42). The clang build needed the conda
+toolchain pointed at the host (system sysroot, GNU linker, GCC builtin
+headers); with those flags it is warning-clean, and it found two
+long-standing unused private fields (`api_reg_`, `space_`) that gcc's
+`-Wunused-private-field` does not have; both now carry `[[maybe_unused]]`
+and the gcc builds were re-run green on the final tree.
 
 ## Not verified
 
-- **Sanitizers were not run locally on the last two slices** (census,
-  telemetry); GitHub ran them on the pushed commits.
 - **No real-GPU result of any kind.**
 - **Rungs pass nowhere**: all six are blocked at a named import.
 - **The deterministic backend cannot follow `call [iat]`** (entry 8): every
   compiler-built program runs on the native backend only.
-- **`xbox2pc run` on the M11 sample returns 53, not 42** (entry 12).
+- **The remaining TEB pointer fields (self, stack bounds, PEB) stay in
+  guest form** (entry 15, remaining); nothing reads them through GS yet.
+- **Out payloads above the ring's 200-byte wire cap are not carried to
+  the child** (entry 16); no implementation produces one today.
 
 ## What remains before the P0 stop point, in order
 
-1. Diagnose `VirtualQuery` in the run path (entry 12) so the sample returns
-   42; tighten the CI step of entry 4.
-2. Decide how the deterministic backend follows `call [iat]` (entry 8).
+1. ~~Diagnose `VirtualQuery` in the run path (entry 12) so the sample
+   returns 42; tighten the CI step of entry 4.~~ Done: the sample
+   returns 42 (entries 12, 15, 16); the `m11-pe-fixtures` step now
+   asserts `outcome == returned`, `exit_code == 42`, 13 API calls.
+2. Entry 8 (deterministic `call [iat]`) stays documented, not decided;
+   the decision belongs to the P1 benchmark and ADR-0002/0003.
 3. Rungs: each becomes passing only as its pillar lands (window P2 wave 4,
    files P2 wave 3, threads P1, graphics P3/P4). The goldens move with
    them, one deliberate `--update` at a time.
-4. Local sanitizer runs on the final tree; the clang build with the
-   project's warning flags.
-5. The P0 stop-point report.
+4. ~~Local sanitizer runs on the final tree; the clang build with the
+   project's warning flags.~~ Done (see "Verified locally").
+5. The P0 stop-point report: written into the pull request after the
+   final push is green on GitHub.
 
 ## Commits on this branch
 
@@ -132,7 +140,8 @@ Pushed, in pull request #18:
 | `f7eb166` | M12.P0: warning-clean with clang |
 | `0f52eb9` | M12.P0: README honesty table, status and what-broke after the third session |
 | `b29d153` | M12.P0: correct the commit count on this page |
-| (this commit) | M12.P0: record the final CI outcome |
+| `c9a9b6e` | M12.P0: record the final CI outcome |
+| (this commit) | M12.P0: VirtualQuery through the native run path (pointer args, TLS chain, out buffers across the ring) |
 
-Seventeen commits (including this one); the plan asks for under forty per
+Nineteen commits (including this one); the plan asks for under forty per
 pull request.

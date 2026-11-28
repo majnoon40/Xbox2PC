@@ -39,7 +39,7 @@ and [docs/m12-what-broke.md](docs/m12-what-broke.md).
 | Input policy and asset-policy hook (checker, pre-commit, CI job) | done | asset-policy job green; a crafted PE offered to `git commit` is refused |
 | `xbox2pc run` report | done | JSON on every outcome: outcome, stage, every import's status, the API trace, the first unimplemented import reached |
 | `--unimplemented=strict\|trap\|zero` | done | trap faults naming `dll!name`, zero returns 0 and continues; both backends |
-| Compiler-built M11 sample through `xbox2pc run` | partial | loads (13 of 13 imports), allocates, exits 53 because `VirtualQuery` returns the wrong size (what-broke entry 12) |
+| Compiler-built M11 sample through `xbox2pc run` | done | exits 42 on the native backend: all 13 imports resolved and called, `VirtualQuery` returns 48 with its structure on the guest stack (entries 12, 15, 16); asserted by the `m11-pe-fixtures` CI job |
 | Deterministic backend following `call [iat]` from code | blocked | import calls from compiler-built code need the native backend (entry 8) |
 | Rung ladder B–G and `cxxthrow` | fixtures done; all six blocked | built from source in CI, executed, compared with goldens: B at `kernel32!GetModuleHandleW`, C at `CreateFileW`, D and G at `d3d12!D3D12CreateDevice`, E at `CreateThread`, F on its own stubs until P1 |
 | `xbox2pc census` and `xbox2pc report` | done | `census_test`, `telemetry_test` |

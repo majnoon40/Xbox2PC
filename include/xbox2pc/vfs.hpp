@@ -288,7 +288,7 @@ private:
     void on_destroy() override;  // notifies the namespace (open tracking)
 
     std::unique_ptr<IVfsFileHandle> fh_;
-    VfsNamespace& space_;
+    [[maybe_unused]] VfsNamespace& space_;   // bound at construction (namespace lifetime intent)
     // Keep-alive to the namespace Impl (outlives the session if the
     // manager destroys the session first — the M5 UAF fix). Opaque type:
     // VfsNamespace::Impl (vfs.cpp defines both; the fwd struct aliases it).

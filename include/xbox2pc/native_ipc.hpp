@@ -11,13 +11,22 @@
 // Layout: one page, 64 slots x 256B request and reply banks.
 // Wire format (fixed offsets in each 256B slot):
 //   request: [u32 call_class][u32 api_index][u64 args[4]][u64 aux0..3]
-//   reply:   [u32 status][u32 exit_code][u64 rax][u64 aux0..3][u192 pad]
+//   reply:   [u32 status][u32 exit_code][u64 rax][u64 aux0..3]
+//            [u32 out_len][u32 out_arg][out_len <= 200 payload bytes]
 // call_class selects the operation:
 //   0 = API_CALL (api_index indexes the request's api_bindings vector,
 //                 args are the four Microsoft-x64 register slots)
 //   1 = EXIT_PROCESS (exit_code in args[0])
 // status: 0 = ok (rax valid), 1 = dispatched-but-rejected (error text is
 //   parent-side only), 2 = unknown api_index, 3 = fatal protocol error.
+//
+// Out-buffer payload (M12, what-broke entry 16): the parent's bridge
+// writes a call's out bytes into its own copy-on-write view of guest
+// memory; the child only sees what crosses this shared ring. The reply
+// therefore carries the out payload (up to 200 bytes) and the argument
+// index it applies to; the child writes it to the raw pointer it
+// passed in request.args[out_arg]. Payloads above the wire cap are not
+// carried (out_len 0) — none exist today; the cap is a wire constant.
 
 #include <cstdint>
 
@@ -31,6 +40,7 @@ namespace xbox2pc::rt::exec::native {
 constexpr std::uint32_t kRingSlots = 64;
 constexpr std::uint32_t kSlotBytes = 256;
 constexpr std::uint32_t kMaxApiArgs = 4;
+constexpr std::uint32_t kMaxReplyOutBytes = 200;   // see the wire comment above
 
 enum class CallClass : std::uint32_t {
     ApiCall = 0,
@@ -57,7 +67,13 @@ struct ReplySlot {
     std::uint32_t exit_code;    // ExitProcess code
     std::uint64_t rax;
     std::uint64_t aux[4];
+    // Out-buffer payload the child applies to request.args[out_arg]
+    // (what-broke entry 16); zero out_len means no payload.
+    std::uint32_t out_len;
+    std::uint32_t out_arg;
+    std::uint8_t out_bytes[kMaxReplyOutBytes];
 };
+static_assert(sizeof(ReplySlot) == kSlotBytes, "reply slot wire size");
 
 // Shared page. Volatile sequence counters; all publishes use release
 // stores, all observes use acquire loads (see the ADR protocol sketch).

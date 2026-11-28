@@ -178,6 +178,18 @@ void child_handle_trap(int signal, siginfo_t* info, void* ucontext_v) {
             // dispatched the exit; the child ends here with the code.
             ::_exit(static_cast<int>(reply.exit_code & 0xFF));
         }
+        // M12 P0 (what-broke entry 16): apply the call's out-buffer
+        // payload. The parent's bridge wrote its own copy-on-write view;
+        // only bytes that cross this shared ring reach the child, so the
+        // reply carries the payload and the child writes it to the raw
+        // pointer it passed (the parent already validated that pointer as
+        // guest-writable for exactly this many bytes before filling it).
+        if (reply.out_len != 0 && reply.out_len <= kMaxReplyOutBytes &&
+            reply.out_arg < kMaxApiArgs && request.args[reply.out_arg] != 0) {
+            std::memcpy(reinterpret_cast<void*>(
+                            static_cast<std::uintptr_t>(request.args[reply.out_arg])),
+                        reply.out_bytes, reply.out_len);
+        }
         uc->uc_mcontext.gregs[kRegRax] =
             static_cast<greg_t>(reply.rax);
         // Resume at the ret (RIP already past int3).

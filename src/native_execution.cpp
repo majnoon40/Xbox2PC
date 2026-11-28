@@ -10,6 +10,7 @@
 // call travels the ring and dispatches through the M7 ApiRegistry on the
 // parent side, exactly like the deterministic backend's bridge.
 #include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/telemetry.hpp"
 
 #include <array>
@@ -19,6 +20,8 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #if defined(__linux__) && defined(__x86_64__)
 #include <csignal>
@@ -37,6 +40,67 @@ namespace {
 // Unwind-search diagnostics sink (bounded: warnings only; never
 // propagated to the guest record).
 diag::Diagnostics unwind_diags_;
+
+// M12 P0 (what-broke entry 15): the child dereferences the TLS chain
+// (GS -> TEB.ThreadLocalStoragePointer -> vector slot -> TLS block) with
+// raw addresses, but the environment materializes that chain in guest
+// VAs. Rewrite the chain into the child's host form for the lifetime of
+// the run; the destructor restores the guest form on every exit path,
+// after the child is reaped, so the deterministic view never observes
+// host pointers. The other TEB pointer fields (self, stack bounds, PEB)
+// stay in guest form: nothing reads them through GS yet.
+class NativeTlsChain {
+public:
+    explicit NativeTlsChain(guest::GuestMemory& memory) : memory_(memory) {}
+    Result<void> adapt(std::uint64_t teb_va, const AddressSpace& space) {
+        using Ret = Result<void>;
+        const auto vector_va = memory_.read_u64(
+            teb_va + GuestThreadEnvironment::kTebTlsVectorOffset);
+        if (!vector_va.ok())
+            return Ret(vector_va.errc(),
+                       "TEB TLS vector pointer is unreadable: " +
+                           vector_va.error_string());
+        if (vector_va.value() == 0) return Ret::ok_result();   // nothing materialized
+        const auto vector_host = space.translate(vector_va.value());
+        if (!vector_host.ok())
+            return Ret(vector_host.errc(),
+                       "TLS vector has no committed host backing: " +
+                           vector_host.error_string());
+        const auto wrote_vector = memory_.write_u64(
+            teb_va + GuestThreadEnvironment::kTebTlsVectorOffset,
+            reinterpret_cast<std::uint64_t>(vector_host.value()));
+        if (!wrote_vector.ok())
+            return Ret(wrote_vector.errc(), "TEB TLS vector pointer is not writable");
+        saved_.emplace_back(teb_va + GuestThreadEnvironment::kTebTlsVectorOffset,
+                            vector_va.value());
+        for (std::uint32_t i = 0; i < GuestThreadEnvironment::kTlsSlotCount; ++i) {
+            const std::uint64_t slot_va =
+                vector_va.value() + static_cast<std::uint64_t>(i) * 8;
+            const auto value = memory_.read_u64(slot_va);
+            if (!value.ok())
+                return Ret(value.errc(),
+                           "TLS vector slot is unreadable: " + value.error_string());
+            if (value.value() == 0) continue;
+            const auto host = space.translate(value.value());
+            if (!host.ok()) continue;   // not a mapped guest VA: untouched
+            const auto wrote_slot = memory_.write_u64(
+                slot_va, reinterpret_cast<std::uint64_t>(host.value()));
+            if (!wrote_slot.ok())
+                return Ret(wrote_slot.errc(), "TLS vector slot is not writable");
+            saved_.emplace_back(slot_va, value.value());
+        }
+        return Ret::ok_result();
+    }
+    ~NativeTlsChain() {
+        for (auto it = saved_.rbegin(); it != saved_.rend(); ++it)
+            (void)memory_.write_u64(it->first, it->second);
+    }
+    NativeTlsChain(const NativeTlsChain&) = delete;
+    NativeTlsChain& operator=(const NativeTlsChain&) = delete;
+private:
+    guest::GuestMemory& memory_;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> saved_;
+};
 }  // namespace
 }  // namespace xbox2pc::rt::exec
 
@@ -220,6 +284,17 @@ ExecutionResult NativeExecutionBackend::run(
             return fail(GuestFault::InvalidAccess,
                         "native TEB has no committed host backing");
         teb_host = reinterpret_cast<std::uint64_t>(t.value());
+    }
+    // ... and translate the TLS chain into the child's host form for the
+    // run's lifetime (what-broke entry 15); the destructor restores the
+    // guest form once the child is reaped.
+    NativeTlsChain tls_chain(memory);
+    if (req.guest_teb_va != 0) {
+        const auto adapted = tls_chain.adapt(req.guest_teb_va, *space_);
+        if (!adapted.ok())
+            return fail(GuestFault::InvalidAccess,
+                        "native TLS chain adaptation failed: " +
+                            adapted.error_string());
     }
 
     // Thunk page: mapped at the fixed synthetic binding VA so guest
@@ -439,7 +514,7 @@ ExecutionResult NativeExecutionBackend::run(
                 }
                 ring->parent_reply(served - 1,
                                    {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                    0, 0, {0, 0, 0, 0}});
+                                    0, 0, {0, 0, 0, 0}, 0, 0, {}});
                 served_any = true;
                 (void)::kill(child, SIGKILL);
                 while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -487,16 +562,47 @@ ExecutionResult NativeExecutionBackend::run(
             // Build a scratch CPU state with the wire args in the ABI
             // register slots and marshal through the SAME bridge used by
             // the deterministic engine (validation + dispatch + return).
+            //
+            // M12 P0 (what-broke entry 12): the wire args are the child's
+            // raw register values, and the child executes the image through
+            // the load bias. A pointer the guest computed from its own
+            // frame or image (a stack local, a callback address) is a HOST
+            // address; a value a runtime API produced (VirtualAlloc's base,
+            // a handle) is already a GUEST VA. The plan says which arguments
+            // are pointers: translate a pointer argument's host form back
+            // to its guest VA through the same bias the stack translation
+            // uses, and only when the translated value is inside the
+            // managed space — every other value passes through untouched
+            // (integers and guest VAs translate outside it). Until this,
+            // VirtualQuery(allocation, &stack_local, 48) was rejected at
+            // the bridge as an invalid guest pointer and answered 0, and
+            // the M11 sample exited 53.
+            const std::int64_t load_bias =
+                static_cast<std::int64_t>(
+                    reinterpret_cast<std::uint64_t>(host_entry.value())) -
+                static_cast<std::int64_t>(req.entry_va);
+            const auto& plan_args = plan.value().call.args;
+            std::array<std::uint64_t, 4> call_args = {
+                request.args[0], request.args[1], request.args[2], request.args[3]};
+            for (std::size_t i = 0; i < call_args.size() && i < plan_args.size(); ++i) {
+                if (plan_args[i].kind != abi::ArgKind::Ptr) continue;
+                const std::int64_t guest =
+                    static_cast<std::int64_t>(call_args[i]) - load_bias;
+                if (guest >= 0 &&
+                    space_->find_containing(static_cast<std::uint64_t>(guest)).ok()) {
+                    call_args[i] = static_cast<std::uint64_t>(guest);
+                }
+            }
             cpu::CpuState call_cpu;
             call_cpu.reset();
             // A valid guest RSP (the request's stack) so return-value
             // marshalling's frame accounting cannot overflow.
             if (req.stack_top_va != 0)
                 call_cpu.set_reg(cpu::Gpr::Sp, req.stack_top_va - 0x100);
-            call_cpu.set_reg(cpu::Gpr::Rcx, request.args[0]);
-            call_cpu.set_reg(cpu::Gpr::Rdx, request.args[1]);
-            call_cpu.set_reg(cpu::Gpr::R8, request.args[2]);
-            call_cpu.set_reg(cpu::Gpr::R9, request.args[3]);
+            call_cpu.set_reg(cpu::Gpr::Rcx, call_args[0]);
+            call_cpu.set_reg(cpu::Gpr::Rdx, call_args[1]);
+            call_cpu.set_reg(cpu::Gpr::R8, call_args[2]);
+            call_cpu.set_reg(cpu::Gpr::R9, call_args[3]);
             const auto dispatched = marshal_and_dispatch(
                 call_cpu, memory, registry_, plan.value(), pid_, 0, 64, tid_,
                 {}, thread_environment_, {});
@@ -515,7 +621,7 @@ ExecutionResult NativeExecutionBackend::run(
                 if (req.unwind.unwind_image.empty()) {
                     ring->parent_reply(served - 1,
                                        {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                        0, 0, {0, 0, 0, 0}});
+                                        0, 0, {0, 0, 0, 0}, 0, 0, {}});
                     served_any = true;
                     (void)::kill(child, SIGKILL);
                     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -536,7 +642,7 @@ ExecutionResult NativeExecutionBackend::run(
                 } catch (const pe::ParseError&) {
                     ring->parent_reply(served - 1,
                                        {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                        0, 0, {0, 0, 0, 0}});
+                                        0, 0, {0, 0, 0, 0}, 0, 0, {}});
                     served_any = true;
                     (void)::kill(child, SIGKILL);
                     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -591,7 +697,7 @@ ExecutionResult NativeExecutionBackend::run(
                 if (!search.has_value() || !search->found) {
                     ring->parent_reply(served - 1,
                                        {static_cast<std::uint32_t>(native::ReplyStatus::Fatal),
-                                        0, 0, {0, 0, 0, 0}});
+                                        0, 0, {0, 0, 0, 0}, 0, 0, {}});
                     served_any = true;
                     (void)::kill(child, SIGKILL);
                     while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
@@ -622,6 +728,29 @@ ExecutionResult NativeExecutionBackend::run(
             }
             reply.status = static_cast<std::uint32_t>(native::ReplyStatus::Ok);
             reply.rax = call_cpu.reg(cpu::Gpr::Rax);
+            // M12 P0 (what-broke entry 16): the bridge wrote the out
+            // payload into this parent's copy-on-write view; the child
+            // only sees bytes that cross the shared ring, so carry the
+            // payload in the reply (bounded by the plan's out deref size
+            // and the wire cap) for the child to apply itself.
+            {
+                const auto& res = dispatched.value().api_result;
+                if (res.has_out && res.out_bytes_size != 0) {
+                    for (std::uint32_t idx : plan.value().out_buffer_args) {
+                        if (idx >= plan.value().call.args.size()) continue;
+                        const auto& spec = plan.value().call.args[idx];
+                        if (!spec.is_out || spec.deref_size == 0) continue;
+                        const std::uint64_t n = std::min<std::uint64_t>(
+                            res.out_bytes_size, spec.deref_size);
+                        if (n == 0 || n > native::kMaxReplyOutBytes) break;
+                        reply.out_arg = idx;
+                        reply.out_len = static_cast<std::uint32_t>(n);
+                        std::memcpy(reply.out_bytes, res.out_bytes.data(),
+                                    static_cast<std::size_t>(n));
+                        break;   // one out payload per call in the M9 model
+                    }
+                }
+            }
             ring->parent_reply(served - 1, reply);
             served_any = true;
         }

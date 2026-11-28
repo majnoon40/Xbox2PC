@@ -101,7 +101,7 @@ std::vector<std::uint8_t> MakeStubCallImage() {
 
 // entry: mov ecx,<code>; call [rip+disp] -> ExitProcess; ret (never reached).
 // `dll` is spelled the way a real import table spells it.
-std::vector<std::uint8_t> MakeExitProcessImage(const char* dll, std::uint8_t exit_code) {
+[[maybe_unused]] std::vector<std::uint8_t> MakeExitProcessImage(const char* dll, std::uint8_t exit_code) {
     PeBuildSpec s;
     s.imports = {{dll, {{"ExitProcess", 0}}}};
     s.reloc_blocks = {{0x2000, {{10, 0x2000, 0}}}};
@@ -117,6 +117,86 @@ std::vector<std::uint8_t> MakeExitProcessImage(const char* dll, std::uint8_t exi
     code.push_back(0xC3);
     s.text_payloads.clear();
     s.text_payloads.push_back({0x1000, code});
+    return PeBuilder(s).build();
+}
+
+// entry: VirtualAlloc a page, then VirtualQuery it with the 48-byte
+// MEMORY_BASIC_INFORMATION ON THE GUEST STACK, verify the return value
+// and three written fields at their documented x64 offsets, and exit
+// with the failing step's code (42 = every step passed). The out-struct
+// pointer is a stack local the CHILD computes in host form (it executes
+// the image through the load bias), so this program regresses the
+// native parent's pointer-argument rebase (what-broke entry 12). The
+// check chain overwrites the exit code per step, so a rejected
+// VirtualQuery reports the last check's code (56); only 42 proves the
+// call dispatched, returned 48, and wrote the documented fields.
+[[maybe_unused]] std::vector<std::uint8_t> MakeVirtualQueryImage() {
+    PeBuildSpec s;
+    s.imports = {{"kernel32.dll",
+                  {{"VirtualAlloc", 0}, {"VirtualQuery", 0}, {"ExitProcess", 0}}}};
+    s.reloc_blocks = {{0x2000, {{10, 0x2000, 0}}}};
+    auto emit = [&](std::uint32_t iat) {
+        std::vector<std::uint8_t> code;
+        auto bytes = [&](std::initializer_list<std::uint8_t> bs) {
+            code.insert(code.end(), bs);
+        };
+        auto imm32 = [&](std::uint32_t v) {
+            for (int b = 0; b < 4; ++b)
+                code.push_back(static_cast<std::uint8_t>(v >> (8 * b)));
+        };
+        auto rip_call = [&](std::uint32_t slot) {
+            // call [rip+disp32]; disp = slot VA - RIP past the call.
+            const std::uint64_t next = 0x1000 + code.size() + 6;
+            const auto disp = static_cast<std::int32_t>(
+                static_cast<std::int64_t>(iat + 8ull * slot) -
+                static_cast<std::int64_t>(next));
+            code.push_back(0xFF);
+            code.push_back(0x15);
+            for (int b = 0; b < 4; ++b)
+                code.push_back(static_cast<std::uint8_t>(disp >> (8 * b)));
+        };
+        bytes({0x53});                        // push rbx
+        bytes({0x48, 0x83, 0xEC, 0x58});       // sub rsp, 0x58 (shadow space + MBI at [rsp+0x20])
+        bytes({0x31, 0xC9});                  // xor ecx, ecx            (lpAddress = NULL)
+        bytes({0xBA}); imm32(0x1000);          // mov edx, 0x1000         (dwSize)
+        bytes({0x41, 0xB8}); imm32(0x3000);    // mov r8d, MEM_RESERVE|MEM_COMMIT
+        bytes({0x41, 0xB9}); imm32(0x04);      // mov r9d, PAGE_READWRITE
+        rip_call(0);                           // call VirtualAlloc       -> rax = allocation
+        bytes({0x48, 0x89, 0xC3});             // mov rbx, rax
+        bytes({0x41, 0xBC}); imm32(42);        // mov r12d, 42            (exit code so far)
+        bytes({0x48, 0x85, 0xC0});             // test rax, rax
+        bytes({0x41, 0xBD}); imm32(52);       // mov r13d, 52
+        bytes({0x45, 0x0F, 0x44, 0xE5});       // cmove r12d, r13d        (allocation was NULL)
+        bytes({0x48, 0x89, 0xD9});             // mov rcx, rbx            (lpAddress = allocation)
+        bytes({0x48, 0x8D, 0x54, 0x24, 0x20}); // lea rdx, [rsp+0x20]      (lpBuffer = stack local)
+        bytes({0x41, 0xB8}); imm32(48);        // mov r8d, 48              (dwLength = sizeof MBI)
+        rip_call(1);                           // call VirtualQuery       -> rax = bytes written
+        bytes({0x48, 0x83, 0xF8, 0x30});       // cmp rax, 48
+        bytes({0x41, 0xBD}); imm32(53);        // mov r13d, 53
+        bytes({0x45, 0x0F, 0x45, 0xE5});       // cmovne r12d, r13d        (wrong size returned)
+        bytes({0x8B, 0x44, 0x24, 0x40});       // mov eax, [rsp+0x40]      State (offset 32)
+        bytes({0x3D}); imm32(0x1000);          // cmp eax, MEM_COMMIT
+        bytes({0x41, 0xBD}); imm32(54);
+        bytes({0x45, 0x0F, 0x45, 0xE5});       // cmovne r12d, r13d
+        bytes({0x8B, 0x44, 0x24, 0x44});       // mov eax, [rsp+0x44]      Protect (offset 36)
+        bytes({0x3D}); imm32(0x04);            // cmp eax, PAGE_READWRITE
+        bytes({0x41, 0xBD}); imm32(55);
+        bytes({0x45, 0x0F, 0x45, 0xE5});       // cmovne r12d, r13d
+        bytes({0x8B, 0x44, 0x24, 0x38});       // mov eax, [rsp+0x38]      RegionSize (offset 24)
+        bytes({0x3D}); imm32(0x1000);          // cmp eax, 0x1000
+        bytes({0x41, 0xBD}); imm32(56);
+        bytes({0x45, 0x0F, 0x45, 0xE5});       // cmovne r12d, r13d
+        bytes({0x44, 0x89, 0xE1});             // mov ecx, r12d
+        rip_call(2);                           // call ExitProcess
+        bytes({0x0F, 0x0B});                   // ud2 (never reached)
+        return code;
+    };
+    // Full-layout probe: the IAT RVA depends on the payload length, which
+    // is constant (fixed disp32 widths), so probe with a zero-IAT emit.
+    PeBuildSpec probe = s;
+    probe.text_payloads.push_back({0x1000, emit(0)});
+    const std::uint32_t iat = FirstIatRva(PeBuilder(probe).build());
+    s.text_payloads.push_back({0x1000, emit(iat)});
     return PeBuilder(s).build();
 }
 
@@ -291,6 +371,25 @@ TEST(M12NativeRun, ExitProcessIsRecognizedFromARealDllName) {
         EXPECT_TRUE(r.has("\"api_calls\": 1")) << dll << ": " << r.json;
         std::filesystem::remove_all(dir);
     }
+}
+
+// The child computes guest-stack pointers in host form (it executes the
+// image through the load bias). Until the native parent translated
+// pointer arguments back to guest VAs, VirtualQuery's 48-byte out
+// structure on the guest stack was rejected at the bridge's pointer
+// validation and every call answered 0 (what-broke entry 12); the
+// program exits with the first failing step, 42 when every step passes.
+TEST(M12NativeRun, VirtualQueryReceivesGuestStackPointers) {
+    const auto dir = Scratch("native-vq");
+    const auto exe = WriteBytes(dir, "vq.exe", MakeVirtualQueryImage());
+    const auto r = RunFixture(exe, dir, "vq", "native", Policy::Strict);
+    EXPECT_EQ(r.rc, 0) << r.json;
+    EXPECT_TRUE(r.has("\"outcome\": \"returned\"")) << r.json;
+    EXPECT_TRUE(r.has("\"exit_code\": 42")) << r.json;
+    EXPECT_TRUE(r.has("\"return_value\": 42")) << r.json;
+    EXPECT_TRUE(r.has("\"api_calls\": 3")) << r.json;
+    EXPECT_TRUE(r.has("\"unimplemented_calls\": 0")) << r.json;
+    std::filesystem::remove_all(dir);
 }
 
 TEST(M12NativeRun, StrictStillRefusesToLoadOnTheNativeBackend) {

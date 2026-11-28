@@ -321,6 +321,18 @@ else()
 endif()
 add_test(NAME m12_run_test COMMAND m12_run_test)
 
+# M12 P0.4: the run path's VirtualQuery semantics through the marshalling
+# bridge (exact/short/out buffers; what-broke entry 12). Standalone so the
+# M12 additions keep their own file.
+add_executable(m12_bridge_test m12_bridge_test.cpp)
+target_link_libraries(m12_bridge_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_gdk
+    gtest)
+target_compile_features(m12_bridge_test PRIVATE cxx_std_20)
+add_test(NAME m12_bridge_test COMMAND m12_bridge_test)
+
 # M12 P0.3: census + JSON reader (PEs built here with PeBuilder).
 add_executable(census_test census_test.cpp)
 target_link_libraries(census_test PRIVATE

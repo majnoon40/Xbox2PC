@@ -253,7 +253,7 @@ next checkpoint parks with the state intact. 300 of 300 runs in a Debug
 build and 200 of 200 in Release locally; the Debug gcc leg is green in CI
 since `f256b69`.
 
-## 12. The run path never started the process, so Win32 memory and sync APIs failed (fixed; one layer open)
+## 12. The run path never started the process, so Win32 memory and sync APIs failed (fixed)
 
 **Symptom.** After entry 10 the sample exited with 52: `VirtualAlloc`
 returned NULL.
@@ -268,11 +268,29 @@ not call those APIs.
 **Fix.** The run path initializes the process with the module and starts
 it, as the execution tests do. The sample now allocates.
 
-**Open layer.** It then exits with 53: `VirtualQuery(allocation,
-&information, 48)` returns something other than 48. The registry-level
-unit test of `VirtualQuery` passes; the difference lies in the run path's
-marshalling plan or its address-space snapshot and was not diagnosed.
-`xbox2pc run` on the sample is not claimed to return 42.
+**Second layer, diagnosed and fixed.** It then exited with 53:
+`VirtualQuery(allocation, &information, 48)` answered 0. The
+registry-level unit test passed because the defect was not in the
+implementation: the child executes the image through the load bias, so
+`&information` — a pointer the guest computed from its own stack —
+arrived at the parent as a HOST address, and the marshalling bridge
+validated it as a guest VA and rejected the call (`pointer arg 1
+invalid: invalid-address`). `VirtualAlloc` had slipped through only
+because its pointer argument is passed by value. The parent now
+translates pointer arguments that the plan declares as pointers back to
+guest VAs through the same load bias it already uses for the stack;
+every other value passes through untouched. Regression:
+`M12NativeRun.VirtualQueryReceivesGuestStackPointers` (a hand-built
+image that VirtualAllocs a page, queries it with the
+MEMORY_BASIC_INFORMATION on its own stack, and checks the return value
+and three written fields) — it failed on the unfixed parent. What the
+fix revealed is entries 15 and 16. The buffer-length semantics the plan
+asked about are pinned at the bridge level by
+`BridgeTest.VirtualQueryMarshalsExactAndShortBuffers`: an exact
+48-byte buffer returns 48 and writes the documented offsets (including
+PartitionId and the tail padding), dwLength 47 answers 0 and writes
+nothing, and an out buffer that is not writable guest memory is
+rejected before dispatch.
 
 ## 13. A position-independent image without relocations cannot be placed (fixture side fixed; runtime limit open)
 
@@ -307,3 +325,64 @@ marks every import of an unknown module `Unsupported` without consulting
 **Fix.** Under `trap|zero` the gate passes every module and each import is
 bound (or not) on its own; the resolver still words its note from the real
 descriptor scan. `strict` is unchanged.
+
+## 15. The child faulted dereferencing the guest-form TLS chain (fixed)
+
+**Symptom.** After entry 12's fix the M11 sample ran all twelve
+non-exit imports, then died with SIGSEGV before calling `ExitProcess`,
+faulting at `addr=0x20048000`: its `__declspec(thread)` word read never
+returned.
+
+**Cause.** The child dereferences the TLS chain with raw addresses:
+GS base -> `TEB.ThreadLocalStoragePointer` -> vector slot -> TLS block.
+The environment materializes every link of that chain as a guest VA,
+and the child executes the image through the load bias, so the first
+guest-form pointer it dereferenced was not mapped in its address
+space. Only the GS base itself had been translated to a host address;
+the M11 hand-built tests never read a TLS variable through GS on the
+native backend, so nothing had noticed.
+
+**Fix.** Before the fork the parent translates the chain into the
+child's host form — `TEB.ThreadLocalStoragePointer` and every nonzero
+TLS vector slot — through the same load bias; an RAII guard restores
+the guest form after the child is reaped, so the deterministic view
+never observes host pointers. Proof: the sample's TLS check
+(`tls_word != 0x13579BDFu` would exit 61) now passes on its run to 42,
+asserted by the tightened `m11-pe-fixtures` step in CI
+(`outcome == returned`, `exit_code == 42`, 13 API calls).
+
+**Remaining.** The other TEB pointer fields — self, stack bounds, PEB —
+are still written in guest form; nothing reads them through GS yet.
+When one does, translate it the same way and regress it with a fixture.
+
+## 16. Out-buffer bytes never reached the child: the ring crossed the fork, guest memory did not (fixed)
+
+**Symptom.** The native regression fixture of entry 12 exited 56:
+`VirtualQuery` had returned 48 and the parent's own view of the 48-byte
+structure was byte-perfect (BaseAddress and AllocationBase at the
+allocation, State MEM_COMMIT, Protect PAGE_READWRITE, RegionSize
+0x1000, at the documented offsets), yet the child read zeros from its
+own stack. The M11 sample passed only because it checks the return
+value and never reads the fields.
+
+**Cause.** The managed address space is mapped `MAP_PRIVATE`
+(`src/pal_linux.cpp`), so the fork gives the child a copy-on-write
+view. The bridge's out-buffer write happens parent-side after the fork,
+so it landed in the parent's private copy. The only mapping shared
+across the fork is the import ring, which carried the reply registers
+only. Every out-struct on the native backend — `VirtualQuery`'s
+MEMORY_BASIC_INFORMATION, `VirtualProtect`'s old protection, the
+`XSystemGet*` strings — was silently never delivered to the guest.
+
+**Fix.** The reply slot's spare 200 bytes now carry the out payload
+(`[u32 out_len][u32 out_arg][payload]`; one out argument per call, as
+in the M9 model; bounded by the plan's out deref size and the wire
+cap), and the child applies it to the raw pointer it passed — the
+parent already validated that pointer, rebased, as guest-writable for
+exactly that many bytes. The parent still writes its own view through
+the bridge, so both sides hold the same bytes. Payloads above the
+wire cap are not carried; none exists today. Regression:
+`M12NativeRun.VirtualQueryReceivesGuestStackPointers` reads State,
+Protect, and RegionSize from the guest stack at their documented x64
+offsets, which is impossible without this fix (verified: with entry
+12's rebase present and this fix absent the fixture fails at 56).

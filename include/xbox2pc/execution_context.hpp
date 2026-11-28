@@ -155,7 +155,7 @@ private:
     std::uint64_t process_id_;
     std::uint64_t thread_id_;
     AddressSpace& space_;
-    api::ApiRegistry& api_reg_;
+    [[maybe_unused]] api::ApiRegistry& api_reg_;   // bound at construction (registry lifetime intent)
     ExecutionConfig cfg_;
     guest::GuestMemory mem_;
     std::shared_ptr<GuestProcessEnvironment> process_environment_;

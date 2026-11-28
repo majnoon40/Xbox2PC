@@ -110,7 +110,7 @@ std::string ReadAll(const std::filesystem::path& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-std::vector<std::string> Lines(const std::filesystem::path& path) {
+[[maybe_unused]] std::vector<std::string> Lines(const std::filesystem::path& path) {
     std::vector<std::string> out;
     std::ifstream in(path, std::ios::binary);
     std::string line;
