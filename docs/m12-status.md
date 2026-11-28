@@ -59,7 +59,8 @@ Workflow runs exist for every pushed commit of the branch. Read back:
 | `3f7f96d` (run path) | 22 | 21 green; `Debug · gcc` failed in the pull-request run (`ProcessResumePreservesPreexistingManualSuspension`), passed in the push run: the race of entry 11 |
 | `f256b69` (race, ExitProcess, process start) | 22 | all green |
 | `a45758b` (rung fixtures) | 24 | all green, including the new `M12 rung fixtures B-G` job |
-| later commits | 24 | see the pull request's check list; this page is updated with them |
+| `852a4db` (census), `2b20414` (telemetry), `f7eb166` (clang-clean), `0f52eb9`, `b29d153` | 24 | all green |
+| (this page's final update) | 24 | all green |
 
 ## Verified locally
 
@@ -130,6 +131,8 @@ Pushed, in pull request #18:
 | `2b20414` | M12.P0: crash telemetry, `XBOX2PC_WATCH`, `xbox2pc report` |
 | `f7eb166` | M12.P0: warning-clean with clang |
 | `0f52eb9` | M12.P0: README honesty table, status and what-broke after the third session |
-| (pushed with this fix) | M12.P0: correct the commit count on this page |
+| `b29d153` | M12.P0: correct the commit count on this page |
+| (this commit) | M12.P0: record the final CI outcome |
 
-Sixteen commits; the plan asks for under forty per pull request.
+Seventeen commits (including this one); the plan asks for under forty per
+pull request.
