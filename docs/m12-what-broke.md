@@ -85,7 +85,7 @@ gcc 14.2 and the project's warning flags, on untouched `main`.
 the `build-and-test` job in CI builds with clang as well and has not run on
 this branch.
 
-## 3. `xbox2pc run` could not load the compiler-built M11 sample, and wrote no report (fixed in part)
+## 3. `xbox2pc run` could not load the compiler-built M11 sample, and wrote no report (fixed)
 
 **Symptom.** `xbox2pc run build/m11-samples/m11_freestanding.exe` failed in
 both backends with `error: load failed: imports not fully resolved: 2 of 13
@@ -102,14 +102,14 @@ them per import.)
 written after a successful run), so a caller cannot learn the first missing
 import from the tool. `xbox2pc run --help` is treated as a file name.
 
-**State.** Fixed in part. The run world registers all three services the
+**State.** Fixed. The run world registers all three services the
 repository has (`GameRuntimeService`, `TaskQueueService`, `TimingService`,
 the `M7World` set), so the sample's 13 imports all resolve, and a JSON
 report is written on every outcome, listing every IAT slot with its status.
-`xbox2pc run --help` prints usage. The sample then stalls at run time:
-entry 10.
+`xbox2pc run --help` prints usage. What happened next is entries 10
+and 12.
 
-## 4. CI never executed a compiler-built PE (in part)
+## 4. CI never executed a compiler-built PE (fixed for the rungs; the M11 sample step is deliberately loose)
 
 The `m11-pe-fixtures` job builds the freestanding samples with clang and
 lld-link, checks their bytes with `objdump` and compares their SHA-256 with
@@ -117,10 +117,12 @@ lld-link, checks their bytes with `objdump` and compares their SHA-256 with
 so the gap in entry 3 was invisible to CI. It now runs the freestanding
 sample through `xbox2pc run --backend native --json` and asserts that it
 loads and that guest code runs (13 of 13 imports resolved, `ran` true),
-printing the outcome; the assertion is deliberately loose because of entry
-10 and must be tightened to `outcome == returned` and `exit_code == 42`
-once that is fixed. The rung fixtures of P0.2 are still the real answer:
-each rung executed, its exit code and trace checked.
+printing the outcome; the assertion stays loose until entry 12's open layer
+is fixed, then must be tightened to `outcome == returned` and
+`exit_code == 42`. The `rung-fixtures` job goes further: it builds the six
+rung programs from source and compares each run report with a committed
+golden, so a regression in loading or dispatching a compiler-built image
+fails CI.
 
 ## 5. Binaries were committed, and so were build directories
 
@@ -203,23 +205,105 @@ region holding the stack top (`src/native_execution.cpp`).
 64 bytes below the committed region on the deterministic backend; a push
 there faults as invalid-access instead of stack-overflow. Not changed.
 
-## 10. The compiler-built M11 sample stalls after its fourth import call (open)
+## 10. The compiler-built M11 sample spun forever after its fourth import call (fixed)
 
 **Symptom.** `xbox2pc run build/m11-samples/m11_freestanding.exe --backend
-native --json` gives `imports: 13 of 13 resolved`, `ran: true`, `api_calls:
+native --json` gave `imports: 13 of 13 resolved`, `ran: true`, `api_calls:
 4`, `outcome: faulted`, `budget-exceeded: native guest entry exceeded its
 child-process time limit`.
 
-**What is known.** The image loads and starts; four ring requests were
-served; a fifth never arrives within the 5 s limit. By the sample's call
-order the fourth call is `VirtualQuery` and the next is `VirtualProtect`.
-Not diagnosed: whether the child hangs after the fourth reply or the parent
-is stuck inside that dispatch.
+**What it was.** The fourth call was `ExitProcess(52)`, the sample's
+"VirtualAlloc returned NULL" exit (entry 12). The native parent recognized
+`ExitProcess` by comparing the module name byte-exact with `"kernel32"`. A
+real import table spells the module `kernel32.dll`, so `ExitProcess` was
+dispatched as an ordinary call, the reply carried no terminate contract,
+the child resumed after the call into the sample's `for (;;) {}`, and it
+spun until the watchdog fired.
 
-**Reproduce.** `scripts/build-m11-samples.sh`; build with
-`-DXBOX2PC_NATIVE_EXECUTION=ON`; `build-native/tools/xbox2pc run
-build/m11-samples/m11_freestanding.exe --backend native --json out.json`.
-The CI step added with entry 4 runs the same command.
+**Method.** Sampling both processes while the run hung settled it in one
+step: the parent was asleep in its 1 ms poll with zero CPU time, the child
+was running at 100% in user code. That ruled out a dispatch hang and
+pointed at guest code. The earlier reading that the fourth call was
+`VirtualQuery` was an inference from the call count alone and was wrong;
+the run report now carries the API trace, which answers that question
+directly.
 
-**State.** Open. `xbox2pc run` on the sample is not claimed to work; the
-report names the stage and the count so the next session starts there.
+**Fix.** The parent compares the registry's normalized module name
+(`registry::normalize_module_name`). Regression test:
+`M12NativeRun.ExitProcessIsRecognizedFromARealDllName`, with both
+spellings of the module.
+
+## 11. A parked thread could be left parked forever (fixed)
+
+**Symptom.** CI, Debug gcc, pull-request run of `3f7f96d`:
+`ProcessMgmtTest.ProcessResumePreservesPreexistingManualSuspension` failed
+(`is_parked()` true after `resume_process`, progress counter frozen for
+2 s) while the push run of the same commit passed.
+
+**Cause.** `RtThread::suspension_point()` flipped the state from
+`Suspended` to `Running` from a `checkpoint()` result that could predate a
+concurrent `suspend()` (which requests the gate before storing the
+state). The thread then parked on the requested gate with a `Running`
+state, and `resume_process()` skips threads that are not `Suspended`
+without an error, so nothing ever resumed it.
+
+**Fix.** The gate is re-checked under the transition lock before the
+state is touched; a pending suspension leaves the state alone and the
+next checkpoint parks with the state intact. 300 of 300 runs in a Debug
+build and 200 of 200 in Release locally; the Debug gcc leg is green in CI
+since `f256b69`.
+
+## 12. The run path never started the process, so Win32 memory and sync APIs failed (fixed; one layer open)
+
+**Symptom.** After entry 10 the sample exited with 52: `VirtualAlloc`
+returned NULL.
+
+**Cause.** `run_file` created the process and loaded the image but never
+called `initialize_process` and `start_process`. `reserve_region_by_pid`
+and its siblings act only on a process in the `Running` state, so every
+Win32 memory or synchronization call in `xbox2pc run` failed, in both
+backends, and the M11 hand-built fixtures never noticed because they do
+not call those APIs.
+
+**Fix.** The run path initializes the process with the module and starts
+it, as the execution tests do. The sample now allocates.
+
+**Open layer.** It then exits with 53: `VirtualQuery(allocation,
+&information, 48)` returns something other than 48. The registry-level
+unit test of `VirtualQuery` passes; the difference lies in the run path's
+marshalling plan or its address-space snapshot and was not diagnosed.
+`xbox2pc run` on the sample is not claimed to return 42.
+
+## 13. A position-independent image without relocations cannot be placed (fixture side fixed; runtime limit open)
+
+**Symptom.** Every rung fixture failed to load with `invalid-state:
+preferred image base unavailable and the image has no relocations
+(cannot move)`.
+
+**Cause.** The fixtures are position-independent code with no absolute
+addresses, so lld-link emits no base relocation table even with
+`/DYNAMICBASE`. A PE without relocations can only load at its preferred
+base, and the managed address space does not contain the default PE base
+(`0x140000000`). The M11 sample carries absolute VAs in its TLS directory
+and was never affected.
+
+**Fixture fix.** Every rung image links `rung_reloc.c`, one
+self-referential pointer that forces a DIR64 relocation.
+
+**Runtime limit (open).** A reloc-less image still cannot be loaded. Real
+Windows honors the preferred base; the managed space would have to contain
+it, or the loader would need to say so earlier (it does say so precisely).
+
+## 14. Under trap and zero the module gate still rejected unknown modules (fixed)
+
+**Symptom.** Rung B reported `7 of 9 unresolved/unsupported/invalid`
+under `--unimplemented=trap`: its `user32` imports were `Unsupported`, not
+bound.
+
+**Cause.** The loader asks the resolver's module gate once per DLL and
+marks every import of an unknown module `Unsupported` without consulting
+`resolve()`, so the policy never saw them.
+
+**Fix.** Under `trap|zero` the gate passes every module and each import is
+bound (or not) on its own; the resolver still words its note from the real
+descriptor scan. `strict` is unchanged.
