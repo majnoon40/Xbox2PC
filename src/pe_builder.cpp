@@ -413,7 +413,7 @@ std::vector<std::uint8_t> PeBuilder::build() const {
             for (std::size_t i = 0; i < n_entries; ++i) {
                 const auto& e = blk.entries[i];
                 const std::uint16_t ent =
-                    static_cast<std::uint16_t>((e.type << 12) |
+                    static_cast<std::uint16_t>((static_cast<std::uint32_t>(e.type) << 12) |
                                                (e.target_rva - blk.page_rva));
                 relocs.u16(start + 8 + i * 2, ent);
                 // Plant the pre-relocation value at the target (DIR64

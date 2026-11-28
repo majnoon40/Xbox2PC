@@ -30,7 +30,6 @@ ChildRunState* g_state = nullptr;
 // RDI=8 RSI=9 RBP=10 RBX=11 RDX=12 RAX=13 RCX=14 RSP=15 RIP=16.
 constexpr int kRegR8 = 0;
 constexpr int kRegR9 = 1;
-constexpr int kRegR10 = 2;
 constexpr int kRegRax = 13;
 constexpr int kRegRcx = 14;
 constexpr int kRegRdx = 12;

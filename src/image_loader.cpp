@@ -39,8 +39,7 @@ bool add_ok(std::uint64_t a, std::uint64_t b, std::uint64_t& out) {
 bool rd_u16(const std::uint8_t* f, std::size_t n, std::uint64_t off,
             std::uint16_t& out) {
     if (off + 2 > n) return false;
-    out = static_cast<std::uint16_t>(f[off]) |
-          (static_cast<std::uint16_t>(f[off + 1]) << 8);
+    out = static_cast<std::uint16_t>(f[off] | (f[off + 1] << 8));
     return true;
 }
 bool rd_u32(const std::uint8_t* f, std::size_t n, std::uint64_t off,

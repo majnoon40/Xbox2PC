@@ -32,7 +32,6 @@ namespace {
 constexpr std::uint64_t kCodeBase = 0x10000000;
 constexpr std::uint64_t kDataBase = 0x10020000;
 constexpr std::uint64_t kStackTop = 0x1002F000;   // inside the data region
-constexpr std::uint64_t kStackBot = 0x10028000;
 
 class X86ControlFlowTest : public ::testing::Test {
 protected:

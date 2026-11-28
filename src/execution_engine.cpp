@@ -110,22 +110,6 @@ namespace {
 inline std::uint64_t rg(const CpuState& c, std::uint8_t r) {
     return c.gprs[r & 0xF];
 }
-inline void set_rg(CpuState& c, std::uint8_t r, std::uint64_t v) {
-    c.gprs[r & 0xF] = v;
-}
-
-// ModRM decode for the subset: only [reg + disp8] and reg forms.
-struct ModRM {
-    std::uint8_t mod;   // 0: [reg], 1: reg, 2: [reg+disp8] — subset uses
-                        // mod=2 (disp8) for memory and mod=3 for reg.
-    std::uint8_t reg;  // reg field
-    std::uint8_t rm;   // rm field
-};
-inline ModRM decode_modrm(std::uint8_t b) {
-    return ModRM{static_cast<std::uint8_t>((b >> 6) & 3),
-                 static_cast<std::uint8_t>((b >> 3) & 7),
-                 static_cast<std::uint8_t>(b & 7)};
-}
 
 bool fault(GuestFault f, const CpuState& cpu, AccessType a,
            std::uint64_t addr, std::uint64_t pid, std::uint64_t tid,
