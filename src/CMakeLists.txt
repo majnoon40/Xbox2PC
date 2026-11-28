@@ -50,6 +50,12 @@ target_link_libraries(xbox2pc_rt_census PUBLIC
     xbox2pc_rt_json_reader xbox2pc_pe_parser xbox2pc_rt_api)
 target_compile_features(xbox2pc_rt_census PUBLIC cxx_std_20)
 
+# ── M12 P0.4: `xbox2pc report` over crashes.log ──
+add_library(xbox2pc_rt_report STATIC report_cli.cpp)
+target_include_directories(xbox2pc_rt_report PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_report PUBLIC xbox2pc_rt_json_reader)
+target_compile_features(xbox2pc_rt_report PUBLIC cxx_std_20)
+
 # ── api_registry (M2: evidence-based API classification DB) ──
 add_library(xbox2pc_api_registry STATIC api_registry.cpp)
 target_include_directories(xbox2pc_api_registry PUBLIC ${PROJECT_SOURCE_DIR}/include)

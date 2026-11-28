@@ -10,6 +10,7 @@
 // call travels the ring and dispatches through the M7 ApiRegistry on the
 // parent side, exactly like the deterministic backend's bridge.
 #include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/telemetry.hpp"
 
 #include <array>
 #include <cerrno>
@@ -370,6 +371,7 @@ ExecutionResult NativeExecutionBackend::run(
     // and the child's exit is detected through waitpid, not EPIPE.
     std::uint64_t served = 0;
     bool child_exited = false;
+    telemetry::WatchLog watch(req.watch_rvas);
     int status = 0;
     const auto deadline = std::chrono::steady_clock::now() + timeout_;
     bool timed_out = false, was_interrupted = false;
@@ -417,6 +419,10 @@ ExecutionResult NativeExecutionBackend::run(
                 continue;
             }
             const auto& binding = req.api_bindings[request.api_index];
+            // M12 P0.4 telemetry: the API trace and the watched u32s, at
+            // every imported-API call boundary (parent side).
+            telemetry::record_api_call(result, binding_identity(binding));
+            watch.sample(memory, req.unwind.image_base, result.api_trace.size());
             // M12 P0: --unimplemented=trap|zero. Zero answers 0 and the child
             // continues past the thunk's ret; Trap ends the run with the same
             // typed fault the deterministic backend raises, naming the import.

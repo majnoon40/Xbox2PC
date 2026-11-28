@@ -15,6 +15,9 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +27,8 @@
 #include "xbox2pc/execution_context.hpp"
 #include "xbox2pc/gdk_services.hpp"
 #include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/telemetry.hpp"
+#include "xbox2pc/guest_memory.hpp"
 #include "xbox2pc/image_loader.hpp"
 #include "xbox2pc/json_writer.hpp"
 #include "xbox2pc/pe_parser.hpp"
@@ -104,7 +109,73 @@ struct Report {
     std::string first_unimplemented;    // dll!name of the first stub reached
     std::uint64_t regions_after_terminate = 0;
     std::vector<ReportedImport> imports;  // every IAT slot, in image order
+    // M12 P0.4 telemetry.
+    std::vector<std::string> api_trace;   // last 64 imported-API identities
+    std::vector<std::string> stack_words; // XBOX2PC_STACKS: guest stack, bounded
+    std::string crash_log;                // where the crash record was appended
 };
+
+std::string env_or_empty(const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+}
+
+std::string utc_timestamp() {
+    const std::time_t now = std::time(nullptr);
+    std::tm broken{};
+    gmtime_r(&now, &broken);
+    char buffer[32];
+    std::strftime(buffer, sizeof buffer, "%Y-%m-%dT%H:%M:%SZ", &broken);
+    return buffer;
+}
+
+// One JSON line per faulting run (the plan's crashes.log discipline): time,
+// file, backend, fault, rip as module + RVA, the registers, the API trace
+// and the bounded stack. The .pdata/.xdata frame walk needs the unwinder of
+// P1 section 4.5 and is not recorded yet; the faulting RIP's module and RVA
+// are.
+void append_crash_record(const std::string& directory, const Report& report,
+                         const rt::exec::ExecutionResult& result,
+                         std::uint64_t image_base) {
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    Json j = Json::object();
+    j.set("time", utc_timestamp());
+    j.set("file", report.file);
+    j.set("backend", report.backend);
+    j.set("unimplemented", report.unimplemented);
+    j.set("outcome", report.outcome);
+    j.set("stage", report.stage);
+    j.set("detail", report.detail);
+    if (result.exception.has_value()) {
+        const auto& exception = *result.exception;
+        j.set("fault", rt::exec::guest_fault_to_name(exception.fault));
+        j.set("rip", exception.rip);
+        j.set("image_base", image_base);
+        if (exception.rip >= image_base) j.set("rva", exception.rip - image_base);
+        else j.set("rva", nullptr);
+    }
+    static const char* const kGpr[16] = {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+                                         "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
+    Json registers = Json::object();
+    for (std::size_t i = 0; i < 16; ++i)
+        registers.set(kGpr[i], result.cpu.state.gprs[i]);
+    registers.set("rip", result.cpu.state.rip);
+    registers.set("rflags", result.cpu.state.rflags);
+    j.set("registers", std::move(registers));
+    j.set("api_calls", result.api_calls);
+    j.set("unimplemented_calls", result.unimplemented_calls);
+    j.set("first_unimplemented", result.first_unimplemented);
+    Json trace = Json::array();
+    for (const auto& identity : result.api_trace) trace.push_back(Json(identity));
+    j.set("api_trace", std::move(trace));
+    Json stack = Json::array();
+    for (const auto& word : report.stack_words) stack.push_back(Json(word));
+    j.set("stack", std::move(stack));
+    std::ofstream out(directory + "/crashes.log", std::ios::app);
+    if (!out) return;
+    out << j.serialize_compact() << "\n";
+}
 
 std::uint64_t count_imports(const Report& r, const char* status) {
     std::uint64_t n = 0;
@@ -131,6 +202,13 @@ Json report_json(const Report& r) {
     j.set("unimplemented_calls", r.unimplemented_calls);
     j.set("first_unimplemented", r.first_unimplemented);
     j.set("regions_after_terminate", r.regions_after_terminate);
+    Json trace = Json::array();
+    for (const auto& identity : r.api_trace) trace.push_back(Json(identity));
+    j.set("api_trace", std::move(trace));
+    Json stack = Json::array();
+    for (const auto& word : r.stack_words) stack.push_back(Json(word));
+    j.set("stack", std::move(stack));
+    j.set("crash_log", r.crash_log);
     Json imports = Json::object();
     imports.set("total", static_cast<std::uint64_t>(r.imports.size()));
     imports.set("resolved", count_imports(r, "resolved"));
@@ -184,6 +262,16 @@ void print_report(const Report& r) {
     }
     if (!r.detail.empty()) std::printf("  detail:      %s\n", r.detail.c_str());
     if (!r.error.empty()) std::printf("  error:       %s\n", r.error.c_str());
+    if (r.ran) {
+        std::printf("  api trace:   %zu record(s)", r.api_trace.size());
+        for (std::size_t i = 0; i < r.api_trace.size() && i < 8; ++i)
+            std::printf(" %s", r.api_trace[i].c_str());
+        if (r.api_trace.size() > 8) std::printf(" ...");
+        std::printf("\n");
+        if (!r.stack_words.empty())
+            std::printf("  stack:       %zu word(s) from RSP (XBOX2PC_STACKS)\n", r.stack_words.size());
+        if (!r.crash_log.empty()) std::printf("  crash log:   %s\n", r.crash_log.c_str());
+    }
     std::printf("  NOTE: subset interpreter execution — NOT a general emulator,\n");
     std::printf("        NOT a claim of Xbox-title compatibility.\n");
     std::printf("%s\n", rule.c_str());
@@ -373,6 +461,10 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
     }
     if (ctx.guest_environment() != nullptr)
         req.value().guest_teb_va = ctx.guest_gs_base();
+    // M12 P0.4 telemetry: XBOX2PC_WATCH=<rva>,... (guest u32s logged on change,
+    // sampled by the engines at imported-API call boundaries).
+    req.value().watch_rvas = rt::exec::telemetry::parse_watch_rvas(std::getenv("XBOX2PC_WATCH"));
+    const std::uint64_t image_base = req.value().unwind.image_base;
 
     report.stage = "execute";
     std::atomic<bool> stop{false};
@@ -400,6 +492,22 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
     const auto& res = res_holder;
     const bool ok = res.ok() && res.value().outcome == Outcome::Returned;
     const auto rax = res.ok() ? res.value().return_value : 0;
+    // M12 P0.4 telemetry: XBOX2PC_STACKS dumps the guest stack of a faulting
+    // run (bounded to 64 words from RSP) while the address space still
+    // exists. The run path has one guest thread; per-thread stacks come
+    // with P1's guest threads.
+    if (!env_or_empty("XBOX2PC_STACKS").empty() && res.ok() &&
+        res.value().outcome != Outcome::Returned) {
+        rt::guest::GuestMemory memory(proc->address_space());
+        const auto rsp = res.value().cpu.state.reg(rt::cpu::Gpr::Sp);
+        for (std::uint64_t i = 0; i < 64; ++i) {
+            auto word = memory.read_u64(rsp + 8 * i);
+            if (!word.ok()) break;
+            char buffer[19];
+            std::snprintf(buffer, sizeof buffer, "0x%016llx", u64(word.value()));
+            report.stack_words.emplace_back(buffer);
+        }
+    }
     (void)ctx.destroy();
     (void)loader.unload_image(w.pm, w.core.objects(), ph.value(), h.value());
     (void)w.pm.terminate_process(ph.value(), rax & 0xFFu);
@@ -420,6 +528,14 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
     if (res.ok() && res.value().exception.has_value())
         report.detail = rt::exec::format_exception(*res.value().exception);
     report.regions_after_terminate = st.region_count;
+    report.api_trace = res.ok() ? res.value().api_trace : std::vector<std::string>();
+    // M12 P0.4 telemetry: XBOX2PC_CRASH_SAVE=<dir> appends one record per run
+    // that executed and did not return normally.
+    const auto crash_dir = env_or_empty("XBOX2PC_CRASH_SAVE");
+    if (!crash_dir.empty() && res.ok() && res.value().outcome != Outcome::Returned) {
+        append_crash_record(crash_dir, report, res.value(), image_base);
+        report.crash_log = crash_dir + "/crashes.log";
+    }
     return finish(ok ? 0 : 1);
 }
 

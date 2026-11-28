@@ -8,6 +8,7 @@
 //   4. plan_for_descriptor (documented-signature-driven plans)
 
 #include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/telemetry.hpp"
 #include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/x86_interpreter.hpp"
 #include "xbox2pc/pe_parser.hpp"
@@ -181,6 +182,7 @@ ExecutionResult DeterministicBackend::run(
                                           ? req.stack_top_va - req.stack_size
                                           : 4096;
     GuestMemory& mem = *mem_;
+    telemetry::WatchLog watch(req.watch_rvas);
     std::uint64_t budget = cfg_.max_instructions;
     std::uint64_t executed = 0;
 
@@ -227,6 +229,11 @@ ExecutionResult DeterministicBackend::run(
                 res.outcome = Outcome::Faulted;
                 break;
             }
+
+            // M12 P0.4 telemetry: the API trace and the watched u32s, at
+            // every imported-API call boundary.
+            telemetry::record_api_call(res, binding_identity(*binding));
+            watch.sample(mem, req.unwind.image_base, res.api_trace.size());
 
             // M12 P0: an import bound by --unimplemented=trap|zero has an
             // exact identity but no implementation. Trap ends the run with a

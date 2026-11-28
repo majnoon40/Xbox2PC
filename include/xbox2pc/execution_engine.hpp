@@ -131,6 +131,9 @@ struct ExecutionResult {
     // first one reached ("library!export"). Zero and empty when none did.
     std::uint32_t unimplemented_calls = 0;
     std::string first_unimplemented;
+    // M12 P0.4 telemetry: the last 64 imported-API identities, in call order
+    // (telemetry.hpp). Empty when no import was called.
+    std::vector<std::string> api_trace;
 };
 
 // ── the engine interface ──────────────────────────────────────────────────
@@ -187,6 +190,10 @@ struct ExecutionRequest {
     // Guest VA of the mapped TEB for the executing thread (0 = none);
     // the native child installs it as GS base.
     std::uint64_t guest_teb_va = 0;
+    // M12 P0.4 telemetry (XBOX2PC_WATCH): RVAs, relative to the image base
+    // bound in `unwind`, of guest u32s to log when their value changes.
+    // Sampled at imported-API call boundaries by both backends.
+    std::vector<std::uint32_t> watch_rvas;
 
     // ── M11 Phase 6: exception dispatch context ─────────────────────────
     // When an imported API raises a guest exception (RaiseException), the

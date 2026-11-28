@@ -329,3 +329,19 @@ target_link_libraries(census_test PRIVATE
     gtest)
 target_compile_features(census_test PRIVATE cxx_std_20)
 add_test(NAME census_test COMMAND census_test)
+
+# M12 P0.4: crash records, watch lists, xbox2pc report (faulting runs on the
+# native backend under the flag).
+add_executable(telemetry_test telemetry_test.cpp)
+target_link_libraries(telemetry_test PRIVATE
+    xbox2pc_rt_run_cli
+    xbox2pc_rt_report
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(telemetry_test PRIVATE cxx_std_20)
+if(XBOX2PC_NATIVE_EXECUTION)
+    target_compile_definitions(telemetry_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=1)
+else()
+    target_compile_definitions(telemetry_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
+endif()
+add_test(NAME telemetry_test COMMAND telemetry_test)
