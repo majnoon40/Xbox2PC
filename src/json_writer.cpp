@@ -57,6 +57,14 @@ const Json& Json::get(const std::string& key) const {
     throw JsonError("missing object key '" + key + "'");
 }
 
+const Json* Json::find(const std::string& key) const noexcept {
+    if (type_ != Type::Object) return nullptr;
+    for (const auto& kv : *obj_) {
+        if (kv.first == key) return &kv.second;
+    }
+    return nullptr;
+}
+
 const std::string& Json::as_string() const {
     if (type_ != Type::String) throw JsonError("as_string on non-string Json");
     return str_;

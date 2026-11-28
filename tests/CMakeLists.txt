@@ -320,3 +320,12 @@ else()
     target_compile_definitions(m12_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
 endif()
 add_test(NAME m12_run_test COMMAND m12_run_test)
+
+# M12 P0.3: census + JSON reader (PEs built here with PeBuilder).
+add_executable(census_test census_test.cpp)
+target_link_libraries(census_test PRIVATE
+    xbox2pc_rt_census
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(census_test PRIVATE cxx_std_20)
+add_test(NAME census_test COMMAND census_test)

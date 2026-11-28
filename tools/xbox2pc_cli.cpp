@@ -29,6 +29,7 @@
 #include "xbox2pc/package_vfs.hpp"
 #include "xbox2pc/packages.hpp"
 #include "xbox2pc/process_management.hpp"
+#include "xbox2pc/census.hpp"
 #include "xbox2pc/vfs_backends.hpp"
 #include "xbox2pc/vfs_process.hpp"
 #include "xbox2pc/runtime_core.hpp"
@@ -105,6 +106,7 @@ void usage() {
                  "       xbox2pc api-status [--json <out>]\n"
                  "       xbox2pc dispatch-test <library!name> [--json <out>]\n"
                  "       xbox2pc compat-report <pe-file> [--json <out>]\n"
+                 "       xbox2pc census <dir-or-file>... [--missing] [--trace <run.json>]... [--triage N] [--json <out>]\n"
                  "       xbox2pc binary-analyze <pe-file> [--json <out>]\n"
                  "       xbox2pc binary-info <pe-file> [--json <out>]\n"
                  "       xbox2pc binary-sections <pe-file> [--json <out>]\n"
@@ -2801,6 +2803,9 @@ int main(int argc, char** argv) {
     }
     const int m9_binary_result = xbox2pc::cli::run_m9_binary_cli(argc, argv);
     if (m9_binary_result >= 0) return m9_binary_result;
+    if (argc >= 2 && std::strcmp(argv[1], "census") == 0) {
+        return xbox2pc::census::cli(argc, argv);
+    }
     if (argc >= 2 && std::strcmp(argv[1], "run") == 0) {
         static const char* const kRunUsage =
             "usage: xbox2pc run <file> [--backend deterministic|native]\n"

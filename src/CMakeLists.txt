@@ -37,6 +37,19 @@ add_library(xbox2pc_json STATIC json_writer.cpp)
 target_include_directories(xbox2pc_json PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_compile_features(xbox2pc_json PUBLIC cxx_std_20)
 
+# ── M12 P0: JSON reader (for run reports and logs) ──
+add_library(xbox2pc_rt_json_reader STATIC json_reader.cpp)
+target_include_directories(xbox2pc_rt_json_reader PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_json_reader PUBLIC xbox2pc_json)
+target_compile_features(xbox2pc_rt_json_reader PUBLIC cxx_std_20)
+
+# ── M12 P0.3: census (import coverage of a directory of PEs, ranked) ──
+add_library(xbox2pc_rt_census STATIC census.cpp)
+target_include_directories(xbox2pc_rt_census PUBLIC ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(xbox2pc_rt_census PUBLIC
+    xbox2pc_rt_json_reader xbox2pc_pe_parser xbox2pc_rt_api)
+target_compile_features(xbox2pc_rt_census PUBLIC cxx_std_20)
+
 # ── api_registry (M2: evidence-based API classification DB) ──
 add_library(xbox2pc_api_registry STATIC api_registry.cpp)
 target_include_directories(xbox2pc_api_registry PUBLIC ${PROJECT_SOURCE_DIR}/include)
