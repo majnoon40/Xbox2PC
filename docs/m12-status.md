@@ -54,7 +54,7 @@ registry already documented before M12.
 
 ## Verified on GitHub
 
-Workflow runs exist for every pushed commit of the branch. Read back:
+Workflow runs exist for every push head of the branch. Read back:
 
 | Commit | Jobs | Result |
 | --- | --- | --- |
@@ -64,7 +64,7 @@ Workflow runs exist for every pushed commit of the branch. Read back:
 | `a45758b` (rung fixtures) | 24 | all green, including the new `M12 rung fixtures B-G` job |
 | `852a4db` (census), `2b20414` (telemetry), `f7eb166` (clang-clean), `0f52eb9`, `b29d153` | 24 | all green |
 | `c9a9b6e` (final docs update) | 24 | all green |
-| `4299e0d` (VirtualQuery fix), then this page's update | 24 | read back after the push |
+| `4299e0d` → `ba86689` (VirtualQuery fix + honest numbers; pushed together, so the workflow ran on the head `ba86689` only) | 24 (push run) + 24 (pull-request run) | all green; the tightened `m11-pe-fixtures` step ran and printed `returned exit 42 \| 13 API calls` |
 
 ## Verified locally
 
@@ -142,7 +142,8 @@ Pushed, in pull request #18:
 | `b29d153` | M12.P0: correct the commit count on this page |
 | `c9a9b6e` | M12.P0: record the final CI outcome |
 | `4299e0d` | M12.P0: VirtualQuery through the native run path (pointer args, TLS chain, out buffers across the ring) |
-| (this commit) | M12.P0: honest numbers for the final tree in the README table; real hashes in this page |
+| `ba86689` | M12.P0: honest numbers for the final tree in the README table; real hashes in this page |
+| (this commit) | M12.P0: the CI table records how the last two commits were actually verified |
 
-Nineteen commits (including this one); the plan asks for under forty per
+Twenty commits (including this one); the plan asks for under forty per
 pull request.
