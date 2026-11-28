@@ -1127,6 +1127,26 @@ TEST(GdkServiceTest, DocumentedIdFallbacks) {
     EXPECT_EQ(aid.value(), std::string(40, '0'));
 }
 
+namespace {
+// Waits (bounded) until `flag` is set. Used as a handshake by the blocked-
+// dispatch tests: TaskQueueService::dispatch evaluates a dispatch's
+// cancellation predicate only once that dispatch has resolved its handle and
+// is inside its wait loop, so a predicate that sets `flag` proves the
+// dispatch is parked. A fixed sleep cannot prove that — a waiter whose
+// thread started late would resolve its handle AFTER the test had already
+// closed it, and legitimately fail.
+bool wait_for_handshake_flag(
+    const std::atomic<bool>& flag,
+    std::chrono::steady_clock::duration budget = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (!flag.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+}  // namespace
+
 TEST(GdkServiceTest, TaskQueueLifecycle) {
     ApiWorld w;
     auto* process = w.new_process("task-queue-lifecycle.exe");
@@ -1150,17 +1170,20 @@ TEST(GdkServiceTest, TaskQueueLifecycle) {
     EXPECT_FALSE(timed_dispatch.value());
     EXPECT_GE(dispatch_elapsed, std::chrono::milliseconds(10));
     // An infinite manual dispatch must wake when the queue is terminated.
+    std::atomic<bool> parked{false};
     std::atomic<bool> dispatch_done{false};
     std::atomic<bool> dispatch_ok{false};
     std::atomic<bool> dispatch_value{true};
     std::thread blocked_dispatch([&] {
         const auto result = w.tq->dispatch(
-            owner_pid, id, XTaskQueuePort::Completion, 0xFFFFFFFFu);
+            owner_pid, id, XTaskQueuePort::Completion, 0xFFFFFFFFu, {},
+            [&] { parked.store(true, std::memory_order_release); return false; });
         dispatch_ok.store(result.ok(), std::memory_order_release);
         dispatch_value.store(result.ok() && result.value(), std::memory_order_release);
         dispatch_done.store(true, std::memory_order_release);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Handshake: the dispatch is parked in the service's wait loop.
+    EXPECT_TRUE(wait_for_handshake_flag(parked));
     EXPECT_FALSE(dispatch_done.load(std::memory_order_acquire));
     // Terminate: pending dispatch wakes, returns false; no callbacks exist.
     EXPECT_TRUE(w.tq->terminate_queue(owner_pid, id, true).ok());
@@ -1462,15 +1485,19 @@ TEST(GdkServiceTest, TaskQueueDuplicateHandlesShareLifetime) {
     EXPECT_NE(duplicated.value(), original);
     EXPECT_EQ(w.tq->live_queues(), 1u); // one queue object, two handles
 
+    std::atomic<bool> parked{false};
     std::atomic<bool> dispatch_done{false};
     std::atomic<bool> dispatch_ok{false};
     std::thread blocked_dispatch([&] {
         const auto result = w.tq->dispatch(
-            owner_pid, original, XTaskQueuePort::Work, 0xFFFFFFFFu);
+            owner_pid, original, XTaskQueuePort::Work, 0xFFFFFFFFu, {},
+            [&] { parked.store(true, std::memory_order_release); return false; });
         dispatch_ok.store(result.ok(), std::memory_order_release);
         dispatch_done.store(true, std::memory_order_release);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Handshake BEFORE closing the handle the dispatch waits on: a dispatch
+    // that had not resolved that handle yet would legitimately fail.
+    EXPECT_TRUE(wait_for_handshake_flag(parked));
     EXPECT_FALSE(dispatch_done.load(std::memory_order_acquire));
 
     // Closing the original handle cannot cancel a wait whose duplicated
@@ -1546,15 +1573,21 @@ TEST(GdkServiceTest, ProcessExitReleasesDuplicatedTaskQueueAndWakesDispatch) {
     ASSERT_TRUE(duplicate.ok());
     EXPECT_EQ(w.tq->live_queues(), 1u);
 
+    std::atomic<bool> parked{false};
     std::atomic<bool> done{false};
     std::atomic<bool> succeeded{false};
     std::thread waiter([&] {
         const auto result = w.tq->dispatch(
-            pid, duplicate.value(), XTaskQueuePort::Work, 0xFFFFFFFFu);
+            pid, duplicate.value(), XTaskQueuePort::Work, 0xFFFFFFFFu, {},
+            [&] { parked.store(true, std::memory_order_release); return false; });
         succeeded.store(result.ok(), std::memory_order_release);
         done.store(true, std::memory_order_release);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Handshake: process exit destroys the queue object, so the dispatch must
+    // have resolved its handle and parked BEFORE the process is terminated.
+    // This was the ASan flake: a fixed 10 ms sleep let a slow thread start
+    // lose that race (observed once in the M12 baseline).
+    EXPECT_TRUE(wait_for_handshake_flag(parked));
     EXPECT_FALSE(done.load(std::memory_order_acquire));
 
     const auto terminated = w.pm.terminate_process(w.last_handle, 0);
@@ -1623,15 +1656,19 @@ TEST(GdkServiceTest, TaskQueueFinalCloseWakesDispatchAcrossAliases) {
     auto duplicate = w.tq->duplicate_queue(owner_pid, created.value());
     ASSERT_TRUE(duplicate.ok());
 
+    std::atomic<bool> parked{false};
     std::atomic<bool> done{false};
     std::atomic<bool> ok{false};
     std::thread waiter([&] {
         const auto result = w.tq->dispatch(
-            owner_pid, duplicate.value(), XTaskQueuePort::Completion, 0xFFFFFFFFu);
+            owner_pid, duplicate.value(), XTaskQueuePort::Completion, 0xFFFFFFFFu, {},
+            [&] { parked.store(true, std::memory_order_release); return false; });
         ok.store(result.ok(), std::memory_order_release);
         done.store(true, std::memory_order_release);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Handshake: the final close destroys the queue object, so the dispatch
+    // must have resolved its handle and parked before either close runs.
+    EXPECT_TRUE(wait_for_handshake_flag(parked));
     EXPECT_FALSE(done.load(std::memory_order_acquire));
 
     const auto close_original = w.tq->close_queue(owner_pid, created.value());

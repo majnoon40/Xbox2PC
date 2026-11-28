@@ -2900,6 +2900,149 @@ TEST(ExecutionControlTest, ManagedThreadConstructorBindsIdentityAndGate) {
     EXPECT_TRUE(context.destroy().ok());
 }
 
+// ── M12 P0: imports bound by --unimplemented=trap|zero ─────────────────────
+//
+// An import without an implementation can be bound (ApiResolver with a
+// non-strict UnimplementedPolicy) so the image loads. The engine then sees
+// an ApiBindingInfo with `unimplemented` set: trap must end the run with a
+// typed fault naming the import; zero must answer 0 and continue at the
+// caller's return address, like any marshalled import.
+
+TEST(EngineTest, UnimplementedImportTrapNamesTheImport) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("unimplemented-trap.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "unimplemented-trap.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok()); // guest RET
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    // A Win32-range address no descriptor and no implementation owns.
+    constexpr std::uint64_t binding = 0x51010021ull;
+    constexpr std::uint64_t tid = 0x93;
+    const std::uint64_t rsp = stack_va + 0x100;
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    ApiBindingInfo stub;
+    stub.value = binding;
+    stub.library = "user32";
+    stub.export_name = "CreateWindowExW";
+    stub.unimplemented = true;   // trap
+    request.api_bindings.push_back(stub);
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    EXPECT_EQ(result.outcome, Outcome::Faulted);
+    EXPECT_EQ(result.api_calls, 1u);
+    EXPECT_EQ(result.unimplemented_calls, 1u);
+    EXPECT_EQ(result.first_unimplemented, std::string("user32!CreateWindowExW"));
+    ASSERT_TRUE(result.exception.has_value());
+    EXPECT_EQ(result.exception->fault, GuestFault::UnimplementedApi);
+    EXPECT_EQ(result.exception->recoverability, Recoverability::Fatal);
+    EXPECT_NE(result.exception->detail.find("unimplemented import called: user32!CreateWindowExW"),
+              std::string::npos);
+    (void)w.pm.terminate_process(process_handle, 0);
+}
+
+TEST(EngineTest, UnimplementedImportZeroReturnsZeroAndContinues) {
+    ExecWorld w;
+    auto [process_handle, process] = w.new_process("unimplemented-zero.exe");
+    const auto pid_result = w.pm.resolve_pid(process_handle);
+    ASSERT_TRUE(pid_result.ok());
+    const auto pid = pid_result.value();
+
+    ModuleDescriptor module;
+    module.module_name = "unimplemented-zero.exe";
+    module.is_valid_pe = true;
+    ASSERT_TRUE(w.pm.initialize_process(process_handle, module, RuntimeConfig{}).ok());
+    ASSERT_TRUE(w.pm.start_process(process_handle).ok());
+
+    guest::GuestMemory mem(process->address_space());
+    std::uint64_t code_va = 0;
+    std::uint64_t stack_va = 0;
+    scratch_region(*process, 0x1000, &code_va);
+    scratch_region(*process, 0x1000, &stack_va);
+    ASSERT_TRUE(mem.write_u8(code_va + 0x100, 0xC3).ok()); // guest RET
+    ASSERT_TRUE(process->address_space().protect_region(
+        code_va, MemProtect::ReadExecute).ok());
+
+    constexpr std::uint64_t binding = 0x51010022ull;
+    constexpr std::uint64_t tid = 0x94;
+    const std::uint64_t rsp = stack_va + 0x100;
+    // The "caller": a return address, then the entry's own return to the
+    // completion sentinel (the contract of the dispatch test above).
+    ASSERT_TRUE(mem.write_u64(rsp, code_va + 0x100).ok());
+    ASSERT_TRUE(mem.write_u64(rsp + 8, kCompletionSentinel).ok());
+
+    auto config = ExecutionConfig::default_validated();
+    ASSERT_TRUE(config.ok());
+    DeterministicBackend backend(w.reg, config.value());
+    ASSERT_TRUE(backend.bind_execution_context(
+        pid, tid, process->address_space()).ok());
+
+    ExecutionRequest request;
+    request.entry_va = binding;
+    request.stack_top_va = stack_va + 0x1000;
+    request.stack_size = 0x1000;
+    request.completion_va = kCompletionSentinel;
+    request.api_binding_values.push_back(binding);
+    ApiBindingInfo stub;
+    stub.value = binding;
+    stub.library = "kernel32";
+    stub.export_name = "Sleep";
+    stub.unimplemented = true;
+    stub.unimplemented_returns_zero = true;
+    request.api_bindings.push_back(stub);
+
+    cpu::CpuState cpu_state;
+    cpu_state.reset();
+    cpu_state.set_reg(cpu::Gpr::Sp, rsp);
+    cpu_state.set_reg(cpu::Gpr::Rax, 0x1234u);   // the stub must replace this
+    cpu_state.rip = binding;
+    std::atomic<bool> interrupted{false};
+    const auto result = backend.run(request, cpu_state, interrupted);
+
+    EXPECT_EQ(result.outcome, Outcome::Returned);
+    EXPECT_EQ(result.api_calls, 1u);
+    EXPECT_EQ(result.unimplemented_calls, 1u);
+    EXPECT_EQ(result.first_unimplemented, std::string("kernel32!Sleep"));
+    EXPECT_EQ(result.return_value, 0u);
+    EXPECT_EQ(cpu_state.reg(cpu::Gpr::Rax), 0u);
+    EXPECT_EQ(cpu_state.rip, code_va + 0x100);  // resumed in the caller
+    EXPECT_FALSE(result.exception.has_value());
+    (void)w.pm.terminate_process(process_handle, 0);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

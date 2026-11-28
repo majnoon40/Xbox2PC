@@ -2,12 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/m11-teb-stack-bounds, feature/m11-native-execution-phase5]
+    branches: [main, feature/m12, feature/m11-teb-stack-bounds, feature/m11-native-execution-phase5]
   pull_request:
-    branches: [main, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls, feature/m11-teb-stack-bounds]
+    branches: [main, feature/m12, feature/m11-native-execution-slice, feature/m11-test-binaries, feature/m11-teb-peb-tls, feature/m11-teb-stack-bounds]
   workflow_dispatch:
 
 jobs:
+  asset-policy:
+    name: Asset policy (no binaries, archives or oversized files)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Self-test the asset-policy checker
+        run: python3 scripts/check_assets_test.py
+
+      # The same check as scripts/hooks/pre-commit, over the whole tree, so
+      # the policy holds where the hook is not installed.  On a pull request
+      # the checkout is the merge result, so the merged tree is what is
+      # checked.  See docs/input-policy.md.
+      - name: Reject binaries, archives and oversized files
+        run: python3 scripts/check_assets.py --all --annotations
+
   build-and-test:
     name: ${{ matrix.build_type }} · ${{ matrix.compiler }} · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -49,9 +66,16 @@ jobs:
         if: matrix.build_type == 'Release' && matrix.compiler == 'gcc'
         run: ./build/tests/m9_bench
 
+  # Rule 5 of the M12 plan: the sanitizers stay green with every feature flag
+  # on and off.  Each flag becomes a matrix axis here as it is introduced;
+  # XBOX2PC_NATIVE_EXECUTION is the only one today.
   sanitize:
-    name: ASan + UBSan
+    name: ASan + UBSan (native ${{ matrix.native }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        native: ["OFF", "ON"]
     env:
       CC: gcc
       CXX: g++
@@ -65,6 +89,7 @@ jobs:
       - name: Configure (AddressSanitizer + UndefinedBehaviorSanitizer)
         run: cmake -S . -B build-asan -G Ninja
           -DCMAKE_BUILD_TYPE=Debug
+          -DXBOX2PC_NATIVE_EXECUTION=${{ matrix.native }}
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
@@ -78,8 +103,12 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
   thread-sanitize:
-    name: TSan
+    name: TSan (native ${{ matrix.native }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        native: ["OFF", "ON"]
     env:
       CC: gcc
       CXX: g++
@@ -93,6 +122,7 @@ jobs:
       - name: Configure (ThreadSanitizer)
         run: cmake -S . -B build-tsan -G Ninja
           -DCMAKE_BUILD_TYPE=Debug
+          -DXBOX2PC_NATIVE_EXECUTION=${{ matrix.native }}
           -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
 
@@ -148,6 +178,35 @@ jobs:
 
       - name: Build both synthetic Windows PE fixtures
         run: scripts/build-m11-samples.sh
+
+      # M12 P0: execute a compiler-built PE, not only inspect it. The
+      # freestanding sample now runs to completion through all 13 of its
+      # imports on the native backend: VirtualAlloc, VirtualQuery (with its
+      # 48-byte out structure on the guest stack), VirtualProtect,
+      # VirtualFree, the event/sync set, last-error, TLS, and ExitProcess —
+      # it must return 42 (docs/m12-what-broke.md, entries 10, 12 and 15).
+      - name: Run the freestanding sample through xbox2pc run (native backend)
+        run: |
+          cmake -S . -B build-native -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBOX2PC_NATIVE_EXECUTION=ON
+          cmake --build build-native --target xbox2pc --parallel 2
+          set +e
+          build-native/tools/xbox2pc run build/m11-samples/m11_freestanding.exe \
+            --backend native --json build/m11-samples/run-native.json
+          echo "xbox2pc run exit status: $?"
+          set -e
+          python3 - <<'PY'
+          import json
+          r = json.load(open("build/m11-samples/run-native.json"))
+          assert r["ran"] is True, r
+          assert r["imports"]["total"] == 13, r["imports"]
+          assert r["imports"]["resolved"] == 13, r["imports"]
+          assert r["unimplemented"] == "strict", r
+          assert r["outcome"] == "returned", r
+          assert r["exit_code"] == 42, r
+          assert r["api_calls"] == 13, r
+          print("m11_freestanding.exe on the native backend:", r["outcome"],
+                "exit", r["exit_code"], "|", r["api_calls"], "API calls")
+          PY
 
       - name: Verify imports, TLS directory, and C++ unwind metadata
         run: |
@@ -240,4 +299,41 @@ jobs:
             build/m11-samples/m11_cpp_exceptions.exe
             build/m11-samples/SHA256SUMS.txt
             samples/m11/golden/
+          if-no-files-found: error
+
+  # M12 P0.2: the rung ladder (plan section 3.2).  Every rung is built from
+  # project-authored source with clang + lld-link, executed through
+  # `xbox2pc run --backend native --unimplemented trap`, and compared with
+  # its committed golden.  A rung counts as passing only when it returns its
+  # contract exit code; one that stops on an unimplemented import is
+  # reported as blocked, never as passing (samples/rungs/README.md).
+  rung-fixtures:
+    name: M12 rung fixtures B-G (built from source, executed, goldens)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cross toolchains and inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld ninja-build
+
+      - name: Build the CLI with the native backend
+        run: |
+          cmake -S . -B build-native -G Ninja -DCMAKE_BUILD_TYPE=Release -DXBOX2PC_NATIVE_EXECUTION=ON
+          cmake --build build-native --target xbox2pc --parallel 2
+
+      - name: Build the rung fixtures from source
+        run: scripts/build-rung-fixtures.sh
+
+      - name: Run the ladder and compare with the committed goldens
+        run: python3 scripts/rung_check.py --cli build-native/tools/xbox2pc --dir build/rungs
+
+      - name: Upload run reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: m12-rung-run-reports
+          path: build/rungs/*.run.json
           if-no-files-found: error

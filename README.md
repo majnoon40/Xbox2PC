@@ -24,6 +24,32 @@ The implementation is deliberately explicit about unsupported behavior. For exam
 
 For the detailed design and limitations, start with [the architecture overview](docs/architecture.md), [the PE loader notes](docs/pe-loader.md), [the API compatibility notes](docs/api-compat.md), and [the execution architecture](docs/execution-architecture.md).
 
+## M12 status (honest table)
+
+Milestone 12 adds a bring-up rig around the runtime: a policy on what may
+be a test input, a ladder of programs built from source and executed in CI,
+and telemetry. Every row below is backed by an automated test that runs on
+GitHub for the branch. "Blocked" means the program loads, runs, and stops
+on a named import the runtime does not implement; it is never reported as
+passing. Details and reproduction commands are in [docs/m12-status.md](docs/m12-status.md)
+and [docs/m12-what-broke.md](docs/m12-what-broke.md).
+
+| Stage | Status | Evidence |
+| --- | --- | --- |
+| Input policy and asset-policy hook (checker, pre-commit, CI job) | done | asset-policy job green; a crafted PE offered to `git commit` is refused |
+| `xbox2pc run` report | done | JSON on every outcome: outcome, stage, every import's status, the API trace, the first unimplemented import reached |
+| `--unimplemented=strict\|trap\|zero` | done | trap faults naming `dll!name`, zero returns 0 and continues; both backends |
+| Compiler-built M11 sample through `xbox2pc run` | done | exits 42 on the native backend: all 13 imports resolved and called, `VirtualQuery` returns 48 with its structure on the guest stack (entries 12, 15, 16); asserted by the `m11-pe-fixtures` CI job |
+| Deterministic backend following `call [iat]` from code | blocked | import calls from compiler-built code need the native backend (entry 8) |
+| Rung ladder B–G and `cxxthrow` | fixtures done; all six blocked | built from source in CI, executed, compared with goldens: B at `kernel32!GetModuleHandleW`, C at `CreateFileW`, D and G at `d3d12!D3D12CreateDevice`, E at `CreateThread`, F on its own stubs until P1 |
+| `xbox2pc census` and `xbox2pc report` | done | `census_test`, `telemetry_test` |
+| Crash telemetry | done, bounded | `crashes.log`, `XBOX2PC_WATCH`, `XBOX2PC_CRASH_SAVE`, `XBOX2PC_STACKS`; sampled at API call boundaries, no frame walk yet |
+| Determinism | done for run reports | 100 consecutive native trap runs give byte-identical reports; rung goldens |
+| Sanitizers with the native flag OFF and ON | green on GitHub | ASan+UBSan and TSan, both positions |
+| Warning-clean | done | 0 warnings and 33 of 33 tests with gcc 14.2.0 (six configurations) and with clang 18.1.8 locally |
+| Guest memory: ADR-0009 (one memfd, MAP_SHARED, child VA identity) | done | the native child maps the space's memfd at the guest VAs (`MAP_FIXED_NOREPLACE`), so guest VA == child host VA; the load-bias translation, TLS adapt/restore and out-buffer wire payload are deleted; measured under plain, ASan and TSan |
+| Graphics, shaders, worker and threads (P1.2+, P3, P4, P5) | not started | no window, no triangle, no GPU run |
+
 ## Requirements
 
 - Linux development environment (the current platform backend is Linux-specific)
@@ -81,6 +107,15 @@ build/tools/xbox2pc validate-pe path/to/program.exe
 
 # Produce an API compatibility report
 build/tools/xbox2pc compat-report path/to/program.exe
+
+# Run a PE32+ image and write a report on every outcome (see docs/m12-status.md)
+build/tools/xbox2pc run path/to/program.exe --backend native --unimplemented trap --json run.json
+
+# Import coverage of a directory of PEs, ranked by first reach from run reports
+build/tools/xbox2pc census path/to/dir --missing --trace run.json --triage 10
+
+# Aggregate crash records written under XBOX2PC_CRASH_SAVE
+build/tools/xbox2pc report crashes/crashes.log
 
 # Show the tool version
 build/tools/xbox2pc --version

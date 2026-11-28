@@ -10,7 +10,9 @@ target_link_libraries(xbox2pc PRIVATE
     xbox2pc_rt_exceptions
     xbox2pc_pe_builder
     xbox2pc_rt_m9_cli
-    xbox2pc_rt_run_cli)
+    xbox2pc_rt_run_cli
+    xbox2pc_rt_census
+    xbox2pc_rt_report)
 target_compile_features(xbox2pc PRIVATE cxx_std_20)
 
 

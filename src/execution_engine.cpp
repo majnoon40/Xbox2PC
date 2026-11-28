@@ -8,6 +8,7 @@
 //   4. plan_for_descriptor (documented-signature-driven plans)
 
 #include "xbox2pc/execution_engine.hpp"
+#include "xbox2pc/telemetry.hpp"
 #include "xbox2pc/guest_environment.hpp"
 #include "xbox2pc/x86_interpreter.hpp"
 #include "xbox2pc/pe_parser.hpp"
@@ -109,22 +110,6 @@ namespace {
 inline std::uint64_t rg(const CpuState& c, std::uint8_t r) {
     return c.gprs[r & 0xF];
 }
-inline void set_rg(CpuState& c, std::uint8_t r, std::uint64_t v) {
-    c.gprs[r & 0xF] = v;
-}
-
-// ModRM decode for the subset: only [reg + disp8] and reg forms.
-struct ModRM {
-    std::uint8_t mod;   // 0: [reg], 1: reg, 2: [reg+disp8] — subset uses
-                        // mod=2 (disp8) for memory and mod=3 for reg.
-    std::uint8_t reg;  // reg field
-    std::uint8_t rm;   // rm field
-};
-inline ModRM decode_modrm(std::uint8_t b) {
-    return ModRM{static_cast<std::uint8_t>((b >> 6) & 3),
-                 static_cast<std::uint8_t>((b >> 3) & 7),
-                 static_cast<std::uint8_t>(b & 7)};
-}
 
 bool fault(GuestFault f, const CpuState& cpu, AccessType a,
            std::uint64_t addr, std::uint64_t pid, std::uint64_t tid,
@@ -181,6 +166,7 @@ ExecutionResult DeterministicBackend::run(
                                           ? req.stack_top_va - req.stack_size
                                           : 4096;
     GuestMemory& mem = *mem_;
+    telemetry::WatchLog watch(req.watch_rvas);
     std::uint64_t budget = cfg_.max_instructions;
     std::uint64_t executed = 0;
 
@@ -226,6 +212,51 @@ ExecutionResult DeterministicBackend::run(
                       res.exception);
                 res.outcome = Outcome::Faulted;
                 break;
+            }
+
+            // M12 P0.4 telemetry: the API trace and the watched u32s, at
+            // every imported-API call boundary.
+            telemetry::record_api_call(res, binding_identity(*binding));
+            watch.sample(mem, req.unwind.image_base, res.api_trace.size());
+
+            // M12 P0: an import bound by --unimplemented=trap|zero has an
+            // exact identity but no implementation. Trap ends the run with a
+            // typed fault that names it; Zero answers 0 and the guest goes on
+            // at its return address under the same contract as a marshalled
+            // API call (RSP popped; a return straight to the sentinel
+            // completes the entry call).
+            if (binding->unimplemented) {
+                ++res.api_calls;
+                ++res.unimplemented_calls;
+                if (res.first_unimplemented.empty())
+                    res.first_unimplemented = binding_identity(*binding);
+                if (!binding->unimplemented_returns_zero) {
+                    fault(GuestFault::UnimplementedApi, io_cpu, AccessType::None, rip,
+                          pid_, tid_, Recoverability::Fatal,
+                          "unimplemented import called: " + res.first_unimplemented,
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                const auto stub_rsp = rg(io_cpu, static_cast<std::uint8_t>(Gpr::Sp));
+                auto stub_return = mem.read_u64(stub_rsp);
+                if (!stub_return.ok()) {
+                    fault(GuestFault::InvalidAccess, io_cpu, AccessType::Read, stub_rsp,
+                          pid_, tid_, Recoverability::Fatal,
+                          "unimplemented import call return address is unreadable",
+                          res.exception);
+                    res.outcome = Outcome::Faulted;
+                    break;
+                }
+                io_cpu.set_reg(Gpr::Rax, 0);
+                io_cpu.set_reg(Gpr::Sp, stub_rsp + 8);
+                io_cpu.rip = stub_return.value();
+                if (req.completion_va != 0 && io_cpu.rip == req.completion_va) {
+                    res.outcome = Outcome::Returned;
+                    res.return_value = 0;
+                    break;
+                }
+                continue;
             }
 
             const auto* descriptor = binding->by_ordinal
@@ -994,6 +1025,12 @@ Result<MarshalPlan> plan_for_descriptor(const api::ApiDescriptor& d) {
     const auto ok = abi::validate_call(plan.call);
     if (!ok.ok()) return Ret(ok.errc(), ok.context());
     return Ret(plan);
+}
+
+std::string binding_identity(const ApiBindingInfo& binding) {
+    return binding.library + "!" +
+           (binding.by_ordinal ? "#" + std::to_string(binding.ordinal)
+                               : binding.export_name);
 }
 
 }  // namespace xbox2pc::rt::exec

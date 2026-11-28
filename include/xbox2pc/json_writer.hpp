@@ -72,6 +72,9 @@ public:
     std::size_t size() const;                  // array/object element count
     const Json& at(std::size_t i) const;       // array element
     const Json& get(const std::string& key) const;  // object member; throws if absent
+    // Object member or nullptr (M12 P0: readers of run reports need a
+    // non-throwing lookup).
+    const Json* find(const std::string& key) const noexcept;
     const std::string& as_string() const;
     std::int64_t as_int() const;
 

@@ -148,6 +148,14 @@ struct ImportBinding {
     ImportStatus status = ImportStatus::Unresolved;
     std::uint64_t value = 0;          // the value written into the IAT
     std::string note;                 // resolver-provided detail
+    // M12 P0: this slot was bound by --unimplemented=trap|zero, not by a
+    // registered implementation. The value is a real dispatch binding with
+    // an exact identity, so the image loads and an engine asked to call it
+    // can name the import.
+    bool unimplemented = false;
+    // true under --unimplemented=zero (a call returns 0 and the guest goes
+    // on); false under trap (a call raises GuestFault::UnimplementedApi).
+    bool unimplemented_returns_zero = false;
     // IAT slot location (filled by resolve_imports when the slot is
     // file-backed; 0 when unknown — write_iat_slots rejects those).
     std::uint64_t iat_va = 0;

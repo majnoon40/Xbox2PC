@@ -87,7 +87,8 @@ ModuleDescriptor ModuleDescriptor::from_image(const pe::PeImage& img,
     d.machine_name = img.machine_name();
     d.entry_point_rva = img.opt.address_of_entry_point;
     d.image_base = img.opt.image_base;
-    d.size_of_image = img.opt.size_of_image;
+    // SizeOfImage is a 32-bit PE field; the parser stores it widened.
+    d.size_of_image = static_cast<std::uint32_t>(img.opt.size_of_image);
     d.subsystem = img.opt.subsystem;
     for (const auto& s : img.sections) d.section_names.push_back(s.name);
     for (const auto& dep : rep.dependencies) {

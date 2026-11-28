@@ -286,6 +286,18 @@ ApiRegistry& default_registry();
 
 // ── the import resolver (M6 integration) ──────────────────────────────────
 
+// What the run path does with an import that has no registered
+// implementation (M12 P0, `xbox2pc run --unimplemented=...`).
+//   Strict: the loader's required-import rule stands; the image does not load.
+//   Trap:   the import gets a real dispatch binding whose identity has no
+//           implementation, so the image loads; a call raises
+//           GuestFault::UnimplementedApi naming the import.
+//   Zero:   as Trap, but a call returns 0 and the guest continues.
+enum class UnimplementedPolicy : std::uint8_t { Strict = 0, Trap = 1, Zero = 2 };
+const char* unimplemented_policy_to_name(UnimplementedPolicy p);
+// Parses "strict" | "trap" | "zero" exactly. False when the name is unknown.
+bool unimplemented_policy_from_name(const std::string& n, UnimplementedPolicy& out);
+
 // Binds imports to REGISTERED implementations. The binding value is a
 // synthetic guest dispatch address in the reserved GDK/Win32 ranges; it is
 // never a host pointer. The loader preserves the exact ImportLookup and
@@ -293,7 +305,9 @@ ApiRegistry& default_registry();
 // ExecutionRequest so the engine can resolve the descriptor safely.
 class ApiResolver : public loader::IImportResolver {
 public:
-    explicit ApiResolver(ApiRegistry& reg) : reg_(reg) {}
+    explicit ApiResolver(ApiRegistry& reg,
+                         UnimplementedPolicy unimplemented = UnimplementedPolicy::Strict)
+        : reg_(reg), unimplemented_(unimplemented) {}
 
     loader::ImportBinding resolve(const loader::ImportLookup& lookup) override;
     bool resolve_module(const std::string& dll) override;
@@ -303,7 +317,10 @@ public:
 
 private:
     ApiRegistry& reg_;
+    UnimplementedPolicy unimplemented_;
     std::atomic<std::uint64_t> bindings_issued_{0};
+    // True when at least one verified descriptor exists for the module.
+    bool module_has_descriptors(const std::string& dll) const;
 };
 
 // ── delay-load imports ────────────────────────────────────────────────────

@@ -1,0 +1,19 @@
+{
+  "contract_exit": 37,
+  "exit_code": 0,
+  "fault": "unimplemented-api",
+  "first_unimplemented": "kernel32.dll!CreateFileW",
+  "imports": {
+    "invalid": 0,
+    "resolved": 5,
+    "total": 8,
+    "unimplemented": 3,
+    "unresolved": 0,
+    "unsupported": 0
+  },
+  "outcome": "faulted",
+  "source": "rung_c_assetload.exe",
+  "stage": "teardown",
+  "status": "blocked",
+  "unimplemented_calls": 1
+}

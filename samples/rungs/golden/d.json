@@ -1,0 +1,19 @@
+{
+  "contract_exit": null,
+  "exit_code": 0,
+  "fault": "unimplemented-api",
+  "first_unimplemented": "d3d12.dll!D3D12CreateDevice",
+  "imports": {
+    "invalid": 0,
+    "resolved": 1,
+    "total": 2,
+    "unimplemented": 1,
+    "unresolved": 0,
+    "unsupported": 0
+  },
+  "outcome": "faulted",
+  "source": "rung_d_gpucompute.exe",
+  "stage": "teardown",
+  "status": "blocked",
+  "unimplemented_calls": 1
+}

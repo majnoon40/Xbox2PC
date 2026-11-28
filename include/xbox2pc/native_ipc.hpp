@@ -11,13 +11,21 @@
 // Layout: one page, 64 slots x 256B request and reply banks.
 // Wire format (fixed offsets in each 256B slot):
 //   request: [u32 call_class][u32 api_index][u64 args[4]][u64 aux0..3]
-//   reply:   [u32 status][u32 exit_code][u64 rax][u64 aux0..3][u192 pad]
+//   reply:   [u32 status][u32 exit_code][u64 rax][u64 aux0..3]
 // call_class selects the operation:
 //   0 = API_CALL (api_index indexes the request's api_bindings vector,
 //                 args are the four Microsoft-x64 register slots)
 //   1 = EXIT_PROCESS (exit_code in args[0])
 // status: 0 = ok (rax valid), 1 = dispatched-but-rejected (error text is
-//   parent-side only), 2 = unknown api_index, 3 = fatal protocol error.
+//   parent-side only), 2 = unknown api_index, 3 = fatal protocol error,
+//   4 = SEH transfer (resume at aux[1] with RSP=aux[2]).
+//
+// Out buffers (ADR-0009): out bytes never ride this wire. The guest
+// address space is one memfd the parent maps MAP_SHARED and the child
+// identity-maps at the guest VAs, so the bridge's out writes are visible
+// to the child directly. The wire reply carries only the register result
+// and control words; arguments and aux words are guest VAs on both sides
+// (guest VA == child host VA).
 
 #include <cstdint>
 
@@ -58,6 +66,11 @@ struct ReplySlot {
     std::uint64_t rax;
     std::uint64_t aux[4];
 };
+// ADR-0009: the reply slot no longer carries an out payload (the bytes
+// travel through the shared address space itself). The wire struct is
+// smaller than the 256B slot stride; the stride stays for the wire's
+// growth headroom.
+static_assert(sizeof(ReplySlot) <= kSlotBytes, "reply slot fits its wire slot");
 
 // Shared page. Volatile sequence counters; all publishes use release
 // stores, all observes use acquire loads (see the ADR protocol sketch).

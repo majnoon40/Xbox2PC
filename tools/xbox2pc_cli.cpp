@@ -29,6 +29,8 @@
 #include "xbox2pc/package_vfs.hpp"
 #include "xbox2pc/packages.hpp"
 #include "xbox2pc/process_management.hpp"
+#include "xbox2pc/census.hpp"
+#include "xbox2pc/report_cli.hpp"
 #include "xbox2pc/vfs_backends.hpp"
 #include "xbox2pc/vfs_process.hpp"
 #include "xbox2pc/runtime_core.hpp"
@@ -92,6 +94,7 @@ void usage() {
                  "       xbox2pc relocations <pe-file> [--json <out>]\n"
                  "       xbox2pc imports <pe-file> [--json <out>]\n"
                  "       xbox2pc load-image <pe-file> [--json <out>]\n"
+                 "       xbox2pc run <pe-file> [--backend deterministic|native] [--unimplemented strict|trap|zero] [--json <out>]\n"
                  "       xbox2pc unload-image <pe-file>\n"
                  "       xbox2pc image-info <pe-file> [--json <out>]\n"
                  "       xbox2pc cpu-state [--json <out>]\n"
@@ -104,6 +107,8 @@ void usage() {
                  "       xbox2pc api-status [--json <out>]\n"
                  "       xbox2pc dispatch-test <library!name> [--json <out>]\n"
                  "       xbox2pc compat-report <pe-file> [--json <out>]\n"
+                 "       xbox2pc census <dir-or-file>... [--missing] [--trace <run.json>]... [--triage N] [--json <out>]\n"
+                 "       xbox2pc report <crashes.log> [--json <out>]\n"
                  "       xbox2pc binary-analyze <pe-file> [--json <out>]\n"
                  "       xbox2pc binary-info <pe-file> [--json <out>]\n"
                  "       xbox2pc binary-sections <pe-file> [--json <out>]\n"
@@ -1074,7 +1079,7 @@ struct DemoVfs {
         using xbox2pc::rt::PackageVfsBackend;
         // Fixture entries (SYNTHETIC — not Xbox content).
         std::vector<XpkBuildEntry> entries = {
-            {"content", true},
+            {"content", true, {}},
             {"content/README.txt", false, "xbox2pc synthetic package fixture\n"},
             {"content/asset.png",
              false,
@@ -1313,26 +1318,10 @@ int cmd_packages(const std::optional<std::string>& json_out) {
     if (!demo.ok()) return 1;
     auto m = demo.mount_demo_package();
     if (!m.ok()) return 1;
-    // The mounted backend IS the parsed package: enumerate entries.
-    auto found = demo.core.objects().lookup_handle(demo.process);
-    auto* proc = found.value().get()->as<xbox2pc::rt::ManagedProcess>();
-    const std::string sid = proc->meta("vfs_session");
-    auto s = demo.core.objects().lookup_id(std::strtoull(sid.c_str(), nullptr, 10));
-    auto* session = s.value().get()->as<xbox2pc::rt::VfsSession>();
-    // Walk mounts to find the package backend.
-    const auto mounts = session->namespace_().list_mounts();
-    const auto& info = [&]() -> const xbox2pc::rt::PackageInfo& {
-        for (const auto& mi : mounts) {
-            // Resolve the backend object by entry (backends registered as objects).
-        }
-        static xbox2pc::rt::PackageInfo empty{};
-        return empty;
-    }();
-    (void)info;
-    // Simpler: re-parse the built fixture for metadata display (identical
-    // to what is mounted).
+    // mount_demo_package only hands back a mount id, so re-parse the
+    // identical fixture for the metadata display.
     std::vector<xbox2pc::rt::XpkBuildEntry> entries = {
-        {"content", true},
+        {"content", true, {}},
         {"content/README.txt", false, "xbox2pc synthetic package fixture\n"},
         {"content/asset.png", false,
          std::string("\x89PNG\r\n\x1a\n", 8) + std::string(64, '\0')},
@@ -2572,7 +2561,7 @@ int cmd_cpu_state(const std::optional<std::string>& json_out) {
         j.set("rip", c.rip);
         j.set("rflags", c.rflags);
         j.set("rflags_hex", "0x" + [&] { char b[20]; std::snprintf(b, sizeof b, "%llx",
-                (unsigned long long)c.rflags); return std::string(b); }());
+                static_cast<unsigned long long>(c.rflags)); return std::string(b); }());
         j.set("mxcsr", static_cast<std::uint64_t>(c.mxcsr));
         j.set("fcw", static_cast<std::uint64_t>(c.fcw));
         j.set("xmm_count", 16u);
@@ -2590,10 +2579,11 @@ int cmd_cpu_state(const std::optional<std::string>& json_out) {
                              "r8","r9","r10","r11","r12","r13","r14","r15"};
     for (int i = 0; i < 16; ++i) {
         std::printf("  %-4s 0x%016llx\n", names[i],
-                    (unsigned long long)c.gprs[i]);
+                    static_cast<unsigned long long>(c.gprs[i]));
     }
     std::printf("  rip  0x%016llx\n  rflags 0x%llx (bit1 fixed, IF=1)\n",
-                (unsigned long long)c.rip, (unsigned long long)c.rflags);
+                static_cast<unsigned long long>(c.rip),
+                static_cast<unsigned long long>(c.rflags));
     std::printf("  mxcsr 0x%x (documented 0x1F80)  fcw 0x%x (documented 0x027F)\n",
                 c.mxcsr, c.fcw);
     std::printf("  xmm0-15: 128-bit storage (YMM/ZMM deliberately NOT modeled)\n");
@@ -2797,8 +2787,8 @@ int cmd_execute_test(const std::optional<std::string>& json_out) {
     if (res.ok()) {
         std::printf("  outcome: %s  instructions=%llu  RAX=%llu (expect 42)\n",
                     xbox2pc::rt::exec::outcome_to_name(res.value().outcome),
-                    (unsigned long long)res.value().instructions_executed,
-                    (unsigned long long)res.value().return_value);
+                    static_cast<unsigned long long>(res.value().instructions_executed),
+                    static_cast<unsigned long long>(res.value().return_value));
     }
     std::printf("  teardown: regions after terminate = %u\n", st.region_count);
     std::printf("  NOTE: subset interpreter execution — NOT a general emulator,\n");
@@ -2815,26 +2805,52 @@ int main(int argc, char** argv) {
     }
     const int m9_binary_result = xbox2pc::cli::run_m9_binary_cli(argc, argv);
     if (m9_binary_result >= 0) return m9_binary_result;
+    if (argc >= 2 && std::strcmp(argv[1], "census") == 0) {
+        return xbox2pc::census::cli(argc, argv);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "report") == 0) {
+        return xbox2pc::report::cli(argc, argv);
+    }
     if (argc >= 2 && std::strcmp(argv[1], "run") == 0) {
+        static const char* const kRunUsage =
+            "usage: xbox2pc run <file> [--backend deterministic|native]\n"
+            "                      [--unimplemented strict|trap|zero] [--json <out>]\n"
+            "  --unimplemented  what an import without an implementation does:\n"
+            "                   strict  the image does not load (default)\n"
+            "                   trap    a call stops the run with an unimplemented-api fault\n"
+            "                           that names the import\n"
+            "                   zero    a call returns 0 and the guest continues\n"
+            "  exit status: 0 returned, 1 load/prepare/execution failure, 2 usage or input error\n"
+            "  with --json, a report object is written on every outcome\n";
         if (argc < 3) {
-            std::fprintf(stderr, "usage: xbox2pc run <file> [--backend deterministic|native] [--json <out>]\n");
+            std::fprintf(stderr, "%s", kRunUsage);
             return 2;
+        }
+        if (std::strcmp(argv[2], "--help") == 0 || std::strcmp(argv[2], "-h") == 0) {
+            std::printf("%s", kRunUsage);
+            return 0;
         }
         std::optional<std::string> json_out;
         std::string backend = "deterministic";
-        int file_arg = 2;
+        auto unimplemented = xbox2pc::rt::api::UnimplementedPolicy::Strict;
         for (int i = 3; i < argc; ++i) {
             if (std::strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
                 backend = argv[++i];
+            } else if (std::strcmp(argv[i], "--unimplemented") == 0 && i + 1 < argc) {
+                if (!xbox2pc::rt::api::unimplemented_policy_from_name(argv[++i], unimplemented)) {
+                    std::fprintf(stderr,
+                                 "error: unknown --unimplemented mode '%s' (strict | trap | zero)\n",
+                                 argv[i]);
+                    return 2;
+                }
             } else if (std::strcmp(argv[i], "--json") == 0 && i + 1 < argc) {
                 json_out = argv[++i];
             } else {
-                std::fprintf(stderr, "error: invalid run arguments\n");
+                std::fprintf(stderr, "error: invalid run arguments\n%s", kRunUsage);
                 return 2;
             }
         }
-        (void)file_arg;
-        return xbox2pc::cli::run_file(argv[2], json_out, backend);
+        return xbox2pc::cli::run_file(argv[2], json_out, backend, unimplemented);
     }
     if (argc >= 2 && std::strcmp(argv[1], "interpreter-info") == 0) {
         std::optional<std::string> json_out;

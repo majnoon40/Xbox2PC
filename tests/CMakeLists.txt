@@ -304,3 +304,56 @@ else()
     target_compile_definitions(m11_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
 endif()
 add_test(NAME m11_run_test COMMAND m11_run_test)
+
+# M12 P0: `xbox2pc run` report on every outcome + the --unimplemented policy
+# (trap/zero end to end on the native backend; the deterministic engine's
+# handling is covered in execution_test.cpp).
+add_executable(m12_run_test m12_run_test.cpp)
+target_link_libraries(m12_run_test PRIVATE
+    xbox2pc_rt_run_cli
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(m12_run_test PRIVATE cxx_std_20)
+if(XBOX2PC_NATIVE_EXECUTION)
+    target_compile_definitions(m12_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=1)
+else()
+    target_compile_definitions(m12_run_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
+endif()
+add_test(NAME m12_run_test COMMAND m12_run_test)
+
+# M12 P0.4: the run path's VirtualQuery semantics through the marshalling
+# bridge (exact/short/out buffers; what-broke entry 12). Standalone so the
+# M12 additions keep their own file.
+add_executable(m12_bridge_test m12_bridge_test.cpp)
+target_link_libraries(m12_bridge_test PRIVATE
+    xbox2pc_core
+    xbox2pc_rt_execution
+    xbox2pc_rt_gdk
+    gtest)
+target_compile_features(m12_bridge_test PRIVATE cxx_std_20)
+add_test(NAME m12_bridge_test COMMAND m12_bridge_test)
+
+# M12 P0.3: census + JSON reader (PEs built here with PeBuilder).
+add_executable(census_test census_test.cpp)
+target_link_libraries(census_test PRIVATE
+    xbox2pc_rt_census
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(census_test PRIVATE cxx_std_20)
+add_test(NAME census_test COMMAND census_test)
+
+# M12 P0.4: crash records, watch lists, xbox2pc report (faulting runs on the
+# native backend under the flag).
+add_executable(telemetry_test telemetry_test.cpp)
+target_link_libraries(telemetry_test PRIVATE
+    xbox2pc_rt_run_cli
+    xbox2pc_rt_report
+    xbox2pc_pe_builder
+    gtest)
+target_compile_features(telemetry_test PRIVATE cxx_std_20)
+if(XBOX2PC_NATIVE_EXECUTION)
+    target_compile_definitions(telemetry_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=1)
+else()
+    target_compile_definitions(telemetry_test PRIVATE XBOX2PC_NATIVE_EXECUTION_ENABLED=0)
+endif()
+add_test(NAME telemetry_test COMMAND telemetry_test)

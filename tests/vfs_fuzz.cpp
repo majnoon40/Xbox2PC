@@ -85,8 +85,8 @@ TEST(VfsFuzzTest, PathNormalizationFuzz) {
 TEST(VfsFuzzTest, PackageMutationFuzz) {
     MiniRng rng(0x5eed'0002'abcd'0003ull);
     const auto base = xpk_build({
-        {"d", true},
-        {"d/sub", true},
+        {"d", true, {}},
+        {"d/sub", true, {}},
         {"d/sub/a.txt", false, "alpha"},
         {"d/sub/b.bin", false, std::string(64, 'B')},
         {"d/top.dat", false, std::string(16, '?')},

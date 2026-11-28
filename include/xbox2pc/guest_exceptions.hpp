@@ -32,6 +32,7 @@ enum class GuestFault : std::uint16_t {
     BudgetExceeded = 10,      // instruction/time budget exhausted
     Internal = 11,            // engine-internal error (bug class)
     DivideError = 12,         // DIV/IDIV by zero or quotient overflow
+    UnimplementedApi = 13,    // a call reached an import bound as unimplemented (M12)
 };
 const char* guest_fault_to_name(GuestFault f);
 std::optional<GuestFault> guest_fault_from_name(const std::string& n);

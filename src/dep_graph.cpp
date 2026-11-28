@@ -106,8 +106,10 @@ void DependencyGraph::build_from_report(const deps::DependencyReport& rep,
     }
 }
 
+// `diags` is part of the signature for symmetry with build_from_report;
+// adding second-level edges has nothing to report.
 void DependencyGraph::add_dependencies(const deps::DependencyReport& rep,
-                                        const pe::PeImage& img, diag::Diagnostics& diags) {
+                                        const pe::PeImage& img, diag::Diagnostics& /*diags*/) {
     // The image IS the dll named img.source_name (caller passes parsed deps).
     add_node(img.source_name, false);
     for (const auto& d : rep.dependencies) {

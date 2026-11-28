@@ -1,0 +1,19 @@
+{
+  "contract_exit": 42,
+  "exit_code": 99,
+  "fault": "",
+  "first_unimplemented": "",
+  "imports": {
+    "invalid": 0,
+    "resolved": 1,
+    "total": 1,
+    "unimplemented": 0,
+    "unresolved": 0,
+    "unsupported": 0
+  },
+  "outcome": "returned",
+  "source": "rung_f_cxxthrow.exe",
+  "stage": "teardown",
+  "status": "blocked",
+  "unimplemented_calls": 0
+}

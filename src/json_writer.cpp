@@ -57,6 +57,14 @@ const Json& Json::get(const std::string& key) const {
     throw JsonError("missing object key '" + key + "'");
 }
 
+const Json* Json::find(const std::string& key) const noexcept {
+    if (type_ != Type::Object) return nullptr;
+    for (const auto& kv : *obj_) {
+        if (kv.first == key) return &kv.second;
+    }
+    return nullptr;
+}
+
 const std::string& Json::as_string() const {
     if (type_ != Type::String) throw JsonError("as_string on non-string Json");
     return str_;
@@ -78,7 +86,8 @@ std::int64_t Json::as_int() const {
 std::string Json::escape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 8);
-    for (const unsigned char c : s) {
+    for (const char& raw : s) {
+        const auto c = static_cast<unsigned char>(raw);
         switch (c) {
             case '"': out += "\\\""; break;
             case '\\': out += "\\\\"; break;
@@ -103,8 +112,11 @@ std::string Json::escape(const std::string& s) {
 // ── serialization ────────────────────────────────────────────────────────
 
 void Json::serialize_to(std::string& out, int indent, int depth, bool compact) const {
-    const std::string pad = compact ? "" : std::string(static_cast<std::size_t>(indent) * depth, ' ');
-    const std::string pad_in = compact ? "" : std::string(static_cast<std::size_t>(indent) * (depth + 1), ' ');
+    // A negative width or depth would wrap to an enormous length; treat it as 0.
+    const std::size_t width = indent > 0 ? static_cast<std::size_t>(indent) : 0;
+    const std::size_t level = depth > 0 ? static_cast<std::size_t>(depth) : 0;
+    const std::string pad = compact ? "" : std::string(width * level, ' ');
+    const std::string pad_in = compact ? "" : std::string(width * (level + 1), ' ');
     const std::string nl = compact ? "" : "\n";
 
     switch (type_) {

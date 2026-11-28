@@ -272,6 +272,16 @@ Result<void> RtThread::resume() {
 bool RtThread::suspension_point() {
     const bool allowed = execution_control_->checkpoint(stop_flag_);
     if (!allowed) return false;
+    std::lock_guard lock(transition_lock_);
+    // The checkpoint result can be stale: a suspend() may have requested the
+    // gate between the checkpoint and this lock, after the thread observed
+    // "not suspended" but before it looks at its state. Overwriting the
+    // Suspended state here used to leave the thread parked with a Running
+    // state, and resume_process() skips threads that are not Suspended, so
+    // nothing ever resumed it (CI, Debug gcc: ProcessResumePreserves-
+    // PreexistingManualSuspension). Leave the state alone when a suspension
+    // is pending; the next checkpoint parks, and resume() finds Suspended.
+    if (execution_control_->is_suspend_requested()) return true;
     const auto current = state_.load(std::memory_order_acquire);
     if (current == ThreadState::Suspended || current == ThreadState::Ready) {
         state_.store(ThreadState::Running, std::memory_order_release);

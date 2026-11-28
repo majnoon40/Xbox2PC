@@ -252,7 +252,7 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
         return static_cast<std::uint8_t>(reg3 | static_cast<std::uint8_t>(rex_r << 3));
     };
     auto rm_field = [&]() {
-        return static_cast<std::uint8_t>(rm3 | static_cast<std::uint8_t>(rex_b << 3));
+        return static_cast<std::uint8_t>(rm3 | static_cast<std::uint8_t>(static_cast<std::uint32_t>(rex_b) << 3));
     };
     auto read_modrm = [&]() -> bool {
         if (!need(1)) return false;
@@ -295,7 +295,7 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
             if (base3 == 5 && mod == 0) {
                 disp32 = true;   // [disp32 + index*scale]
             } else {
-                o.base = static_cast<std::uint8_t>(base3 | static_cast<std::uint8_t>(rex_b << 3));
+                o.base = static_cast<std::uint8_t>(base3 | static_cast<std::uint8_t>(static_cast<std::uint32_t>(rex_b) << 3));
             }
         }
         if (mod == 1) {
@@ -414,12 +414,12 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
             case 0x50: case 0x51: case 0x52: case 0x53: case 0x54:
             case 0x55: case 0x56: case 0x57:   // PUSH r64
                 d.mnem = Mnemonic::Push;
-                push(reg_op(64, static_cast<std::uint8_t>((op & 7u) | (rex_b << 3))));
+                push(reg_op(64, static_cast<std::uint8_t>((op & 7u) | (static_cast<std::uint32_t>(rex_b) << 3))));
                 break;
             case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C:
             case 0x5D: case 0x5E: case 0x5F:   // POP r64
                 d.mnem = Mnemonic::Pop;
-                push(reg_op(64, static_cast<std::uint8_t>((op & 7u) | (rex_b << 3))));
+                push(reg_op(64, static_cast<std::uint8_t>((op & 7u) | (static_cast<std::uint32_t>(rex_b) << 3))));
                 break;
             case 0x68:
                 d.mnem = Mnemonic::Push;
@@ -511,7 +511,7 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
                 }
                 d.mnem = Mnemonic::Xchg;
                 push(reg_op(os, 0));
-                push(reg_op(os, static_cast<std::uint8_t>(lo | (rex_b << 3))));
+                push(reg_op(os, static_cast<std::uint8_t>(lo | (static_cast<std::uint32_t>(rex_b) << 3))));
                 break;
             case 0x98:
                 d.mnem = Mnemonic::Cbw;
@@ -574,13 +574,13 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
             case 0xB0: case 0xB1: case 0xB2: case 0xB3:
             case 0xB4: case 0xB5: case 0xB6: case 0xB7:   // MOV r8, imm8
                 d.mnem = Mnemonic::Mov;
-                push(reg_op(8, static_cast<std::uint8_t>(lo | (rex_b << 3))));
+                push(reg_op(8, static_cast<std::uint8_t>(lo | (static_cast<std::uint32_t>(rex_b) << 3))));
                 if (!imm_op(8, OpKind::Imm)) return finish_bad();
                 break;
             case 0xB8: case 0xB9: case 0xBA: case 0xBB:
             case 0xBC: case 0xBD: case 0xBE: case 0xBF:   // MOV eAX..r15, imm
                 d.mnem = Mnemonic::Mov;
-                push(reg_op(os, static_cast<std::uint8_t>((op - 0xB8u) | (rex_b << 3))));
+                push(reg_op(os, static_cast<std::uint8_t>((op - 0xB8u) | (static_cast<std::uint32_t>(rex_b) << 3))));
                 if (!imm_op(os == 64u ? 64u : imm_bits_for(os), OpKind::Imm)) return finish_bad();
                 break;
             case 0xC0: case 0xC1: case 0xD0: case 0xD1:
@@ -949,7 +949,7 @@ DecodeResult decode(const std::uint8_t* data, std::size_t len, std::uint64_t rip
                     return finish_bad();
                 }
                 d.mnem = Mnemonic::Bswap;
-                push(reg_op(os, static_cast<std::uint8_t>((op - 0xC8u) | (rex_b << 3))));
+                push(reg_op(os, static_cast<std::uint8_t>((op - 0xC8u) | (static_cast<std::uint32_t>(rex_b) << 3))));
                 break;
             default:
                 // 0xD0..0xFE: SSE / SSE2 / AVX legacy encodings.

@@ -127,6 +127,13 @@ struct ExecutionResult {
     cpu::CpuSnapshot cpu;
     // Registered-API calls marshalled during this run.
     std::uint32_t api_calls = 0;
+    // M12 P0: calls that reached an import bound as unimplemented, and the
+    // first one reached ("library!export"). Zero and empty when none did.
+    std::uint32_t unimplemented_calls = 0;
+    std::string first_unimplemented;
+    // M12 P0.4 telemetry: the last 64 imported-API identities, in call order
+    // (telemetry.hpp). Empty when no import was called.
+    std::vector<std::string> api_trace;
 };
 
 // ── the engine interface ──────────────────────────────────────────────────
@@ -140,7 +147,15 @@ struct ApiBindingInfo {
     std::string export_name;
     bool by_ordinal = false;
     std::uint32_t ordinal = 0;
+    // M12 P0: bound by --unimplemented=trap|zero (see api_compat.hpp), not by
+    // a registered implementation. Trap faults a call with
+    // GuestFault::UnimplementedApi; Zero answers 0 and the guest continues.
+    bool unimplemented = false;
+    bool unimplemented_returns_zero = false;
 };
+
+// "library!export" (or "library!#ordinal") for reports and fault details.
+std::string binding_identity(const ApiBindingInfo& binding);
 
 // Alias the M3-managed-thread gate for execution requests and backends.
 using ExecutionControl = CooperativeExecutionGate;
@@ -175,6 +190,10 @@ struct ExecutionRequest {
     // Guest VA of the mapped TEB for the executing thread (0 = none);
     // the native child installs it as GS base.
     std::uint64_t guest_teb_va = 0;
+    // M12 P0.4 telemetry (XBOX2PC_WATCH): RVAs, relative to the image base
+    // bound in `unwind`, of guest u32s to log when their value changes.
+    // Sampled at imported-API call boundaries by both backends.
+    std::vector<std::uint32_t> watch_rvas;
 
     // ── M11 Phase 6: exception dispatch context ─────────────────────────
     // When an imported API raises a guest exception (RaiseException), the
