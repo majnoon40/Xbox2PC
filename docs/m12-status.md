@@ -63,8 +63,8 @@ Workflow runs exist for every pushed commit of the branch. Read back:
 | `f256b69` (race, ExitProcess, process start) | 22 | all green |
 | `a45758b` (rung fixtures) | 24 | all green, including the new `M12 rung fixtures B-G` job |
 | `852a4db` (census), `2b20414` (telemetry), `f7eb166` (clang-clean), `0f52eb9`, `b29d153` | 24 | all green |
-| (this page's final update) | 24 | all green |
-| (the VirtualQuery fix and its regressions, then this page's update) | 24 | read back after the push |
+| `c9a9b6e` (final docs update) | 24 | all green |
+| `4299e0d` (VirtualQuery fix), then this page's update | 24 | read back after the push |
 
 ## Verified locally
 
@@ -141,7 +141,8 @@ Pushed, in pull request #18:
 | `0f52eb9` | M12.P0: README honesty table, status and what-broke after the third session |
 | `b29d153` | M12.P0: correct the commit count on this page |
 | `c9a9b6e` | M12.P0: record the final CI outcome |
-| (this commit) | M12.P0: VirtualQuery through the native run path (pointer args, TLS chain, out buffers across the ring) |
+| `4299e0d` | M12.P0: VirtualQuery through the native run path (pointer args, TLS chain, out buffers across the ring) |
+| (this commit) | M12.P0: honest numbers for the final tree in the README table; real hashes in this page |
 
 Nineteen commits (including this one); the plan asks for under forty per
 pull request.

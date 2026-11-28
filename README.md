@@ -46,7 +46,7 @@ and [docs/m12-what-broke.md](docs/m12-what-broke.md).
 | Crash telemetry | done, bounded | `crashes.log`, `XBOX2PC_WATCH`, `XBOX2PC_CRASH_SAVE`, `XBOX2PC_STACKS`; sampled at API call boundaries, no frame walk yet |
 | Determinism | done for run reports | 100 consecutive native trap runs give byte-identical reports; rung goldens |
 | Sanitizers with the native flag OFF and ON | green on GitHub | ASan+UBSan and TSan, both positions |
-| Warning-clean | done | 0 warnings and 32 of 32 tests with gcc 14.2.0 (five configurations) and with clang 18.1.8 locally |
+| Warning-clean | done | 0 warnings and 33 of 33 tests with gcc 14.2.0 (six configurations) and with clang 18.1.8 locally |
 | Graphics, shaders, worker and threads (P1, P3, P4, P5) | not started | no window, no triangle, no GPU run |
 
 ## Requirements
