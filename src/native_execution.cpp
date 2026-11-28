@@ -448,7 +448,12 @@ ExecutionResult NativeExecutionBackend::run(
             // ExitProcess rides the ordinary ApiCall wire; the parent
             // recognizes it by identity and answers with the
             // terminate-after-reply contract instead of dispatching.
-            if (binding.library == "kernel32" &&
+            // A real import table spells the module "kernel32.dll" (byte-exact,
+            // any case); compare the registry's normalized module name, not
+            // the bytes. Until M12 P0 the bytes were compared, ExitProcess
+            // from a compiler-built image was dispatched as an ordinary call,
+            // and the child resumed into the guest's `for (;;) {}`.
+            if (registry::normalize_module_name(binding.library) == "kernel32" &&
                 binding.export_name == "ExitProcess") {
                 reply.status = static_cast<std::uint32_t>(native::ReplyStatus::Ok);
                 reply.exit_code = static_cast<std::uint32_t>(request.args[0]);

@@ -99,6 +99,27 @@ std::vector<std::uint8_t> MakeStubCallImage() {
     return PeBuilder(s).build();
 }
 
+// entry: mov ecx,<code>; call [rip+disp] -> ExitProcess; ret (never reached).
+// `dll` is spelled the way a real import table spells it.
+std::vector<std::uint8_t> MakeExitProcessImage(const char* dll, std::uint8_t exit_code) {
+    PeBuildSpec s;
+    s.imports = {{dll, {{"ExitProcess", 0}}}};
+    s.reloc_blocks = {{0x2000, {{10, 0x2000, 0}}}};
+    std::vector<std::uint8_t> probe(12, 0xC3);   // full-layout probe
+    s.text_payloads.push_back({0x1000, probe});
+    const std::uint32_t iat = FirstIatRva(PeBuilder(s).build());
+    const std::int64_t disp = static_cast<std::int64_t>(iat) -
+                              static_cast<std::int64_t>(0x1000 + 5 + 6);
+    std::vector<std::uint8_t> code{0xB9, exit_code, 0x00, 0x00, 0x00,   // mov ecx,<code>
+                                   0xFF, 0x15};                          // call [rip+disp32]
+    for (int b = 0; b < 4; ++b)
+        code.push_back(static_cast<std::uint8_t>((disp >> (8 * b)) & 0xFF));
+    code.push_back(0xC3);
+    s.text_payloads.clear();
+    s.text_payloads.push_back({0x1000, code});
+    return PeBuilder(s).build();
+}
+
 std::filesystem::path Scratch(const char* tag) {
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto dir = std::filesystem::temp_directory_path() /
@@ -251,6 +272,25 @@ TEST(M12NativeRun, ZeroReturnsZeroAndTheGuestContinues) {
     EXPECT_TRUE(r.has("\"api_calls\": 1")) << r.json;
     EXPECT_TRUE(r.has("\"unimplemented_calls\": 1")) << r.json;
     std::filesystem::remove_all(dir);
+}
+
+// A real import table spells the module "kernel32.dll" (any case); the
+// hand-built images above spell it "kernel32". Until M12 P0 the native
+// parent compared the bytes, missed ExitProcess, answered it as an ordinary
+// call, and the child resumed into the guest's `for (;;) {}` until the
+// watchdog fired (docs/m12-what-broke.md, entry 10).
+TEST(M12NativeRun, ExitProcessIsRecognizedFromARealDllName) {
+    for (const char* dll : {"kernel32.dll", "KERNEL32.DLL"}) {
+        const auto dir = Scratch("native-exit-dll");
+        const auto exe = WriteBytes(dir, "exit-dll.exe", MakeExitProcessImage(dll, 43));
+        const auto r = RunFixture(exe, dir, "exit-dll", "native", Policy::Strict);
+        EXPECT_EQ(r.rc, 0) << dll << ": " << r.json;
+        EXPECT_TRUE(r.has("\"outcome\": \"returned\"")) << dll << ": " << r.json;
+        EXPECT_TRUE(r.has("\"exit_code\": 43")) << dll << ": " << r.json;
+        EXPECT_TRUE(r.has("\"return_value\": 43")) << dll << ": " << r.json;
+        EXPECT_TRUE(r.has("\"api_calls\": 1")) << dll << ": " << r.json;
+        std::filesystem::remove_all(dir);
+    }
 }
 
 TEST(M12NativeRun, StrictStillRefusesToLoadOnTheNativeBackend) {

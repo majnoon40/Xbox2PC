@@ -286,6 +286,29 @@ int run_file(const std::string& file, const std::optional<std::string>& json_out
         std::fprintf(stderr, "error: %s\n", report.error.c_str());
         return finish(1);
     }
+    // The Win32 process and memory APIs (VirtualAlloc, CreateEvent, ...) act
+    // only on a process in the Running state. The M11 run path created the
+    // process and loaded the image without initializing or starting it, so
+    // every such call failed and the compiler-built M11 sample took its
+    // "VirtualAlloc returned NULL" branch (docs/m12-what-broke.md, entry 12).
+    // Do what the execution tests do: initialize with the module, then start.
+    rt::ModuleDescriptor module;
+    module.module_name = base;
+    module.is_valid_pe = true;
+    auto initialized = w.pm.initialize_process(ph.value(), module, rt::RuntimeConfig{});
+    if (!initialized.ok()) {
+        report.outcome = "error";
+        report.error = "process initialization failed: " + initialized.error_string();
+        std::fprintf(stderr, "error: %s\n", report.error.c_str());
+        return finish(1);
+    }
+    auto started = w.pm.start_process(ph.value());
+    if (!started.ok()) {
+        report.outcome = "error";
+        report.error = "process start failed: " + started.error_string();
+        std::fprintf(stderr, "error: %s\n", report.error.c_str());
+        return finish(1);
+    }
     auto pr = w.core.objects().lookup_handle(ph.value());
     auto* proc = pr.value().get()->as<ManagedProcess>();
 
