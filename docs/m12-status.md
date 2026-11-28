@@ -10,17 +10,22 @@ and the result was read back; stubs and partials are labeled as such.
 
 ## Where this branch stands
 
-**P0's stop point has arrived.** Four sessions went into it. The plan's
-week-3 checkpoint — rungs B to G merged with tests, plus the `census`
-and `report` commands — is met on this branch, and the fourth session
-finished the run path: the VirtualQuery layer of entry 12 is fixed end
-to end (entries 15 and 16 with it), so the compiler-built M11 sample
-runs all thirteen of its imports and returns 42, asserted in CI. What
-the checkpoint does not say, and what is honest to add, is that every
-rung is still **blocked**, not passing: the runtime lacks the APIs
-they call. P0's remaining open item is the deterministic `call [iat]`
-limit of entry 8, deliberately left documented for the P1 benchmark
-and ADR decision.
+**P0's stop point arrived (tag `m12-p0` on `8cf14b3`), and P1 item 1 is
+done.** The plan's week-3 checkpoint — rungs B to G merged with tests,
+plus the `census` and `report` commands — is met on this branch, and the
+run path was finished in P0: the VirtualQuery layer of entry 12 (entries
+15 and 16 with it), so the compiler-built M11 sample runs all thirteen
+of its imports and returns 42, asserted in CI. What the checkpoint does
+not say, and what is honest to add, is that every rung is still
+**blocked**, not passing: the runtime lacks the APIs they call. P1 item
+1 (ADR-0009) landed after it: the managed address space is one memfd
+mapped MAP_SHARED, the native child identity-maps it at the guest VAs
+(guest VA == child host VA), and the three workaround layers that the
+load bias forced — the pointer-arg translation (entry 12), the TLS
+chain adapt/restore (entry 15), the out-buffer reply payload with its
+200-byte cap (entry 16) — are deleted, tests kept. The deterministic
+`call [iat]` limit of entry 8 stays open, deliberately left for the P1
+benchmark and ADR-0002/0003.
 
 ## Status per pillar
 
@@ -40,7 +45,8 @@ and ADR decision.
 | P0.3 `xbox2pc census` | done | first-reach ranking from run reports; weekly triage |
 | Byte-identical determinism test | done for run reports | 100 native trap runs identical; rung goldens are deterministic traces |
 | README honesty table | done | the M12 table in README.md |
-| P1 worker, ring slots, shim tier, async waits, MSVC exceptions, loader, seccomp | not started | |
+| P1.1 guest memory: ADR-0009, memfd MAP_SHARED, child VA identity | done | prototype measured under plain/ASan/TSan; the three bias-era workaround layers deleted with tests kept |
+| P1 worker, ring slots, shim tier, async waits, MSVC exceptions, loader, seccomp | not started | next: ADR-0002/0003 with the ipc_bench numbers |
 | ADR-0002 … ADR-0007 | not started | |
 | P2 descriptor factory, waves 1–5 | not started | |
 | P3 graphics providers | not started | no window, no triangle, no GPU run |
@@ -65,6 +71,9 @@ Workflow runs exist for every push head of the branch. Read back:
 | `852a4db` (census), `2b20414` (telemetry), `f7eb166` (clang-clean), `0f52eb9`, `b29d153` | 24 | all green |
 | `c9a9b6e` (final docs update) | 24 | all green |
 | `4299e0d` → `ba86689` (VirtualQuery fix + honest numbers; pushed together, so the workflow ran on the head `ba86689` only) | 24 (push run) + 24 (pull-request run) | all green; the tightened `m11-pe-fixtures` step ran and printed `returned exit 42 \| 13 API calls` |
+| `8cf14b3` (m12-p0 tag point) | 24 | all green |
+| `005f579` (ADR-0009 + prototype; no runtime code) | 24 | all green |
+| `ccda389` (the ADR-0009 migration) | 24 (push) + 24 (pull-request) | all green; the `m11-pe-fixtures` job printed `returned exit 42 \| 13 API calls` through the identity mapping |
 
 ## Verified locally
 
@@ -84,12 +93,21 @@ final tree, after the last code change.
 
 The M11 freestanding sample returns 42 through the `xbox2pc` binary of
 every native-flag-ON build above (gcc and clang), and five consecutive
-native runs were checked individually on the final tree (all 42). The clang build needed the conda
+native runs were checked individually on the final tree (all 42,
+byte-identical reports). The clang build needed the conda
 toolchain pointed at the host (system sysroot, GNU linker, GCC builtin
 headers); with those flags it is warning-clean, and it found two
 long-standing unused private fields (`api_reg_`, `space_`) that gcc's
 `-Wunused-private-field` does not have; both now carry `[[maybe_unused]]`
 and the gcc builds were re-run green on the final tree.
+
+After the ADR-0009 migration the same matrix was re-run on the final
+tree: six gcc configurations and clang, 33 of 33 tests, 0 warnings, 0
+sanitizer reports each; the sample returns 42 (13 API calls) through
+both the gcc- and clang-built binaries; five consecutive native runs
+byte-identical. The identity mapping is exercised by every native test
+under all four sanitizer legs (the run-path guest range is proven
+mappable under plain, ASan and TSan by `scripts/memfd_bench.c`).
 
 ## Not verified
 
@@ -97,10 +115,16 @@ and the gcc builds were re-run green on the final tree.
 - **Rungs pass nowhere**: all six are blocked at a named import.
 - **The deterministic backend cannot follow `call [iat]`** (entry 8): every
   compiler-built program runs on the native backend only.
-- **The remaining TEB pointer fields (self, stack bounds, PEB) stay in
-  guest form** (entry 15, remaining); nothing reads them through GS yet.
-- **Out payloads above the ring's 200-byte wire cap are not carried to
-  the child** (entry 16); no implementation produces one today.
+- **Post-fork protection changes are parent-window-only** (ADR-0009,
+  documented limit): a ring-served `VirtualProtect` flips the parent's
+  window, not the child's identity mapping — the same semantics the
+  inherited window had before the migration. Protection servicing in
+  the child belongs to the worker model (ADR-0002/0003).
+- **A reloc-less image at the default PE base still cannot load**
+  (entry 13, revisited under ADR-0009): ASan occupies everything above
+  2 GiB, so no sanitizer-green guest space can contain
+  `0x140000000`; the measured identity ceiling from the run-path base
+  is `0x7FFF7000` (~1.46 GiB). The rung fixtures' `rung_reloc.c` stands.
 
 ## What remains before the P0 stop point, in order
 
@@ -143,7 +167,10 @@ Pushed, in pull request #18:
 | `c9a9b6e` | M12.P0: record the final CI outcome |
 | `4299e0d` | M12.P0: VirtualQuery through the native run path (pointer args, TLS chain, out buffers across the ring) |
 | `ba86689` | M12.P0: honest numbers for the final tree in the README table; real hashes in this page |
-| (this commit) | M12.P0: the CI table records how the last two commits were actually verified |
+| `8cf14b3` | M12.P0: the CI table records how the last two commits were actually verified (tag `m12-p0`) |
+| `005f579` | M12.P1: guest-memory ADR-0009 and the memfd identity prototype |
+| `ccda389` | M12.P1: guest memory on one memfd, identity-mapped in the child (ADR-0009) |
+| (this commit) | M12.P1: the P1 item-1 state on the pages that report it (tag `m12-p1-memory`) |
 
-Twenty commits (including this one); the plan asks for under forty per
-pull request.
+Twenty-three commits (including this one); the plan asks for under forty
+per pull request.

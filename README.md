@@ -47,7 +47,8 @@ and [docs/m12-what-broke.md](docs/m12-what-broke.md).
 | Determinism | done for run reports | 100 consecutive native trap runs give byte-identical reports; rung goldens |
 | Sanitizers with the native flag OFF and ON | green on GitHub | ASan+UBSan and TSan, both positions |
 | Warning-clean | done | 0 warnings and 33 of 33 tests with gcc 14.2.0 (six configurations) and with clang 18.1.8 locally |
-| Graphics, shaders, worker and threads (P1, P3, P4, P5) | not started | no window, no triangle, no GPU run |
+| Guest memory: ADR-0009 (one memfd, MAP_SHARED, child VA identity) | done | the native child maps the space's memfd at the guest VAs (`MAP_FIXED_NOREPLACE`), so guest VA == child host VA; the load-bias translation, TLS adapt/restore and out-buffer wire payload are deleted; measured under plain, ASan and TSan |
+| Graphics, shaders, worker and threads (P1.2+, P3, P4, P5) | not started | no window, no triangle, no GPU run |
 
 ## Requirements
 

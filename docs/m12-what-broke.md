@@ -292,6 +292,12 @@ PartitionId and the tail padding), dwLength 47 answers 0 and writes
 nothing, and an out buffer that is not writable guest memory is
 rejected before dispatch.
 
+**Removed by.** ADR-0009 (`ccda389`): the child identity-maps the
+space, so a pointer the guest computed is a guest VA by construction and
+the load-bias translation above is deleted from the ring serve loop.
+Its regression test is now the identity proof: the child sends guest VAs
+or the bridge rejects the call.
+
 ## 13. A position-independent image without relocations cannot be placed (fixture side fixed; runtime limit open)
 
 **Symptom.** Every rung fixture failed to load with `invalid-state:
@@ -311,6 +317,18 @@ self-referential pointer that forces a DIR64 relocation.
 **Runtime limit (open).** A reloc-less image still cannot be loaded. Real
 Windows honors the preferred base; the managed space would have to contain
 it, or the loader would need to say so earlier (it does say so precisely).
+
+**Revisited (ADR-0009).** The identity mapping does not close this. A
+forked child under ASan cannot map above 2 GiB at all — the shadow gap
+occupies it (measured in
+`docs/adr-0009-guest-memory-memfd-identity.md`) — so no sanitizer-green
+guest space can contain the default PE base `0x140000000`. The ceiling
+is now measured instead of vague: from the run-path base `0x20000000`
+the largest identity range that is green under plain, ASan and TSan
+builds ends at `0x7FFF7000` (~1.46 GiB); TSan and plain builds allow
+more, and the design targets the intersection. The fixture-side fix
+stands (link reloc-less images inside the guest range, which
+`rung_reloc.c` effectively does). Still open.
 
 ## 14. Under trap and zero the module gate still rejected unknown modules (fixed)
 
@@ -355,6 +373,13 @@ asserted by the tightened `m11-pe-fixtures` step in CI
 are still written in guest form; nothing reads them through GS yet.
 When one does, translate it the same way and regress it with a fixture.
 
+**Removed by.** ADR-0009 (`ccda389`): with the child identity-mapping
+the space, guest form == child host form for every byte of the space,
+so the TEB and its TLS chain stay in guest form for both backends and
+the adapt/restore layer above is deleted. The "Remaining" note stands
+in a new form: the other TEB pointer fields stay in guest form because
+that is now the correct form; nothing needs translating.
+
 ## 16. Out-buffer bytes never reached the child: the ring crossed the fork, guest memory did not (fixed)
 
 **Symptom.** The native regression fixture of entry 12 exited 56:
@@ -386,3 +411,10 @@ wire cap are not carried; none exists today. Regression:
 Protect, and RegionSize from the guest stack at their documented x64
 offsets, which is impossible without this fix (verified: with entry
 12's rebase present and this fix absent the fixture fails at 56).
+
+**Removed by.** ADR-0009 (`ccda389`): the space is now one memfd mapped
+MAP_SHARED in parent and child, so the bridge's out writes are visible
+to the child directly; the reply-slot payload and its 200-byte wire cap
+are deleted (the wire reply is status, exit code, RAX and aux words).
+The regression test above is unchanged and still proves delivery — now
+through the shared object.
